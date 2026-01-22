@@ -1,0 +1,123 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # Every day at 6am UTC (1am EST)
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/getsentry/sentry-mcp.git || true
+          git fetch upstream main
+
+      - name: Check for upstream changes
+        id: check
+        run: |
+          UPSTREAM_COMMITS=$(git rev-list HEAD..upstream/main --count)
+          echo "upstream_commits=$UPSTREAM_COMMITS" >> $GITHUB_OUTPUT
+          if [ "$UPSTREAM_COMMITS" -gt 0 ]; then
+            echo "Found $UPSTREAM_COMMITS new commits from upstream"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "No new commits from upstream"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Try to merge upstream
+        id: merge
+        if: steps.check.outputs.has_changes == 'true'
+        continue-on-error: true
+        run: |
+          # Create a sync branch
+          git checkout -b sync-upstream-$(date +%Y%m%d)
+          
+          # Try to merge upstream
+          if git merge upstream/main --no-edit; then
+            echo "merge_success=true" >> $GITHUB_OUTPUT
+            echo "Merge successful!"
+            
+            # Push the branch
+            git push -u origin HEAD
+            
+            # Create PR using gh cli
+            gh pr create \
+              --title "chore: sync with upstream sentry-mcp" \
+              --body "$(cat <<'EOF'
+          ## Automated Upstream Sync
+
+          This PR merges the latest changes from [getsentry/sentry-mcp](https://github.com/getsentry/sentry-mcp).
+
+          ### Changes from upstream
+          $(git log HEAD...origin/main --oneline --no-merges | head -20)
+
+          ---
+          *This PR was automatically created by the sync-upstream workflow.*
+          EOF
+          )" \
+              --base main
+          else
+            echo "merge_success=false" >> $GITHUB_OUTPUT
+            echo "Merge failed - conflicts detected"
+            git merge --abort || true
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Use OpenCode to resolve conflicts
+        if: steps.check.outputs.has_changes == 'true' && steps.merge.outputs.merge_success == 'false'
+        uses: anomalyco/opencode/github@latest
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        with:
+          model: opencode/opus-4
+          prompt: |
+            There are merge conflicts when trying to sync this fork with upstream getsentry/sentry-mcp.
+
+            Please help resolve the merge conflicts:
+
+            1. First, run these commands to set up the merge:
+               ```
+               git remote add upstream https://github.com/getsentry/sentry-mcp.git || true
+               git fetch upstream main
+               git checkout -b sync-upstream-$(date +%Y%m%d)-resolved
+               git merge upstream/main || true
+               ```
+
+            2. Review the conflicts. Key context for this fork:
+               - This is the Fields Education fork deployed to Cloudflare
+               - `packages/mcp-cloudflare-fields/` is OUR package (symlinks to mcp-cloudflare source)
+               - `.github/workflows/deploy-fields.yml` is OUR workflow
+               - `.github/workflows/deploy.yml.disabled` and `release.yml.disabled` should stay disabled
+               - We want to keep upstream source changes but preserve our deployment configs
+
+            3. Resolve conflicts by:
+               - Accepting upstream changes for source code in `packages/mcp-cloudflare/src/`
+               - Preserving our `.disabled` workflow files
+               - Keeping our `packages/mcp-cloudflare-fields/` configs unchanged
+               - For `pnpm-lock.yaml`, accept upstream and run `pnpm install` to regenerate
+
+            4. After resolving, commit and push the branch, then create a PR.
+
+            5. If the `index.html` in `packages/mcp-cloudflare/` changed, copy the new version to 
+               `packages/mcp-cloudflare-fields/index.html` (it can't be symlinked due to Vite build issues).
