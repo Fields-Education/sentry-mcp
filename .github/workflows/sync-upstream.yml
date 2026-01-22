@@ -15,7 +15,7 @@ jobs:
       issues: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: true
@@ -50,12 +50,30 @@ jobs:
         continue-on-error: true
         run: |
           # Create a sync branch
-          git checkout -b sync-upstream-$(date +%Y%m%d)
+          BRANCH_NAME="sync-upstream-$(date +%Y%m%d)"
+          git checkout -b "$BRANCH_NAME"
           
           # Try to merge upstream
           if git merge upstream/main --no-edit; then
             echo "merge_success=true" >> $GITHUB_OUTPUT
             echo "Merge successful!"
+            
+            # Ensure disabled workflows stay disabled
+            if [ -f ".github/workflows/deploy.yml" ]; then
+              mv .github/workflows/deploy.yml .github/workflows/deploy.yml.disabled
+              git add .github/workflows/deploy.yml.disabled
+              git rm .github/workflows/deploy.yml 2>/dev/null || true
+            fi
+            if [ -f ".github/workflows/release.yml" ]; then
+              mv .github/workflows/release.yml .github/workflows/release.yml.disabled
+              git add .github/workflows/release.yml.disabled
+              git rm .github/workflows/release.yml 2>/dev/null || true
+            fi
+            
+            # Check if we need to commit the disabled workflow changes
+            if ! git diff --cached --quiet; then
+              git commit --amend --no-edit
+            fi
             
             # Push the branch
             git push -u origin HEAD
@@ -70,6 +88,11 @@ jobs:
 
           ### Changes from upstream
           $(git log HEAD...origin/main --oneline --no-merges | head -20)
+
+          ### Fork-specific notes
+          - Sentry deployment workflows remain disabled (`.disabled` suffix)
+          - Fields deployment workflow (`deploy-fields.yml`) unchanged
+          - Fields Cloudflare package (`mcp-cloudflare-fields/`) unchanged
 
           ---
           *This PR was automatically created by the sync-upstream workflow.*
@@ -97,7 +120,7 @@ jobs:
             Please help resolve the merge conflicts:
 
             1. First, run these commands to set up the merge:
-               ```
+               ```bash
                git remote add upstream https://github.com/getsentry/sentry-mcp.git || true
                git fetch upstream main
                git checkout -b sync-upstream-$(date +%Y%m%d)-resolved
@@ -107,17 +130,27 @@ jobs:
             2. Review the conflicts. Key context for this fork:
                - This is the Fields Education fork deployed to Cloudflare
                - `packages/mcp-cloudflare-fields/` is OUR package (symlinks to mcp-cloudflare source)
-               - `.github/workflows/deploy-fields.yml` is OUR workflow
-               - `.github/workflows/deploy.yml.disabled` and `release.yml.disabled` should stay disabled
-               - We want to keep upstream source changes but preserve our deployment configs
+               - `.github/workflows/deploy-fields.yml` is OUR workflow - DO NOT modify
+               - `.github/workflows/sync-upstream.yml` is OUR workflow - DO NOT modify
 
-            3. Resolve conflicts by:
+            3. IMPORTANT - Keep these Sentry workflows DISABLED:
+               - If `deploy.yml` appears, rename it to `deploy.yml.disabled`
+               - If `release.yml` appears, rename it to `release.yml.disabled`
+               - Our `.disabled` suffix prevents them from running
+
+            4. Resolve conflicts by:
                - Accepting upstream changes for source code in `packages/mcp-cloudflare/src/`
-               - Preserving our `.disabled` workflow files
+               - Accepting upstream changes for `packages/mcp-core/`
+               - Preserving our `.disabled` workflow files (rename any restored ones)
                - Keeping our `packages/mcp-cloudflare-fields/` configs unchanged
-               - For `pnpm-lock.yaml`, accept upstream and run `pnpm install` to regenerate
+               - For `pnpm-lock.yaml`, delete it and run `pnpm install` to regenerate
 
-            4. After resolving, commit and push the branch, then create a PR.
+            5. If `index.html` in `packages/mcp-cloudflare/` changed:
+               - Copy the updated version to `packages/mcp-cloudflare-fields/index.html`
+               - (It can't be symlinked due to Vite build path resolution issues)
 
-            5. If the `index.html` in `packages/mcp-cloudflare/` changed, copy the new version to 
-               `packages/mcp-cloudflare-fields/index.html` (it can't be symlinked due to Vite build issues).
+            6. After resolving all conflicts:
+               - Stage all changes: `git add -A`
+               - Commit: `git commit -m "chore: sync with upstream sentry-mcp (resolved conflicts)"`
+               - Push: `git push -u origin HEAD`
+               - Create a PR to main branch
