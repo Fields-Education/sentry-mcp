@@ -90,7 +90,7 @@ jobs:
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         with:
-          model: opencode/opus-4
+          model: opencode/opus-4.5
           prompt: |
             There are merge conflicts when trying to sync this fork with upstream getsentry/sentry-mcp.
 
