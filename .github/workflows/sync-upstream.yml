@@ -1,5 +1,9 @@
 name: Sync Upstream
 
+# NOTE: GitHub disables scheduled workflows on forks by default.
+# If this workflow stops running on schedule, go to the Actions tab
+# and manually enable it, or make any commit to this file.
+
 on:
   schedule:
     - cron: "0 6 * * *" # Every day at 6am UTC (1am EST)
