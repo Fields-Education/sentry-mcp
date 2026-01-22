@@ -1,0 +1,75 @@
+/**
+ * Canary configuration for Fields fork of Sentry MCP
+ * Uses separate resources for complete isolation from production
+ *
+ * Required secrets (same as production - set via `wrangler secret put <NAME> --config wrangler.canary.jsonc`):
+ *   - SENTRY_CLIENT_ID, SENTRY_CLIENT_SECRET, COOKIE_SECRET, OPENAI_API_KEY, SENTRY_DSN, SENTRY_HOST
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sentry-mcp-fields-canary",
+  "main": "./src/server/index.ts",
+  "compatibility_date": "2025-03-21",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "nodejs_compat_populate_process_env",
+    "global_fetch_strictly_public"
+  ],
+  "keep_vars": true,
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "version_metadata": {
+    "binding": "CF_VERSION_METADATA"
+  },
+  "vars": {},
+  "unsafe": {
+    "bindings": [
+      {
+        "name": "CHAT_RATE_LIMITER",
+        "type": "ratelimit",
+        "namespace_id": "4001",
+        "simple": {
+          "limit": 10,
+          "period": 60
+        }
+      },
+      {
+        "name": "SEARCH_RATE_LIMITER",
+        "type": "ratelimit",
+        "namespace_id": "4002",
+        "simple": {
+          "limit": 20,
+          "period": 60
+        }
+      }
+    ]
+  },
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "d12c8b4e92fc439e9a03316270e5e5dc"
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  "migrations": [
+    {
+      "tag": "v1"
+    },
+    {
+      "tag": "v2"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "tail_consumers": [],
+  "dev": {
+    "port": 8791
+  }
+}
