@@ -28,8 +28,12 @@ import tools, {
   AGENT_DEPENDENT_TOOLS,
   SIMPLE_REPLACEMENT_TOOLS,
 } from "./tools/index";
-import type { ToolConfig } from "./tools/types";
-import type { ServerContext } from "./types";
+import {
+  type ToolConfig,
+  resolveDescription,
+  isToolVisibleInMode,
+} from "./tools/types";
+import type { ServerContext, ProjectCapabilities } from "./types";
 import {
   setTag,
   setUser,
@@ -86,10 +90,12 @@ import { hasAgentProvider } from "./internal/agents/provider-factory";
 export function buildServer({
   context,
   agentMode = false,
+  experimentalMode = false,
   tools: customTools,
 }: {
   context: ServerContext;
   agentMode?: boolean;
+  experimentalMode?: boolean;
   tools?: Record<string, ToolConfig<any>>;
 }): McpServer {
   const server = new McpServer({
@@ -101,6 +107,7 @@ export function buildServer({
     server,
     context,
     agentMode,
+    experimentalMode,
     tools: customTools,
   });
 
@@ -120,11 +127,13 @@ function configureServer({
   server,
   context,
   agentMode = false,
+  experimentalMode = false,
   tools: customTools,
 }: {
   server: McpServer;
   context: ServerContext;
   agentMode?: boolean;
+  experimentalMode?: boolean;
   tools?: Record<string, ToolConfig<any>>;
 }) {
   // Determine which tools to register:
@@ -135,9 +144,8 @@ function configureServer({
     ? { use_sentry: tools.use_sentry }
     : (customTools ?? tools);
 
-  // Filter tools based on agent provider availability (skip in agent mode or custom tools)
-  // When an agent provider is available, use smart tools (search_*) and exclude simple tools (list_*)
-  // When no agent provider is available, use simple tools (list_*) and exclude smart tools (search_*)
+  // Filter tools based on agent provider availability
+  // Skip filtering in agent mode (use_sentry handles all tools internally) or when custom tools are provided
   if (!agentMode && !customTools) {
     const hasAgent = hasAgentProvider();
     const toolsToExclude = new Set<string>(
@@ -147,6 +155,16 @@ function configureServer({
     toolsToRegister = Object.fromEntries(
       Object.entries(toolsToRegister).filter(
         ([key]) => !toolsToExclude.has(key),
+      ),
+    ) as typeof toolsToRegister;
+  }
+
+  // Filter tools based on experimental mode (applies to all tools, including custom)
+  // Skip in agent mode (use_sentry handles filtering internally)
+  if (!agentMode) {
+    toolsToRegister = Object.fromEntries(
+      Object.entries(toolsToRegister).filter(([, tool]) =>
+        isToolVisibleInMode(tool, experimentalMode),
       ),
     ) as typeof toolsToRegister;
   }
@@ -222,6 +240,23 @@ function configureServer({
       continue;
     }
 
+    // Skip tools when project lacks required capabilities (experimental)
+    // Fail-open: if capabilities are unknown, show all tools
+    if (
+      experimentalMode &&
+      context.constraints.projectSlug &&
+      context.constraints.projectCapabilities &&
+      tool.requiredCapabilities?.length
+    ) {
+      const caps = context.constraints.projectCapabilities;
+      const hasAllCapabilities = tool.requiredCapabilities.every(
+        (cap: keyof ProjectCapabilities) => caps[cap] === true,
+      );
+      if (!hasAllCapabilities) {
+        continue;
+      }
+    }
+
     // Filter out constraint parameters from schema that will be auto-injected
     // Only filter parameters that are ACTUALLY constrained in the current context
     // to avoid breaking tools when constraints are not set
@@ -234,9 +269,14 @@ function configureServer({
       ),
     ) as typeof tool.inputSchema;
 
+    // Resolve dynamic descriptions based on server context
+    const resolvedDescription = resolveDescription(tool.description, {
+      experimentalMode,
+    });
+
     server.tool(
       tool.name,
-      tool.description,
+      resolvedDescription,
       filteredInputSchema,
       tool.annotations,
       async (
