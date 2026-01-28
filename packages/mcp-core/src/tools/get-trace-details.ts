@@ -15,6 +15,8 @@ export default defineTool({
   name: "get_trace_details",
   skills: ["inspect"], // Only available in inspect skill
   requiredScopes: ["event:read"],
+  requiredCapabilities: ["traces"],
+  hideInExperimentalMode: true, // Replaced by get_sentry_resource in experimental mode
   description: [
     "Get detailed information about a specific Sentry trace by ID.",
     "",

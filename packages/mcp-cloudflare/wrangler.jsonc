@@ -60,6 +60,10 @@
     {
       "binding": "OAUTH_KV",
       "id": "8dd5e9bafe1945298e2d5ca3b408a553"
+    },
+    {
+      "binding": "MCP_CACHE",
+      "id": "01b5b45e9f3c4edaa9ef357b4f9949db"
     }
   ],
   "ai": {

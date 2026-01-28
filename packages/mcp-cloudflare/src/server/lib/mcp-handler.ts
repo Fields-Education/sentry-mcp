@@ -56,6 +56,9 @@ const mcpHandler: ExportedHandler<Env> = {
     // Check for agent mode query parameter
     const isAgentMode = url.searchParams.get("agent") === "1";
 
+    // Check for experimental mode query parameter
+    const isExperimentalMode = url.searchParams.get("experimental") === "1";
+
     // Extract OAuth props from ExecutionContext (set by OAuth provider)
     const oauthCtx = ctx as OAuthExecutionContext;
 
@@ -66,11 +69,16 @@ const mcpHandler: ExportedHandler<Env> = {
     const sentryHost = env.SENTRY_HOST || "sentry.io";
 
     // Verify user has access to the requested org/project
+    // Cache verification results in KV to avoid repeated API calls
     const verification = await verifyConstraintsAccess(
       { organizationSlug, projectSlug },
       {
         accessToken: oauthCtx.props.accessToken as string,
         sentryHost,
+        cache: {
+          kv: env.MCP_CACHE,
+          userId: oauthCtx.props.id as string,
+        },
       },
     );
 
@@ -153,6 +161,8 @@ const mcpHandler: ExportedHandler<Env> = {
       constraints: verification.constraints,
       sentryHost,
       mcpUrl: env.MCP_URL,
+      agentMode: isAgentMode,
+      experimentalMode: isExperimentalMode,
     };
 
     // Create and configure MCP server with tools filtered by context
@@ -160,6 +170,7 @@ const mcpHandler: ExportedHandler<Env> = {
     const server = buildServer({
       context: serverContext,
       agentMode: isAgentMode,
+      experimentalMode: isExperimentalMode,
     });
 
     // Run MCP handler - context already captured in closures
