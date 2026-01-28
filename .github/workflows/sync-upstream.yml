@@ -1,12 +1,13 @@
 name: Sync Upstream
 
 # NOTE: GitHub disables scheduled workflows on forks by default.
-# If this workflow stops running on schedule, go to the Actions tab
-# and manually enable it, or make any commit to this file.
+# Use repository_dispatch from an external cron (e.g., Cloudflare Worker) to trigger.
 
 on:
   schedule:
-    - cron: "0 6 * * *" # Every day at 6am UTC (1am EST)
+    - cron: "0 6 * * *" # Every day at 6am UTC (1am EST) - NOTE: Won't fire on forks
+  repository_dispatch:
+    types: [sync-upstream]
   workflow_dispatch: # Allow manual trigger
 
 jobs:
@@ -52,6 +53,9 @@ jobs:
         id: merge
         if: steps.check.outputs.has_changes == 'true'
         continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           # Create a sync branch
           BRANCH_NAME="sync-upstream-$(date +%Y%m%d)"
@@ -82,34 +86,41 @@ jobs:
             # Push the branch
             git push -u origin HEAD
             
-            # Create PR using gh cli
-            gh pr create \
-              --title "chore: sync with upstream sentry-mcp" \
-              --body "$(cat <<'EOF'
-          ## Automated Upstream Sync
+            # Create PR using REST API (works with GITHUB_TOKEN unlike gh cli GraphQL)
+            COMMITS_LIST=$(git log HEAD...origin/main --oneline --no-merges | head -20)
+            
+            # Build the PR body
+            PR_BODY="## Automated Upstream Sync
 
           This PR merges the latest changes from [getsentry/sentry-mcp](https://github.com/getsentry/sentry-mcp).
 
           ### Changes from upstream
-          $(git log HEAD...origin/main --oneline --no-merges | head -20)
+          ${COMMITS_LIST}
 
           ### Fork-specific notes
-          - Sentry deployment workflows remain disabled (`.disabled` suffix)
-          - Fields deployment workflow (`deploy-fields.yml`) unchanged
-          - Fields Cloudflare package (`mcp-cloudflare-fields/`) unchanged
+          - Sentry deployment workflows remain disabled (\`.disabled\` suffix)
+          - Fields deployment workflow (\`deploy-fields.yml\`) unchanged
+          - Fields Cloudflare package (\`mcp-cloudflare-fields/\`) unchanged
 
           ---
-          *This PR was automatically created by the sync-upstream workflow.*
-          EOF
-          )" \
-              --base main
+          *This PR was automatically created by the sync-upstream workflow.*"
+
+            # Create PR via REST API
+            curl -X POST \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls" \
+              -d "$(jq -n \
+                --arg title "chore: sync with upstream sentry-mcp" \
+                --arg head "$BRANCH_NAME" \
+                --arg base "main" \
+                --arg body "$PR_BODY" \
+                '{title: $title, head: $head, base: $base, body: $body}')"
           else
             echo "merge_success=false" >> $GITHUB_OUTPUT
             echo "Merge failed - conflicts detected"
             git merge --abort || true
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Use OpenCode to resolve conflicts
         if: steps.check.outputs.has_changes == 'true' && steps.merge.outputs.merge_success == 'false'
