@@ -8,12 +8,23 @@
 import type { Skill } from "./skills";
 
 /**
+ * Project capabilities indicating what data types the project has
+ */
+export type ProjectCapabilities = {
+  profiles?: boolean;
+  replays?: boolean;
+  logs?: boolean;
+  traces?: boolean;
+};
+
+/**
  * Constraints that restrict the MCP session scope
  */
 export type Constraints = {
   organizationSlug?: string | null;
   projectSlug?: string | null;
   regionUrl?: string | null;
+  projectCapabilities?: ProjectCapabilities | null;
 };
 
 /**
@@ -38,4 +49,8 @@ export type ServerContext = {
   grantedSkills?: Set<Skill> | ReadonlySet<Skill>;
   // URL-based session constraints
   constraints: Constraints;
+  /** Whether agent mode is enabled (only use_sentry tool exposed) */
+  agentMode?: boolean;
+  /** Whether experimental tools are enabled */
+  experimentalMode?: boolean;
 };
