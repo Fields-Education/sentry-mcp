@@ -59,6 +59,10 @@ jobs:
         run: |
           # Create a sync branch
           BRANCH_NAME="sync-upstream-$(date +%Y%m%d)"
+          
+          # Delete the remote branch if it exists (from a previous failed/partial run)
+          git push origin --delete "$BRANCH_NAME" 2>/dev/null || true
+          
           git checkout -b "$BRANCH_NAME"
           
           # Try to merge upstream
@@ -67,55 +71,34 @@ jobs:
             echo "Merge successful!"
             
             # Ensure disabled workflows stay disabled
+            WORKFLOWS_CHANGED=false
             if [ -f ".github/workflows/deploy.yml" ]; then
               mv .github/workflows/deploy.yml .github/workflows/deploy.yml.disabled
               git add .github/workflows/deploy.yml.disabled
               git rm .github/workflows/deploy.yml 2>/dev/null || true
+              WORKFLOWS_CHANGED=true
             fi
             if [ -f ".github/workflows/release.yml" ]; then
               mv .github/workflows/release.yml .github/workflows/release.yml.disabled
               git add .github/workflows/release.yml.disabled
               git rm .github/workflows/release.yml 2>/dev/null || true
+              WORKFLOWS_CHANGED=true
             fi
             
-            # Check if we need to commit the disabled workflow changes
-            if ! git diff --cached --quiet; then
-              git commit --amend --no-edit
+            # Commit the disabled workflow changes if any
+            if [ "$WORKFLOWS_CHANGED" = true ]; then
+              git commit -m "chore: keep sentry workflows disabled"
             fi
             
-            # Push the branch
-            git push -u origin HEAD
+            # Push directly to main (clean merge, no PR needed)
+            git checkout main
+            git merge "$BRANCH_NAME" --no-edit
+            git push origin main
             
-            # Create PR using REST API (works with GITHUB_TOKEN unlike gh cli GraphQL)
-            COMMITS_LIST=$(git log HEAD...origin/main --oneline --no-merges | head -20)
+            # Clean up the sync branch
+            git push origin --delete "$BRANCH_NAME" 2>/dev/null || true
             
-            # Build the PR body
-            PR_BODY="## Automated Upstream Sync
-
-          This PR merges the latest changes from [getsentry/sentry-mcp](https://github.com/getsentry/sentry-mcp).
-
-          ### Changes from upstream
-          ${COMMITS_LIST}
-
-          ### Fork-specific notes
-          - Sentry deployment workflows remain disabled (\`.disabled\` suffix)
-          - Fields deployment workflow (\`deploy-fields.yml\`) unchanged
-          - Fields Cloudflare package (\`mcp-cloudflare-fields/\`) unchanged
-
-          ---
-          *This PR was automatically created by the sync-upstream workflow.*"
-
-            # Create PR via REST API
-            curl -X POST \
-              -H "Authorization: token $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls" \
-              -d "$(jq -n \
-                --arg title "chore: sync with upstream sentry-mcp" \
-                --arg head "$BRANCH_NAME" \
-                --arg base "main" \
-                --arg body "$PR_BODY" \
-                '{title: $title, head: $head, base: $base, body: $body}')"
+            echo "Successfully synced upstream changes directly to main"
           else
             echo "merge_success=false" >> $GITHUB_OUTPUT
             echo "Merge failed - conflicts detected"
@@ -138,7 +121,10 @@ jobs:
                ```bash
                git remote add upstream https://github.com/getsentry/sentry-mcp.git || true
                git fetch upstream main
-               git checkout -b sync-upstream-$(date +%Y%m%d)-resolved
+               BRANCH_NAME="sync-upstream-$(date +%Y%m%d)-resolved"
+               # Delete remote branch if it exists from a previous run
+               git push origin --delete "$BRANCH_NAME" 2>/dev/null || true
+               git checkout -b "$BRANCH_NAME"
                git merge upstream/main || true
                ```
 
