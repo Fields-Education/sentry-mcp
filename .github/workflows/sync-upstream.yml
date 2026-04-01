@@ -74,20 +74,16 @@ jobs:
             echo "merge_success=true" >> $GITHUB_OUTPUT
             echo "Merge successful!"
             
-            # Ensure disabled workflows stay disabled
+            # Ensure upstream workflows stay disabled on our fork
             WORKFLOWS_CHANGED=false
-            if [ -f ".github/workflows/deploy.yml" ]; then
-              mv .github/workflows/deploy.yml .github/workflows/deploy.yml.disabled
-              git add .github/workflows/deploy.yml.disabled
-              git rm .github/workflows/deploy.yml 2>/dev/null || true
-              WORKFLOWS_CHANGED=true
-            fi
-            if [ -f ".github/workflows/release.yml" ]; then
-              mv .github/workflows/release.yml .github/workflows/release.yml.disabled
-              git add .github/workflows/release.yml.disabled
-              git rm .github/workflows/release.yml 2>/dev/null || true
-              WORKFLOWS_CHANGED=true
-            fi
+            for wf in deploy.yml release.yml warden.yml test.yml smoke-tests.yml token-cost.yml eval.yml merge-jobs.yml; do
+              if [ -f ".github/workflows/$wf" ]; then
+                mv ".github/workflows/$wf" ".github/workflows/$wf.disabled"
+                git add ".github/workflows/$wf.disabled"
+                git rm ".github/workflows/$wf" 2>/dev/null || true
+                WORKFLOWS_CHANGED=true
+              fi
+            done
             
             # Commit the disabled workflow changes if any
             if [ "$WORKFLOWS_CHANGED" = true ]; then
@@ -147,10 +143,11 @@ jobs:
              - `.github/workflows/deploy-fields.yml` is OUR workflow - DO NOT modify
              - `.github/workflows/sync-upstream.yml` is OUR workflow - DO NOT modify
 
-          3. IMPORTANT - Keep these Sentry workflows DISABLED:
-             - If `deploy.yml` appears, rename it to `deploy.yml.disabled`
-             - If `release.yml` appears, rename it to `release.yml.disabled`
-             - Our `.disabled` suffix prevents them from running
+          3. IMPORTANT - Keep ALL upstream Sentry workflows DISABLED:
+             - Rename any of these to `<name>.disabled` if they appear as active .yml files:
+               deploy.yml, release.yml, warden.yml, test.yml, smoke-tests.yml,
+               token-cost.yml, eval.yml, merge-jobs.yml
+             - Our `.disabled` suffix prevents them from running on the fork
 
           4. Resolve conflicts by:
              - Accepting upstream changes for source code in `packages/mcp-cloudflare/src/`
