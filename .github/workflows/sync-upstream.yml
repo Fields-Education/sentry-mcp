@@ -118,10 +118,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          opencode run \
-            --model opencode/claude-opus-4-5 \
-            --print-logs \
-            -p "$(cat <<'PROMPT'
+          PROMPT=$(cat <<'EOF'
           There are merge conflicts when trying to sync this fork with upstream getsentry/sentry-mcp.
 
           Please help resolve the merge conflicts:
@@ -165,5 +162,10 @@ jobs:
              - Commit: `git commit -m "chore: sync with upstream sentry-mcp (resolved conflicts)"`
              - Push: `git push -u origin HEAD`
              - Create a PR to main branch using `gh pr create`
-          PROMPT
-          )"
+          EOF
+          )
+
+          opencode run \
+            --model opencode/claude-opus-4-5 \
+            --print-logs \
+            "$PROMPT"
