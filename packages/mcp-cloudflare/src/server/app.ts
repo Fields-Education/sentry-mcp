@@ -12,6 +12,7 @@ import { logIssue } from "@sentry/mcp-core/telem/logging";
 import { createRequestLogger } from "./logging";
 import mcpRoutes from "./routes/mcp";
 import { getClientIp } from "./utils/client-ip";
+import { createProtectedResourceMetadataResponse } from "./protected-resource-metadata";
 
 /** Derive the base URL (origin) from the current request. */
 function getBaseUrl(c: Context): string {
@@ -38,7 +39,7 @@ When scoped, tools automatically default to the constrained org/project and unne
 
 ### Query Parameters
 
-- \`?experimental=1\` — Enable experimental, forward-looking features and tools
+- \`?experimental=1\` — Enable forward-looking tool variants and experimental features
 - \`?agent=1\` — Agent mode: exposes a single \`use_sentry\` tool that handles natural language requests via an embedded AI agent (roughly doubles response time)
 
 Parameters can be combined: \`${baseUrl}/mcp/my-org/my-project?experimental=1\`
@@ -81,16 +82,7 @@ Any MCP-compatible client can connect using the HTTP transport at the endpoint U
 
 // RFC 9728: OAuth 2.0 Protected Resource Metadata handler
 function handleOAuthProtectedResourceMetadata(c: Context): Response {
-  const requestUrl = new URL(c.req.url);
-  const baseUrl = requestUrl.origin;
-  const resourcePath = requestUrl.pathname.replace(
-    "/.well-known/oauth-protected-resource",
-    "",
-  );
-  return c.json({
-    resource: `${baseUrl}${resourcePath}`,
-    authorization_servers: [baseUrl],
-  });
+  return createProtectedResourceMetadataResponse(new URL(c.req.url));
 }
 
 const app = new Hono<{
@@ -133,6 +125,17 @@ const app = new Hono<{
       },
     }),
   )
+  // Content-negotiated homepage: serve markdown to agents, SPA to browsers
+  .get("/", async (c, next) => {
+    const accept = c.req.header("Accept") ?? "";
+    if (!accept.includes("text/markdown")) {
+      return next();
+    }
+    return c.text(generateLlmsTxt(getBaseUrl(c)), 200, {
+      "Content-Type": "text/markdown; charset=utf-8",
+      Vary: "Accept",
+    });
+  })
   .get("/robots.txt", (c) => {
     return c.text(
       [
@@ -160,14 +163,7 @@ const app = new Hono<{
       endpoint: `${baseUrl}/mcp`,
     });
   })
-  // RFC 9728: OAuth 2.0 Protected Resource Metadata
-  // ChatGPT and other clients query this to discover the authorization server
-  // Root endpoint for clients that try /.well-known/oauth-protected-resource first
-  .get(
-    "/.well-known/oauth-protected-resource",
-    handleOAuthProtectedResourceMetadata,
-  )
-  // Handles both /mcp and /mcp/* paths (e.g., /mcp/sentry/mcp-server)
+  // RFC 9728: OAuth 2.0 Protected Resource Metadata for /mcp resources.
   .get(
     "/.well-known/oauth-protected-resource/mcp",
     handleOAuthProtectedResourceMetadata,
