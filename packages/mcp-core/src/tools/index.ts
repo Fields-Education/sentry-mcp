@@ -23,6 +23,7 @@ import useSentry from "./use-sentry";
 import listIssues from "./list-issues";
 import listEvents from "./list-events";
 import listIssueEvents from "./list-issue-events";
+import getProfileDetails from "./get-profile-details";
 import getSentryResource from "./get-sentry-resource";
 
 /**
@@ -53,6 +54,8 @@ export default {
   find_teams: findTeams,
   find_projects: findProjects,
   find_releases: findReleases,
+  // Legacy detail handlers stay available for internal composition behind
+  // get_sentry_resource, but are filtered from all external MCP surfaces.
   get_issue_details: getIssueDetails,
   get_issue_tag_values: getIssueTagValues,
   get_trace_details: getTraceDetails,
@@ -73,6 +76,7 @@ export default {
   list_issues: listIssues,
   list_events: listEvents,
   list_issue_events: listIssueEvents,
+  get_profile_details: getProfileDetails,
   get_sentry_resource: getSentryResource,
 } as const;
 

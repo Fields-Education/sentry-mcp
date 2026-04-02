@@ -12,7 +12,16 @@ import {
   isPublicMetadataEndpoint,
   stripCorsHeaders,
 } from "./utils/cors";
-import { checkRateLimit } from "./utils/rate-limiter";
+import {
+  checkRateLimit,
+  MCP_RATE_LIMIT_EXCEEDED_MESSAGE,
+} from "./utils/rate-limiter";
+import {
+  extractResponseMetricOptions,
+  recordResponseMetric,
+  stripResponseMetricHeaders,
+  type RateLimitScope,
+} from "./metrics";
 
 /**
  * RFC 9728 §3.1: Patch 401 responses on MCP routes to include a
@@ -27,7 +36,7 @@ function patchWwwAuthenticate(response: Response, url: URL): Response {
   if (!existing) {
     return response;
   }
-  const prmUrl = `${url.protocol}//${url.host}/.well-known/oauth-protected-resource/mcp`;
+  const prmUrl = `${url.protocol}//${url.host}/.well-known/oauth-protected-resource${url.pathname}${url.search}`;
   const newResponse = new Response(response.body, response);
   // RFC 7235: first param is space-separated from scheme, subsequent params are comma-separated
   const separator = existing.includes(" ") ? "," : "";
@@ -38,11 +47,32 @@ function patchWwwAuthenticate(response: Response, url: URL): Response {
   return newResponse;
 }
 
+function finalizeResponse(
+  request: Request,
+  url: URL,
+  response: Response,
+  options?: {
+    rateLimitScope?: RateLimitScope;
+    responseReason?: "local_rate_limit";
+  },
+): Response {
+  const responseMetricOptions = extractResponseMetricOptions(response);
+  const responseWithoutMetricHeaders = stripResponseMetricHeaders(response);
+  const finalized = isPublicMetadataEndpoint(url.pathname)
+    ? addCorsHeaders(responseWithoutMetricHeaders)
+    : stripCorsHeaders(responseWithoutMetricHeaders);
+
+  recordResponseMetric(request, finalized, {
+    ...responseMetricOptions,
+    ...options,
+  });
+  return finalized;
+}
+
 // Wrap OAuth Provider to take control of CORS.
 //
-// @cloudflare/workers-oauth-provider v0.0.12 reflects the request Origin on
-// every response it handles, effectively allowing any website to call our
-// OAuth and MCP endpoints cross-origin. We wrap it to:
+// The OAuth provider manages several routes directly and may attach its own
+// CORS headers to the responses it handles. We wrap it to:
 //   1. Intercept OPTIONS before the library — return our own preflight response.
 //   2. Let the library handle the actual request normally.
 //   3. On the way out, apply our CORS policy:
@@ -57,9 +87,27 @@ const wrappedOAuthProvider = {
     // with no CORS headers so the browser blocks the cross-origin request.
     if (request.method === "OPTIONS") {
       if (isPublicMetadataEndpoint(url.pathname)) {
-        return addCorsHeaders(new Response(null, { status: 204 }));
+        return finalizeResponse(
+          request,
+          url,
+          new Response(null, { status: 204 }),
+        );
       }
-      return new Response(null, { status: 204 });
+      return finalizeResponse(
+        request,
+        url,
+        new Response(null, { status: 204 }),
+      );
+    }
+
+    // RFC 9728 metadata must be derived from the exact protected resource
+    // identifier. We expose only path-specific metadata for `/mcp...`.
+    if (url.pathname === "/.well-known/oauth-protected-resource") {
+      return finalizeResponse(
+        request,
+        url,
+        new Response("Not Found", { status: 404 }),
+      );
     }
 
     // --- Rate limiting (before any OAuth/MCP processing) ---
@@ -69,27 +117,33 @@ const wrappedOAuthProvider = {
       if (clientIP) {
         const rateLimitResult = await checkRateLimit(
           clientIP,
-          env.MCP_RATE_LIMITER,
+          env.MCP_IP_RATE_LIMITER ?? env.MCP_RATE_LIMITER,
           {
-            keyPrefix: "mcp",
-            errorMessage:
-              "Rate limit exceeded. Please wait before trying again.",
+            keyPrefix: "mcp:ip",
+            errorMessage: MCP_RATE_LIMIT_EXCEEDED_MESSAGE,
           },
         );
 
         if (!rateLimitResult.allowed) {
-          return new Response(rateLimitResult.errorMessage, { status: 429 });
+          return finalizeResponse(
+            request,
+            url,
+            new Response(rateLimitResult.errorMessage, { status: 429 }),
+            {
+              responseReason: "local_rate_limit",
+              rateLimitScope: "ip",
+            },
+          );
         }
       }
     }
 
     // --- Phase 2: Let the OAuth library handle the request ---
-    // The library will add reflected-origin CORS headers to its responses.
+    // We normalize any CORS headers it returns in the response handling below.
     const oAuthProvider = new OAuthProvider({
       apiRoute: "/mcp",
       // @ts-expect-error - OAuthProvider types don't support specific Env types
       apiHandler: sentryMcpHandler,
-      // @ts-expect-error - OAuthProvider types don't support specific Env types
       defaultHandler: app,
       // must match the routes registered in `app.ts`
       authorizeEndpoint: "/oauth/authorize",
@@ -103,11 +157,7 @@ const wrappedOAuthProvider = {
 
     // --- Phase 3: Patch headers, then apply our CORS policy ---
     const patched = patchWwwAuthenticate(response, url);
-
-    if (isPublicMetadataEndpoint(url.pathname)) {
-      return addCorsHeaders(patched);
-    }
-    return stripCorsHeaders(patched);
+    return finalizeResponse(request, url, patched);
   },
 };
 

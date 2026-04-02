@@ -344,10 +344,15 @@ The 2-minute safety window prevents edge cases with clock skew and processing de
 
 ## Discovery Endpoints
 
-The MCP OAuth Provider automatically provides:
+The MCP worker exposes:
 
 - `/.well-known/oauth-authorization-server` - MCP OAuth server metadata
-- `/.well-known/oauth-protected-resource` - MCP resource server info
+- `/.well-known/oauth-protected-resource/mcp...` - Path-specific protected resource metadata per RFC 9728
+
+The worker only serves path-specific protected-resource metadata for `/mcp...`
+resources. Each metadata document preserves the exact `/mcp` path and any query
+parameters so the advertised `resource` value matches the protected resource
+identifier used for discovery.
 
 Note: These describe the MCP OAuth server, not Sentry's OAuth endpoints.
 

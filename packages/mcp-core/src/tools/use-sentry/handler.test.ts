@@ -54,11 +54,12 @@ describe("use_sentry handler", () => {
       tools: expect.objectContaining({
         whoami: expect.any(Object),
         find_organizations: expect.any(Object),
+        get_sentry_resource: expect.any(Object),
         search_issues: expect.any(Object),
       }),
     });
 
-    // Verify all 21 tools were provided (26 total - use_sentry - 3 list_* tools - 1 experimental)
+    // Verify all 21 tools were provided (27 total - use_sentry - 3 list_* tools - 2 internal-only detail tools)
     const toolsArg = mockUseSentryAgent.mock.calls[0][0].tools;
     expect(Object.keys(toolsArg)).toHaveLength(21);
 
@@ -88,7 +89,9 @@ describe("use_sentry handler", () => {
     expect(toolsArg.find_organizations).toBeDefined();
     expect(toolsArg.search_events).toBeDefined();
     expect(toolsArg.search_issues).toBeDefined();
-    expect(toolsArg.get_issue_details).toBeDefined();
+    expect(toolsArg.get_sentry_resource).toBeDefined();
+    expect(toolsArg.get_issue_details).toBeUndefined();
+    expect(toolsArg.get_trace_details).toBeUndefined();
   });
 
   it("excludes use_sentry from available tools to prevent recursion", async () => {
@@ -107,7 +110,7 @@ describe("use_sentry handler", () => {
     // Verify use_sentry is NOT in the list
     expect(toolNames).not.toContain("use_sentry");
 
-    // Verify we have exactly 21 tools (26 total - use_sentry - 3 list_* tools - 1 experimental)
+    // Verify we have exactly 21 tools (27 total - use_sentry - 3 list_* tools - 2 internal-only detail tools)
     expect(toolNames).toHaveLength(21);
   });
 

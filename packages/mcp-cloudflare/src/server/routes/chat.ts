@@ -18,6 +18,7 @@ import {
   type RateLimitResult,
 } from "../types/chat";
 import { analyzeAuthError, getAuthErrorResponse } from "../utils/auth-errors";
+import { annotateResponseMetric } from "../metrics";
 
 type MCPClient = Awaited<ReturnType<typeof experimental_createMCPClient>>;
 
@@ -153,13 +154,19 @@ export default new Hono<{ Bindings: Env }>().post("/", async (c) => {
         key: rateLimitKey,
       });
       if (!success) {
-        return c.json(
+        return annotateResponseMetric(
+          c.json(
+            {
+              error:
+                "Rate limit exceeded. You can send up to 10 messages per minute. Please wait before sending another message.",
+              name: "RATE_LIMIT_EXCEEDED",
+            },
+            429,
+          ),
           {
-            error:
-              "Rate limit exceeded. You can send up to 10 messages per minute. Please wait before sending another message.",
-            name: "RATE_LIMIT_EXCEEDED",
+            responseReason: "local_rate_limit",
+            rateLimitScope: "user",
           },
-          429,
         );
       }
     } catch (error) {
@@ -332,8 +339,8 @@ When testing Sentry MCP:
 Start conversations by exploring what's available in their account. Use tools like:
 - \`find_organizations\` to see what orgs they have access to
 - \`find_projects\` to list their projects
-- \`find_issues\` to show recent problems
-- \`get_issue_details\` to dive deep into specific errors
+- \`search_issues\` to show recent problems
+- \`get_sentry_resource\` to dive deep into a specific issue, event, or trace
 
 Remember: You're a test assistant, not a general-purpose helper. Stay focused on testing the MCP integration with their real data.`,
       maxOutputTokens: 2000,

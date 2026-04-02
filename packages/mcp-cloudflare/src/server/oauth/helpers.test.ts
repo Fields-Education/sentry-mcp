@@ -1,67 +1,27 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { TokenExchangeCallbackOptions } from "@cloudflare/workers-oauth-provider";
-import {
-  tokenExchangeCallback,
-  refreshAccessToken,
-  validateResourceParameter,
-  createResourceValidationError,
-} from "./helpers";
-import type { TokenExchangeEnv } from "./helpers";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkerProps } from "../types";
+import {
+  createResourceValidationError,
+  tokenExchangeCallback,
+  validateResourceParameter,
+} from "./helpers";
 
-// Mock fetch globally
-const mockFetch = vi.fn();
-global.fetch = mockFetch;
-
-function createMockKV(): KVNamespace {
-  const store = new Map<string, string>();
-  return {
-    get: vi.fn(async (key: string, format?: string) => {
-      const value = store.get(key);
-      if (value === undefined) return null;
-      return format === "json" ? JSON.parse(value) : value;
-    }),
-    put: vi.fn(async (key: string, value: string) => {
-      store.set(key, value);
-    }),
-    delete: vi.fn(async (key: string) => {
-      store.delete(key);
-    }),
-    list: vi.fn(),
-    getWithMetadata: vi.fn(),
-  } as unknown as KVNamespace;
-}
-
-function createMockTokenResponse(
-  overrides?: Partial<{
-    access_token: string;
-    refresh_token: string;
-    expires_in: number;
-  }>,
-) {
-  return {
-    ok: true,
-    json: async () => ({
-      access_token: "new-access-token",
-      refresh_token: "new-refresh-token",
-      expires_in: 3600,
-      expires_at: new Date(Date.now() + 3600 * 1000).toISOString(),
-      token_type: "bearer",
-      user: { id: "user-id", name: "Test User", email: "test@example.com" },
-      scope: "org:read project:read",
-      ...overrides,
-    }),
-  };
-}
+const GRANT_TYPES = {
+  AUTHORIZATION_CODE:
+    "authorization_code" as TokenExchangeCallbackOptions["grantType"],
+  REFRESH_TOKEN: "refresh_token" as TokenExchangeCallbackOptions["grantType"],
+};
 
 function createRefreshOptions(
   propsOverrides?: Partial<WorkerProps>,
 ): TokenExchangeCallbackOptions {
   return {
-    grantType: "refresh_token",
+    grantType: GRANT_TYPES.REFRESH_TOKEN,
     clientId: "test-client-id",
     userId: "test-user-id",
     scope: ["org:read", "project:read"],
+    requestedScope: ["org:read", "project:read"],
     props: {
       id: "user-id",
       clientId: "test-client-id",
@@ -73,377 +33,109 @@ function createRefreshOptions(
   };
 }
 
-describe("tokenExchangeCallback", () => {
-  let mockKV: KVNamespace;
-  let mockEnv: TokenExchangeEnv;
+const TEST_ENV = { SENTRY_HOST: "sentry.io" };
 
+describe("tokenExchangeCallback", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
-    mockKV = createMockKV();
-    mockEnv = {
-      SENTRY_CLIENT_ID: "test-client-id",
-      SENTRY_CLIENT_SECRET: "test-client-secret",
-      SENTRY_HOST: "sentry.io",
-      OAUTH_KV: mockKV,
-    };
+    vi.restoreAllMocks();
   });
 
-  it("should skip non-refresh_token grant types", async () => {
+  it("should return undefined for non-refresh_token grant types", async () => {
     const options: TokenExchangeCallbackOptions = {
-      grantType: "authorization_code",
+      grantType: GRANT_TYPES.AUTHORIZATION_CODE,
       clientId: "test-client-id",
       userId: "test-user-id",
       scope: ["org:read", "project:read"],
+      requestedScope: ["org:read", "project:read"],
       props: {} as WorkerProps,
     };
 
-    const result = await tokenExchangeCallback(options, mockEnv);
+    const result = await tokenExchangeCallback(options, TEST_ENV);
     expect(result).toBeUndefined();
-    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it("should return undefined when no refresh token in props", async () => {
     const options = createRefreshOptions({ refreshToken: undefined });
 
-    await expect(
-      tokenExchangeCallback(options, mockEnv),
-    ).resolves.toBeUndefined();
-    expect(mockFetch).not.toHaveBeenCalled();
+    const result = await tokenExchangeCallback(options, TEST_ENV);
+    expect(result).toBeUndefined();
   });
 
-  it("should reuse cached token when it has sufficient TTL remaining", async () => {
-    const futureExpiry = Date.now() + 10 * 60 * 1000; // 10 minutes from now
+  it("should probe upstream and return undefined when token is truly expired", async () => {
+    const pastExpiry = Date.now() - 60 * 1000; // 1 minute ago
     const options = createRefreshOptions({
-      accessToken: "cached-access-token",
-      refreshToken: "refresh-token",
-      accessTokenExpiresAt: futureExpiry,
+      accessTokenExpiresAt: pastExpiry,
     });
 
-    const result = await tokenExchangeCallback(options, mockEnv);
-
-    expect(mockFetch).not.toHaveBeenCalled();
-    expect(result).toBeDefined();
-    expect(result?.newProps).toEqual(options.props);
-    expect(result?.accessTokenTTL).toBeGreaterThan(0);
-    expect(result?.accessTokenTTL).toBeLessThanOrEqual(600);
-  });
-
-  it("should refresh token when cached token is close to expiry", async () => {
-    const nearExpiry = Date.now() + 1 * 60 * 1000; // 1 minute from now (less than 2 min safety window)
-    const options = createRefreshOptions({ accessTokenExpiresAt: nearExpiry });
-
-    mockFetch.mockResolvedValueOnce(createMockTokenResponse());
-
-    const result = await tokenExchangeCallback(options, mockEnv);
-
-    // Should call upstream API
-    expect(mockFetch).toHaveBeenCalledWith(
-      "https://sentry.io/oauth/token/",
-      expect.objectContaining({
-        method: "POST",
-        headers: expect.objectContaining({
-          "Content-Type": "application/x-www-form-urlencoded",
-        }),
-        body: expect.stringContaining("grant_type=refresh_token"),
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Invalid token" }), {
+        status: 401,
       }),
     );
 
-    // Should return updated props with new tokens
-    expect(result).toBeDefined();
-    expect(result?.newProps).toMatchObject({
-      accessToken: "new-access-token",
-      refreshToken: "new-refresh-token",
-      accessTokenExpiresAt: expect.any(Number),
-    });
-    expect(result?.accessTokenTTL).toBe(3600);
+    const result = await tokenExchangeCallback(options, TEST_ENV);
+    expect(result).toBeUndefined();
   });
 
-  it("should refresh token when no cached expiry exists", async () => {
-    const options = createRefreshOptions();
-    mockFetch.mockResolvedValueOnce(createMockTokenResponse());
-
-    const result = await tokenExchangeCallback(options, mockEnv);
-
-    expect(mockFetch).toHaveBeenCalled();
-    expect(result?.newProps).toMatchObject({
-      accessToken: "new-access-token",
-      refreshToken: "new-refresh-token",
-      accessTokenExpiresAt: expect.any(Number),
-    });
-  });
-
-  it("should throw error when upstream refresh fails", async () => {
+  it("should treat 400 probe failures as expired", async () => {
+    const pastExpiry = Date.now() - 60 * 1000;
     const options = createRefreshOptions({
-      refreshToken: "invalid-refresh-token",
+      accessTokenExpiresAt: pastExpiry,
     });
 
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      text: async () => "Invalid refresh token",
-    });
-
-    await expect(tokenExchangeCallback(options, mockEnv)).rejects.toThrow(
-      "Failed to refresh upstream token in OAuth provider",
-    );
-  });
-
-  it("should cache refresh result in KV and reuse it", async () => {
-    mockFetch.mockResolvedValueOnce(createMockTokenResponse());
-    const options = createRefreshOptions();
-
-    // First call: refreshes and caches
-    await tokenExchangeCallback(options, mockEnv);
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(mockKV.put).toHaveBeenCalledWith(
-      "refresh-result:user-id",
-      expect.any(String),
-      expect.objectContaining({ expirationTtl: 60 }),
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Invalid token" }), {
+        status: 400,
+        statusText: "Bad Request",
+      }),
     );
 
-    // Second call: reads from KV cache, no upstream fetch
-    const result2 = await tokenExchangeCallback(options, mockEnv);
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(result2?.newProps).toMatchObject({
-      accessToken: "new-access-token",
-      refreshToken: "new-refresh-token",
+    const result = await tokenExchangeCallback(options, TEST_ENV);
+    expect(result).toBeUndefined();
+  });
+
+  it("should return undefined when upstream probe fails with network error", async () => {
+    const pastExpiry = Date.now() - 60 * 1000;
+    const options = createRefreshOptions({
+      accessTokenExpiresAt: pastExpiry,
     });
+
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network error"));
+
+    const result = await tokenExchangeCallback(options, TEST_ENV);
+    expect(result).toBeUndefined();
   });
 
-  it("should acquire KV lock before refreshing", async () => {
-    mockFetch.mockResolvedValueOnce(createMockTokenResponse());
-    const options = createRefreshOptions();
-
-    await tokenExchangeCallback(options, mockEnv);
-
-    // Should have written and then deleted the lock
-    expect(mockKV.put).toHaveBeenCalledWith(
-      "refresh-lock:user-id",
-      expect.any(String),
-      expect.objectContaining({ expirationTtl: 60 }),
-    );
-    expect(mockKV.delete).toHaveBeenCalledWith("refresh-lock:user-id");
-  });
-
-  it("should clean up lock even when refresh fails", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      text: async () => "invalid_grant",
+  it("should probe upstream when token is within safety window", async () => {
+    const nearExpiry = Date.now() + 1 * 60 * 1000; // 1 minute from now (< 2 min safety window)
+    const options = createRefreshOptions({
+      accessTokenExpiresAt: nearExpiry,
     });
-    const options = createRefreshOptions();
 
-    await expect(tokenExchangeCallback(options, mockEnv)).rejects.toThrow();
-
-    // Lock should still be cleaned up in finally block
-    expect(mockKV.delete).toHaveBeenCalledWith("refresh-lock:user-id");
-  });
-
-  it("should not delete lock when ownership changes before cleanup", async () => {
-    mockFetch.mockResolvedValueOnce(createMockTokenResponse());
-    const options = createRefreshOptions();
-
-    const backingGet = (
-      mockKV.get as ReturnType<typeof vi.fn>
-    ).getMockImplementation()!;
-    let lockGetCount = 0;
-    (mockKV.get as ReturnType<typeof vi.fn>).mockImplementation(
-      async (key: string, format?: string) => {
-        if (key === "refresh-lock:user-id") {
-          lockGetCount++;
-          // 1st call: pre-lock check -> no lock
-          if (lockGetCount === 1) {
-            return null;
-          }
-          // 2nd call: post-put ownership check -> keep current lock value
-          if (lockGetCount === 2) {
-            return backingGet(key, format);
-          }
-          // 3rd call: finally cleanup check -> lock now belongs to another request
-          return "another-attempt-id";
-        }
-        return backingGet(key, format);
-      },
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Invalid token" }), {
+        status: 401,
+      }),
     );
 
-    const result = await tokenExchangeCallback(options, mockEnv);
-    expect(result).toBeDefined();
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(mockKV.delete).not.toHaveBeenCalledWith("refresh-lock:user-id");
+    const result = await tokenExchangeCallback(options, TEST_ENV);
+    expect(result).toBeUndefined();
   });
 
-  it("should wait and use cached result when lock is held", async () => {
-    // Pre-populate only the lock (simulating another isolate holding it)
-    await mockKV.put("refresh-lock:user-id", Date.now().toString());
+  it("should probe upstream when no expiry is set", async () => {
+    const options = createRefreshOptions({
+      accessTokenExpiresAt: undefined,
+    });
 
-    // Simulate the other isolate writing the result while we wait.
-    // The result key does NOT exist initially, so the first check (line ~279)
-    // returns null, causing us to enter the lock-waiting branch.
-    const cachedResult = {
-      accessToken: "other-isolate-access-token",
-      refreshToken: "other-isolate-refresh-token",
-      expiresAt: Date.now() + 3600 * 1000,
-    };
-
-    let resultCallCount = 0;
-    // Intercept KV.get to control when the result key becomes available.
-    // We use getMockImplementation() to capture the original backing function
-    // before replacing it, avoiding infinite recursion through the spy.
-    const backingGet = (
-      mockKV.get as ReturnType<typeof vi.fn>
-    ).getMockImplementation()!;
-    (mockKV.get as ReturnType<typeof vi.fn>).mockImplementation(
-      async (key: string, format?: string) => {
-        if (key === "refresh-result:user-id") {
-          resultCallCount++;
-          if (resultCallCount === 1) {
-            // First check: result not yet available
-            return null;
-          }
-          // Second check (after lock wait): result is now available
-          return format === "json"
-            ? cachedResult
-            : JSON.stringify(cachedResult);
-        }
-        return backingGet(key, format);
-      },
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Invalid token" }), {
+        status: 401,
+      }),
     );
 
-    const options = createRefreshOptions();
-    const result = await tokenExchangeCallback(options, mockEnv);
-
-    // Should NOT have called upstream Sentry
-    expect(mockFetch).not.toHaveBeenCalled();
-
-    // Should have checked the result key twice (before and after lock wait)
-    expect(resultCallCount).toBe(2);
-
-    // Should return the cached result from the other isolate
-    expect(result?.newProps).toMatchObject({
-      accessToken: "other-isolate-access-token",
-      refreshToken: "other-isolate-refresh-token",
-    });
-  });
-
-  it("should fall through and refresh when lock is held but no result appears", async () => {
-    vi.useFakeTimers();
-    try {
-      // Pre-populate only the lock
-      await mockKV.put("refresh-lock:user-id", Date.now().toString());
-
-      // Intercept KV.get so the result key never becomes available.
-      const backingGet = (
-        mockKV.get as ReturnType<typeof vi.fn>
-      ).getMockImplementation()!;
-      (mockKV.get as ReturnType<typeof vi.fn>).mockImplementation(
-        async (key: string, format?: string) => {
-          if (key === "refresh-result:user-id") {
-            return null; // Never available
-          }
-          return backingGet(key, format);
-        },
-      );
-
-      // Set up upstream refresh to succeed (fall-through path)
-      mockFetch.mockResolvedValueOnce(createMockTokenResponse());
-
-      const options = createRefreshOptions();
-      const resultPromise = tokenExchangeCallback(options, mockEnv);
-      await vi.advanceTimersByTimeAsync(6000);
-      const result = await resultPromise;
-
-      // Should have called upstream Sentry as fallback
-      expect(mockFetch).toHaveBeenCalledTimes(1);
-
-      // Should return the upstream result
-      expect(result?.newProps).toMatchObject({
-        accessToken: "new-access-token",
-        refreshToken: "new-refresh-token",
-      });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
-
-describe("refreshAccessToken", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("should successfully refresh access token", async () => {
-    mockFetch.mockResolvedValueOnce(createMockTokenResponse());
-
-    const [result, error] = await refreshAccessToken({
-      client_id: "test-client",
-      client_secret: "test-secret",
-      refresh_token: "valid-refresh-token",
-      upstream_url: "https://sentry.io/oauth/token/",
-    });
-
-    expect(error).toBeNull();
-    expect(result).toMatchObject({
-      access_token: "new-access-token",
-      refresh_token: "new-refresh-token",
-      expires_in: 3600,
-    });
-  });
-
-  it("should return error when refresh token is missing", async () => {
-    const [result, error] = await refreshAccessToken({
-      client_id: "test-client",
-      client_secret: "test-secret",
-      refresh_token: undefined,
-      upstream_url: "https://sentry.io/oauth/token/",
-    });
-
-    expect(result).toBeNull();
-    expect(error).toBeDefined();
-    expect(error?.status).toBe(400);
-    const text = await error?.text();
-    expect(text).toBe("Invalid request: missing refresh token");
-  });
-
-  it("should return error when upstream returns non-OK status", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 400,
-      statusText: "Bad Request",
-      text: async () => "Invalid token",
-    });
-
-    const [result, error] = await refreshAccessToken({
-      client_id: "test-client",
-      client_secret: "test-secret",
-      refresh_token: "invalid-token",
-      upstream_url: "https://sentry.io/oauth/token/",
-    });
-
-    expect(result).toBeNull();
-    expect(error).toBeDefined();
-    expect(error?.status).toBe(400);
-    const text = await error?.text();
-    expect(text).toBe("Invalid token");
-  });
-
-  it("should use fallback message when upstream returns empty body", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 502,
-      statusText: "Bad Gateway",
-      text: async () => "",
-    });
-
-    const [result, error] = await refreshAccessToken({
-      client_id: "test-client",
-      client_secret: "test-secret",
-      refresh_token: "invalid-token",
-      upstream_url: "https://sentry.io/oauth/token/",
-    });
-
-    expect(result).toBeNull();
-    expect(error).toBeDefined();
-    expect(error?.status).toBe(502);
-    const text = await error?.text();
-    expect(text).toContain("issue refreshing your access token");
+    const result = await tokenExchangeCallback(options, TEST_ENV);
+    expect(result).toBeUndefined();
+    expect(globalThis.fetch).toHaveBeenCalled();
   });
 });
 
@@ -465,9 +157,33 @@ describe("validateResourceParameter", () => {
       expect(result).toBe(true);
     });
 
+    it("should reject same hostname with origin-only resource", () => {
+      const result = validateResourceParameter(
+        "https://mcp.sentry.dev",
+        "https://mcp.sentry.dev/oauth/authorize",
+      );
+      expect(result).toBe(false);
+    });
+
+    it("should reject same hostname with origin-only resource and trailing slash", () => {
+      const result = validateResourceParameter(
+        "https://mcp.sentry.dev/",
+        "https://mcp.sentry.dev/oauth/authorize",
+      );
+      expect(result).toBe(false);
+    });
+
     it("should allow same hostname with nested /mcp path", () => {
       const result = validateResourceParameter(
         "https://mcp.sentry.dev/mcp/org/project",
+        "https://mcp.sentry.dev/oauth/authorize",
+      );
+      expect(result).toBe(true);
+    });
+
+    it("should allow same hostname with organization-scoped /mcp path", () => {
+      const result = validateResourceParameter(
+        "https://mcp.sentry.dev/mcp/org",
         "https://mcp.sentry.dev/oauth/authorize",
       );
       expect(result).toBe(true);
@@ -637,6 +353,14 @@ describe("validateResourceParameter", () => {
       expect(result).toBe(false);
     });
 
+    it("should reject URL with empty fragment (RFC 8707)", () => {
+      const result = validateResourceParameter(
+        "https://mcp.sentry.dev#",
+        "https://mcp.sentry.dev/oauth/authorize",
+      );
+      expect(result).toBe(false);
+    });
+
     it("should handle URL with trailing slash", () => {
       const result = validateResourceParameter(
         "https://mcp.sentry.dev/mcp/",
@@ -646,12 +370,10 @@ describe("validateResourceParameter", () => {
     });
 
     it("should handle case sensitivity in hostname", () => {
-      // URLs are case-insensitive for hostname
       const result = validateResourceParameter(
         "https://MCP.SENTRY.DEV/mcp",
         "https://mcp.sentry.dev/oauth/authorize",
       );
-      // This should work because URL constructor normalizes hostnames
       expect(result).toBe(true);
     });
 
@@ -660,7 +382,6 @@ describe("validateResourceParameter", () => {
         "https://mcp.sentry.dev/MCP",
         "https://mcp.sentry.dev/oauth/authorize",
       );
-      // Paths are case-sensitive
       expect(result).toBe(false);
     });
 
@@ -669,16 +390,30 @@ describe("validateResourceParameter", () => {
         "https://mcp.sentry.dev/mcp%2Forg",
         "https://mcp.sentry.dev/oauth/authorize",
       );
-      // Encoded slashes could bypass path validation
       expect(result).toBe(false);
     });
 
     it("should reject any percent-encoded characters in path", () => {
       const testCases = [
-        "https://mcp.sentry.dev/mcp%2Forg", // encoded slash
-        "https://mcp.sentry.dev/mcp/%2e%2e", // encoded dots
-        "https://mcp.sentry.dev/mcp%20", // encoded space
-        "https://mcp.sentry.dev/mcp/test%00", // encoded null byte
+        "https://mcp.sentry.dev/mcp%2Forg",
+        "https://mcp.sentry.dev/mcp/%2e%2e",
+        "https://mcp.sentry.dev/mcp%20",
+        "https://mcp.sentry.dev/mcp/test%00",
+      ];
+
+      for (const testCase of testCases) {
+        const result = validateResourceParameter(
+          testCase,
+          "https://mcp.sentry.dev/oauth/authorize",
+        );
+        expect(result).toBe(false);
+      }
+    });
+
+    it("should reject dot-segment traversal outside /mcp", () => {
+      const testCases = [
+        "https://mcp.sentry.dev/mcp/../evil",
+        "https://mcp.sentry.dev/mcp/..",
       ];
 
       for (const testCase of testCases) {

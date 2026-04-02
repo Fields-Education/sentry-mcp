@@ -31,6 +31,7 @@
     "lint": "biome lint",
     "lint:fix": "biome lint --fix",
     "inspector": "pnpx @modelcontextprotocol/inspector@latest",
+    "inspector:stdio": "pnpx @modelcontextprotocol/inspector@latest -- tsx packages/mcp-server/src/index.ts",
     "measure-tokens": "pnpm run --filter ./packages/mcp-core measure-tokens",
     "prepare": "simple-git-hooks",
     "cli": "pnpm run --filter ./packages/mcp-test-client start",
@@ -43,7 +44,6 @@
   "dependencies": {
     "@biomejs/biome": "catalog:",
     "@types/node": "catalog:",
-    "@vitest/coverage-v8": "catalog:",
     "dotenv": "catalog:",
     "dotenv-cli": "catalog:",
     "lint-staged": "catalog:",
@@ -74,7 +74,8 @@
       "workerd"
     ],
     "overrides": {
-      "@modelcontextprotocol/sdk": "^1.26.0"
+      "@modelcontextprotocol/sdk": "^1.26.0",
+      "undici": "^7.24.4"
     }
   },
   "devDependencies": {
