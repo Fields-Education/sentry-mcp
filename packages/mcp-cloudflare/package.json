@@ -41,7 +41,8 @@
     "urlpattern-polyfill": "^10.1.0",
     "vite": "catalog:",
     "vitest": "catalog:",
-    "wrangler": "4.59.2"
+    "miniflare": "catalog:",
+    "wrangler": "4.80.0"
   },
   "dependencies": {
     "@ai-sdk/mcp": "catalog:",
