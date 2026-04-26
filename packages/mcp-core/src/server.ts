@@ -35,6 +35,7 @@ import {
   isToolVisibleInMode,
 } from "./tools/types";
 import type { ServerContext, ProjectCapabilities } from "./types";
+import { isApiAuthenticationErrorDeep } from "./api-client";
 import {
   setTag,
   setUser,
@@ -342,6 +343,8 @@ function configureServer({
             tool.inputSchema,
           );
 
+          // Constraints override raw tool arguments. String constraint fields are
+          // also removed from tool schemas and re-injected (see getConstraintKeysToFilter).
           const paramsWithConstraints = {
             ...params,
             ...applicableConstraints,
@@ -379,6 +382,18 @@ function configureServer({
               code: 2, // error
             });
             activeSpan.recordException(error);
+          }
+
+          // Upstream 401 during a tool call — route via the transport so it
+          // can revoke the MCP grant; swallow callback errors since the
+          // formatted tool response still needs to land.
+          if (
+            isApiAuthenticationErrorDeep(error) &&
+            context.onUpstreamUnauthorized
+          ) {
+            try {
+              await context.onUpstreamUnauthorized();
+            } catch {}
           }
 
           // CRITICAL: Tool errors MUST be returned as formatted text responses,

@@ -12,17 +12,32 @@ import { searchEventsAgent } from "./agent";
 import {
   formatErrorResults,
   formatLogResults,
+  formatProfileResults,
+  formatTraceMetricsResults,
   formatSpanResults,
 } from "./formatters";
-import { RECOMMENDED_FIELDS } from "./config";
+import {
+  RECOMMENDED_FIELDS,
+  TRACE_METRICS_SAMPLE_IDENTITY_FIELDS,
+} from "./config";
 import { UserInputError } from "../../errors";
+import {
+  isMetricsDataset,
+  normalizeEventsDataset,
+} from "../../utils/events-datasets";
+import {
+  DEFAULT_REPLAY_SORT,
+  DEFAULT_REPLAY_STATS_PERIOD,
+  formatReplayResults,
+  isValidReplaySort,
+} from "./replays";
 
 export default defineTool({
   name: "search_events",
   skills: ["inspect", "triage", "seer"], // Available in inspect, triage, and seer skills
   requiredScopes: ["event:read"],
   description: [
-    "Search for events AND perform counts/aggregations - the ONLY tool for statistics and counts.",
+    "Search Sentry events and replays. This is the ONLY tool for counts/statistics on event datasets.",
     "",
     "Supports TWO query types:",
     "1. AGGREGATIONS (counts, sums, averages): 'how many errors', 'count of issues', 'total tokens'",
@@ -35,15 +50,21 @@ export default defineTool({
     "- 'average response time' → returns avg()",
     "- 'sum of tokens used' → returns sum()",
     "",
-    "ALSO USE FOR INDIVIDUAL EVENTS:",
+    "ALSO USE FOR INDIVIDUAL EVENTS OR REPLAY LISTS:",
     "- 'error logs from last hour' → returns event list",
     "- 'database errors with timestamps' → returns event list",
     "- 'trace spans for slow API calls' → returns span list",
+    "- 'checkout replays with errors' → returns replay list",
     "",
     "Dataset Selection (AI automatically chooses):",
     "- errors: Exception/crash events",
     "- logs: Log entries",
     "- spans: Performance data, AI/LLM calls, token usage",
+    "- metrics: Newer span metrics, metric values, counters, gauges, and distributions",
+    "- profiles: Transaction and continuous profile results, profile IDs, and profiled transactions",
+    "- replays: Session replay results such as rage clicks, dead clicks, visited pages, and replay users",
+    "",
+    "Replay searches on this tool return replay lists only. Replay count()/avg()/sum() aggregations are not supported.",
     "",
     "DO NOT USE for grouped issue lists → use search_issues",
     "",
@@ -115,11 +136,72 @@ export default defineTool({
 
     const parsed = agentResult.result;
 
+    if (parsed.dataset === "replays") {
+      const replaySort = parsed.sort || DEFAULT_REPLAY_SORT;
+      if (!isValidReplaySort(replaySort)) {
+        throw new UserInputError(
+          `Invalid replay sort "${replaySort}". Use a supported replay sort like ${DEFAULT_REPLAY_SORT}, -count_errors, -count_rage_clicks, or -duration.`,
+        );
+      }
+
+      const replayTimeParams: {
+        statsPeriod?: string;
+        start?: string;
+        end?: string;
+      } = {};
+      if (parsed.timeRange) {
+        if ("statsPeriod" in parsed.timeRange) {
+          replayTimeParams.statsPeriod = parsed.timeRange.statsPeriod;
+        } else if ("start" in parsed.timeRange && "end" in parsed.timeRange) {
+          replayTimeParams.start = parsed.timeRange.start;
+          replayTimeParams.end = parsed.timeRange.end;
+        }
+      } else {
+        replayTimeParams.statsPeriod = DEFAULT_REPLAY_STATS_PERIOD;
+      }
+
+      const replayQuery = parsed.query || "";
+      const replays = await apiService.searchReplays({
+        organizationSlug,
+        query: replayQuery,
+        limit: params.limit,
+        projectId,
+        sort: replaySort,
+        environment: parsed.environment ?? undefined,
+        ...replayTimeParams,
+      });
+
+      const replaySearchUrl = apiService.getReplaysSearchUrl(organizationSlug, {
+        query: replayQuery || undefined,
+        projectSlugOrId: projectId,
+        environment: parsed.environment ?? undefined,
+        sort: replaySort,
+        statsPeriod: replayTimeParams.statsPeriod,
+        start: replayTimeParams.start,
+        end: replayTimeParams.end,
+      });
+
+      return formatReplayResults({
+        replays,
+        naturalLanguageQuery: params.naturalLanguageQuery,
+        includeExplanation: params.includeExplanation,
+        organizationSlug,
+        apiService,
+        searchUrl: replaySearchUrl,
+        replayQuery,
+        sort: replaySort,
+        environment: parsed.environment,
+        explanation: parsed.explanation,
+        timeRange: replayTimeParams,
+      });
+    }
+
     // Get the dataset chosen by the agent
     const dataset = parsed.dataset;
 
     // Get recommended fields for this dataset (for fallback when no fields are provided)
-    const recommendedFields = RECOMMENDED_FIELDS[dataset];
+    const recommendedFields =
+      RECOMMENDED_FIELDS[normalizeEventsDataset(dataset)];
 
     // Validate that sort parameter was provided
     if (!parsed.sort) {
@@ -134,7 +216,7 @@ export default defineTool({
     const requestedFields = parsed.fields || [];
 
     // Determine if this is an aggregate query by checking if any field contains a function
-    const isAggregateQuery = requestedFields.some(
+    const isAggregateFieldSelection = requestedFields.some(
       (field) => field.includes("(") && field.includes(")"),
     );
 
@@ -142,7 +224,7 @@ export default defineTool({
     // For non-aggregate queries, we can use recommended fields as fallback
     let fields: string[];
 
-    if (isAggregateQuery) {
+    if (isAggregateFieldSelection) {
       // For aggregate queries, fields must be provided and should only include
       // aggregate functions and groupBy fields
       if (!requestedFields || requestedFields.length === 0) {
@@ -177,10 +259,18 @@ export default defineTool({
       timeParams.statsPeriod = "14d";
     }
 
+    const requestFields =
+      isMetricsDataset(dataset) &&
+      !fields.some((field) => field.includes("(") && field.includes(")"))
+        ? Array.from(
+            new Set([...fields, ...TRACE_METRICS_SAMPLE_IDENTITY_FIELDS]),
+          )
+        : fields;
+
     const eventsResponse = await apiService.searchEvents({
       organizationSlug,
       query: sentryQuery,
-      fields,
+      fields: requestFields,
       limit: params.limit,
       projectId, // API requires numeric project ID, not slug
       dataset, // API now accepts "logs" directly (no longer needs "ourlogs")
@@ -195,20 +285,6 @@ export default defineTool({
     );
     const groupByFields = fields.filter(
       (field) => !field.includes("(") && !field.includes(")"),
-    );
-
-    const explorerUrl = apiService.getEventsExplorerUrl(
-      organizationSlug,
-      sentryQuery,
-      projectId, // Pass the numeric project ID for URL generation
-      dataset, // dataset is already correct for URL generation (logs, spans, errors)
-      fields, // Pass fields to detect if it's an aggregate query
-      sortParam, // Pass sort parameter for URL generation
-      aggregateFunctions,
-      groupByFields,
-      timeParams.statsPeriod,
-      timeParams.start,
-      timeParams.end,
     );
 
     // Type-safe access to event data with proper validation
@@ -236,6 +312,21 @@ export default defineTool({
       throw new Error("Invalid event data format from Sentry API");
     }
 
+    const explorerUrl = apiService.getEventsExplorerUrl(
+      organizationSlug,
+      sentryQuery,
+      projectId, // Pass the numeric project ID for URL generation
+      dataset, // dataset is already correct for URL generation (logs, spans, errors)
+      fields,
+      sortParam,
+      aggregateFunctions,
+      groupByFields,
+      timeParams.statsPeriod,
+      timeParams.start,
+      timeParams.end,
+      eventData,
+    );
+
     // Format results based on dataset
     const formatParams = {
       eventData,
@@ -256,6 +347,10 @@ export default defineTool({
         return formatLogResults(formatParams);
       case "spans":
         return formatSpanResults(formatParams);
+      case "profiles":
+        return formatProfileResults(formatParams);
+      default:
+        return formatTraceMetricsResults(formatParams);
     }
   },
 });

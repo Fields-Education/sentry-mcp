@@ -23,6 +23,7 @@ import {
   MCP_RATE_LIMIT_EXCEEDED_MESSAGE,
 } from "../utils/rate-limiter";
 import { annotateResponseMetric } from "../metrics";
+import { resolveClientFamily } from "./client-family";
 import { verifyConstraintsAccess } from "./constraint-utils";
 
 /**
@@ -128,6 +129,8 @@ const mcpHandler: ExportedHandler<Env> = {
     const accessToken = rawProps.accessToken as string;
     const clientId = rawProps.clientId as string;
     const sentryHost = env.SENTRY_HOST || "sentry.io";
+    const clientFamily = resolveClientFamily(request.headers.get("user-agent"));
+    Sentry.setUser({ id: userId });
 
     // Parse and validate granted skills (primary authorization method)
     // Legacy tokens without grantedSkills are no longer supported
@@ -139,11 +142,14 @@ const mcpHandler: ExportedHandler<Env> = {
       return revokeStaleGrant(ctx, env, userId, clientId, "legacy grant");
     }
 
-    // Grants created before refreshToken was stored in props are stale and
-    // can no longer be silently refreshed. Revoke and force clean re-auth.
+    // Attribute values avoid the substring "token" so Sentry's default PII
+    // scrubber doesn't replace them with "[Filtered]" on ingest.
     if (!rawProps.refreshToken) {
       Sentry.metrics.count("mcp.oauth.grant_revoked", 1, {
-        attributes: { reason: "missing_refresh_token" },
+        attributes: {
+          reason: "stale_props_no_refresh",
+          client_family: clientFamily,
+        },
       });
       return revokeStaleGrant(
         ctx,
@@ -156,7 +162,10 @@ const mcpHandler: ExportedHandler<Env> = {
 
     if (rawProps.upstreamTokenInvalid) {
       Sentry.metrics.count("mcp.oauth.grant_revoked", 1, {
-        attributes: { reason: "invalid_upstream_token" },
+        attributes: {
+          reason: "upstream_rejected",
+          client_family: clientFamily,
+        },
       });
       return revokeStaleGrant(
         ctx,
@@ -220,6 +229,23 @@ const mcpHandler: ExportedHandler<Env> = {
       );
     }
 
+    const tokenOrg = rawProps.constraintOrganizationSlug?.trim() || null;
+    const tokenProject = rawProps.constraintProjectSlug?.trim() || null;
+    if (tokenOrg && organizationSlug !== tokenOrg) {
+      return new Response(
+        "This token is scoped to an organization. Use the MCP URL for the organization you authorized.",
+        { status: 403 },
+      );
+    }
+    if (tokenProject) {
+      if (!projectSlug || projectSlug !== tokenProject) {
+        return new Response(
+          "This token is scoped to a project. Use the MCP URL that includes that project (for example /mcp/<org>/<project>).",
+          { status: 403 },
+        );
+      }
+    }
+
     // Verify user has access to the requested org/project
     // Cache verification results in KV to avoid repeated API calls
     const verification = await verifyConstraintsAccess(
@@ -240,18 +266,50 @@ const mcpHandler: ExportedHandler<Env> = {
       });
     }
 
-    // Build complete ServerContext from OAuth props + verified constraints
+    const constraints = verification.constraints;
+
+    // Build complete ServerContext from OAuth props + verified constraints.
+    // `upstreamUnauthorizedHandled` de-dupes within the request — use_sentry
+    // runs multiple sub-tool calls in a single request, and each would
+    // otherwise fire the callback independently against the same dead grant.
+    let upstreamUnauthorizedHandled = false;
     const serverContext: ServerContext = {
       userId,
       clientId,
       accessToken,
       grantedSkills: validSkills,
-      constraints: verification.constraints,
+      constraints,
       sentryHost,
       mcpUrl: env.MCP_URL,
       agentMode: isAgentMode,
       experimentalMode: isExperimentalMode,
       transport: "http",
+      onUpstreamUnauthorized: () => {
+        if (upstreamUnauthorizedHandled) return;
+        upstreamUnauthorizedHandled = true;
+        Sentry.metrics.count("mcp.oauth.grant_revoked", 1, {
+          attributes: {
+            reason: "upstream_rejected_in_use",
+            client_family: clientFamily,
+          },
+        });
+        ctx.waitUntil(
+          (async () => {
+            try {
+              const grants = await env.OAUTH_PROVIDER.listUserGrants(userId);
+              const grant = grants.items.find((g) => g.clientId === clientId);
+              if (grant) {
+                await env.OAUTH_PROVIDER.revokeGrant(grant.id, userId);
+              }
+            } catch (err) {
+              logWarn("Failed to revoke grant after upstream 401", {
+                loggerScope: ["cloudflare", "mcp-handler"],
+                extra: { error: String(err), clientId, userId },
+              });
+            }
+          })(),
+        );
+      },
     };
 
     // Create and configure MCP server with tools filtered by context

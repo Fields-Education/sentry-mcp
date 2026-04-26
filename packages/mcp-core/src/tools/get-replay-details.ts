@@ -8,7 +8,9 @@ import type {
 } from "../api-client";
 import { defineTool } from "../internal/tool-helpers/define";
 import { apiServiceFromContext } from "../internal/tool-helpers/api";
+import { resolveRegionUrlForOrganization } from "../internal/tool-helpers/resolve-region-url";
 import { parseSentryUrl } from "../internal/url-helpers";
+import { resolveScopedOrganizationSlug } from "../internal/url-scope";
 import { UserInputError } from "../errors";
 import type { ServerContext } from "../types";
 import {
@@ -59,7 +61,7 @@ export default defineTool({
     "<examples>",
     "### With replay URL",
     "```",
-    "get_replay_details(replayUrl='https://my-organization.sentry.io/replays/7e07485f-12f9-416b-8b14-26260799b51f/')",
+    "get_replay_details(replayUrl='https://my-organization.sentry.io/explore/replays/7e07485f-12f9-416b-8b14-26260799b51f/')",
     "```",
     "",
     "### With organization and replay ID",
@@ -80,10 +82,10 @@ export default defineTool({
   },
   async handler(params, context: ServerContext) {
     const resolved = resolveReplayParams(params);
-    const regionUrl = await resolveReplayRegionUrl({
+    const regionUrl = await resolveRegionUrlForOrganization({
       context,
       organizationSlug: resolved.organizationSlug,
-      regionUrl: params.regionUrl ?? context.constraints.regionUrl,
+      regionUrl: params.regionUrl,
     });
     const apiService = apiServiceFromContext(context, {
       regionUrl: regionUrl ?? undefined,
@@ -95,6 +97,12 @@ export default defineTool({
     const replay = await apiService.getReplayDetails({
       organizationSlug: resolved.organizationSlug,
       replayId: resolved.replayId,
+    });
+    await assertReplayWithinProjectConstraint({
+      apiService,
+      organizationSlug: resolved.organizationSlug,
+      replay,
+      projectSlug: context.constraints.projectSlug,
     });
 
     const isArchived = replay.is_archived === true;
@@ -150,9 +158,11 @@ export function resolveReplayParams(params: {
       );
     }
     return {
-      // Prefer an explicit or injected organization constraint when available,
-      // while still validating and extracting the replay ID from the URL.
-      organizationSlug: params.organizationSlug ?? parsed.organizationSlug,
+      organizationSlug: resolveScopedOrganizationSlug({
+        resourceLabel: "Replay",
+        scopedOrganizationSlug: params.organizationSlug,
+        urlOrganizationSlug: parsed.organizationSlug,
+      }),
       replayId: parsed.replayId,
     };
   }
@@ -169,27 +179,36 @@ export function resolveReplayParams(params: {
   };
 }
 
-async function resolveReplayRegionUrl({
-  context,
+async function assertReplayWithinProjectConstraint({
+  apiService,
   organizationSlug,
-  regionUrl,
+  replay,
+  projectSlug,
 }: {
-  context: ServerContext;
+  apiService: SentryApiService;
   organizationSlug: string;
-  regionUrl?: string | null;
-}): Promise<string | null> {
-  if (regionUrl != null) {
-    const trimmedRegionUrl = regionUrl.trim();
-    return trimmedRegionUrl || null;
+  replay: ReplayDetails;
+  projectSlug?: string | null;
+}): Promise<void> {
+  if (!projectSlug) {
+    return;
   }
 
-  try {
-    const organization =
-      await apiServiceFromContext(context).getOrganization(organizationSlug);
-    const resolvedRegionUrl = organization.links?.regionUrl?.trim();
-    return resolvedRegionUrl || null;
-  } catch {
-    return null;
+  if (replay.project_id == null) {
+    throw new UserInputError(
+      `Replay is outside the active project constraint. Expected project "${projectSlug}".`,
+    );
+  }
+
+  const project = await apiService.getProject({
+    organizationSlug,
+    projectSlugOrId: projectSlug,
+  });
+
+  if (String(project.id) !== String(replay.project_id)) {
+    throw new UserInputError(
+      `Replay is outside the active project constraint. Expected project "${projectSlug}".`,
+    );
   }
 }
 
@@ -249,6 +268,21 @@ function formatReplayOutput({
   }
   if (replay.releases && replay.releases.length > 0) {
     lines.push(`- **Release**: ${replay.releases[0]}`);
+  }
+  if (replay.replay_type) {
+    lines.push(`- **Replay Type**: ${replay.replay_type}`);
+  }
+  lines.push(`- **Errors**: ${replay.count_errors ?? 0}`);
+  lines.push(`- **Rage Clicks**: ${replay.count_rage_clicks ?? 0}`);
+  lines.push(`- **Dead Clicks**: ${replay.count_dead_clicks ?? 0}`);
+  lines.push(`- **Warnings**: ${replay.count_warnings ?? 0}`);
+  lines.push(`- **Infos**: ${replay.count_infos ?? 0}`);
+  if (replay.count_segments != null) {
+    lines.push(`- **Recording Segments**: ${replay.count_segments}`);
+  }
+  lines.push(`- **Archived**: ${isArchived ? "Yes" : "No"}`);
+  if (replay.has_viewed != null) {
+    lines.push(`- **Viewed**: ${replay.has_viewed ? "Yes" : "No"}`);
   }
 
   // Activity

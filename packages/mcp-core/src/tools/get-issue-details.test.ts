@@ -1,17 +1,18 @@
-import { describe, it, expect } from "vitest";
-import { http, HttpResponse } from "msw";
 import {
-  mswServer,
+  createCspEvent,
+  createCspIssue,
   createDefaultEvent,
   createGenericEvent,
-  createUnknownEvent,
   createPerformanceEvent,
   createPerformanceIssue,
   createRegressedIssue,
+  createUnknownEvent,
   createUnsupportedIssue,
-  createCspIssue,
-  createCspEvent,
+  issueNullCulpritFixture,
+  mswServer,
 } from "@sentry/mcp-server-mocks";
+import { http, HttpResponse } from "msw";
+import { describe, expect, it } from "vitest";
 import getIssueDetails from "./get-issue-details.js";
 
 const baseContext = {
@@ -218,6 +219,11 @@ describe("get_issue_details", () => {
       **Method:** GET
       **URL:** https://mcp.sentry.dev/sse
 
+      ### User
+
+      **user**: ip:2a06:98c0:3600::103
+      **user.geo**: US, United States
+
       ### Tags
 
       **environment**: development
@@ -254,6 +260,33 @@ describe("get_issue_details", () => {
       - To search for specific occurrences or filter events within this issue, use \`search_issue_events(organizationSlug='sentry-mcp-evals', issueId='CLOUDFLARE-MCP-41', naturalLanguageQuery='your query')\`
       "
     `);
+  });
+
+  it("omits null culprit values from issue output", async () => {
+    mswServer.use(
+      http.get(
+        "https://sentry.io/api/0/organizations/sentry-mcp-evals/issues/CLOUDFLARE-MCP-41/",
+        () => HttpResponse.json(issueNullCulpritFixture),
+        { once: true },
+      ),
+    );
+
+    const result = await getIssueDetails.handler(
+      {
+        organizationSlug: "sentry-mcp-evals",
+        issueId: "CLOUDFLARE-MCP-41",
+        eventId: undefined,
+        issueUrl: undefined,
+        regionUrl: null,
+      },
+      baseContext,
+    );
+
+    expect(result).toContain(
+      "**Description**: Error: Tool list_issues is already registered",
+    );
+    expect(result).not.toContain("**Culprit**:");
+    expect(result).not.toContain("**Culprit**: null");
   });
 
   it("displays team assignment correctly", async () => {
@@ -370,12 +403,12 @@ describe("get_issue_details", () => {
     expect(replaySection).toMatchInlineSnapshot(`
       "## Session Replay
 
-      **Attached Replay**: https://sentry-mcp-evals.sentry.io/replays/7e07485f12f9416b8b1426260799b51f/
+      **Attached Replay**: https://sentry-mcp-evals.sentry.io/explore/replays/7e07485f12f9416b8b1426260799b51f/
       **Related Replay Count**: 2
 
       ### Other Related Replays
 
-      - https://sentry-mcp-evals.sentry.io/replays/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/
+      - https://sentry-mcp-evals.sentry.io/explore/replays/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/
 
       Use \`get_replay_details(organizationSlug='sentry-mcp-evals', replayId='7e07485f12f9416b8b1426260799b51f')\` to inspect a replay in detail."
     `);
@@ -441,6 +474,11 @@ describe("get_issue_details", () => {
 
       **Method:** GET
       **URL:** https://mcp.sentry.dev/sse
+
+      ### User
+
+      **user**: ip:2a06:98c0:3600::103
+      **user.geo**: US, United States
 
       ### Tags
 
@@ -718,6 +756,11 @@ describe("get_issue_details", () => {
 
       **Method:** GET
       **URL:** https://mcp.sentry.dev/sse
+
+      ### User
+
+      **user**: ip:2a06:98c0:3600::103
+      **user.geo**: US, United States
 
       ### Tags
 
@@ -1538,5 +1581,28 @@ describe("get_issue_details", () => {
 
     // Verify we actually got a Sentry Event ID
     expect(sentryEventId).toMatch(/^[a-f0-9]{32}$/);
+  });
+
+  it("rejects issues outside the active project constraint", async () => {
+    await expect(
+      getIssueDetails.handler(
+        {
+          organizationSlug: "sentry-mcp-evals",
+          issueId: "CLOUDFLARE-MCP-41",
+          issueUrl: undefined,
+          eventId: undefined,
+          regionUrl: null,
+        },
+        {
+          ...baseContext,
+          constraints: {
+            ...baseContext.constraints,
+            projectSlug: "frontend",
+          },
+        },
+      ),
+    ).rejects.toThrow(
+      'Issue is outside the active project constraint. Expected project "frontend".',
+    );
   });
 });

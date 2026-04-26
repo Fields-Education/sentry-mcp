@@ -29,12 +29,13 @@ describe("search_events", () => {
 
   // Helper to create AI response for different datasets
   const mockAIResponse = (
-    dataset: "errors" | "logs" | "spans",
+    dataset: "errors" | "logs" | "spans" | "metrics" | "profiles" | "replays",
     query = "test query",
     fields?: string[],
     errorMessage?: string,
     sort?: string,
     timeRange?: { statsPeriod: string } | { start: string; end: string },
+    environment?: string | string[] | null,
   ) => {
     const defaultFields = {
       errors: ["issue", "title", "project", "timestamp", "level", "message"],
@@ -47,12 +48,34 @@ describe("search_events", () => {
         "timestamp",
         "project",
       ],
+      metrics: [
+        "timestamp",
+        "project",
+        "metric.name",
+        "metric.type",
+        "metric.unit",
+        "value",
+        "trace",
+      ],
+      profiles: [
+        "project",
+        "profile.id",
+        "timestamp",
+        "transaction",
+        "transaction.duration",
+        "release",
+        "trace",
+      ],
+      replays: [],
     };
 
     const defaultSorts = {
       errors: "-timestamp",
       logs: "-timestamp",
       spans: "-span.duration",
+      metrics: "-timestamp",
+      profiles: "-timestamp",
+      replays: "-started_at",
     };
 
     const output = errorMessage
@@ -62,6 +85,7 @@ describe("search_events", () => {
           query,
           fields: fields || defaultFields[dataset],
           sort: sort || defaultSorts[dataset],
+          environment: environment ?? null,
           timeRange: timeRange ?? null,
           explanation: "Test query translation",
         };
@@ -135,6 +159,594 @@ describe("search_events", () => {
     expect(mockGenerateText).toHaveBeenCalled();
     expect(result).toContain("span1");
     expect(result).toContain("db.query");
+  });
+
+  it("should handle metrics dataset queries", async () => {
+    mockGenerateText.mockResolvedValueOnce(
+      mockAIResponse(
+        "metrics",
+        "",
+        [
+          "transaction",
+          "p95(value,http.request.duration,distribution,millisecond)",
+          "count(value,http.request.duration,distribution,millisecond)",
+        ],
+        undefined,
+        "-p95(value,http.request.duration,distribution,millisecond)",
+      ),
+    );
+
+    mswServer.use(
+      http.get(
+        "https://sentry.io/api/0/organizations/test-org/events/",
+        ({ request }) => {
+          const url = new URL(request.url);
+          expect(url.searchParams.get("dataset")).toBe("tracemetrics");
+          expect(url.searchParams.get("sort")).toBe(
+            "-p95(value,http.request.duration,distribution,millisecond)",
+          );
+          return HttpResponse.json({
+            data: [
+              {
+                transaction: "GET /api/users",
+                "p95(value,http.request.duration,distribution,millisecond)": 320,
+                "count(value,http.request.duration,distribution,millisecond)": 42,
+              },
+            ],
+          });
+        },
+      ),
+    );
+
+    const result = await searchEvents.handler(
+      {
+        organizationSlug: "test-org",
+        regionUrl: null,
+        projectSlug: null,
+        naturalLanguageQuery: "slow request duration metrics",
+        limit: 10,
+        includeExplanation: false,
+      },
+      {
+        constraints: {
+          organizationSlug: null,
+          regionUrl: null,
+          projectSlug: null,
+        },
+        accessToken: "test-token",
+        userId: "1",
+      },
+    );
+
+    expect(result).toMatchInlineSnapshot(`
+      "# Search Results for "slow request duration metrics"
+
+      ⚠️ **IMPORTANT**: Display these metric aggregates as a data table with proper column alignment, grouping labels, and units.
+
+      **View these results in Sentry**:
+      https://test-org.sentry.io/explore/metrics/?statsPeriod=14d&metric=%7B%22metric%22%3A%7B%22name%22%3A%22http.request.duration%22%2C%22type%22%3A%22distribution%22%2C%22unit%22%3A%22millisecond%22%7D%2C%22query%22%3A%22%22%2C%22aggregateFields%22%3A%5B%7B%22yAxes%22%3A%5B%22p95%28value%2Chttp.request.duration%2Cdistribution%2Cmillisecond%29%22%5D%7D%2C%7B%22yAxes%22%3A%5B%22count%28value%2Chttp.request.duration%2Cdistribution%2Cmillisecond%29%22%5D%7D%2C%7B%22groupBy%22%3A%22transaction%22%7D%5D%2C%22aggregateSortBys%22%3A%5B%7B%22field%22%3A%22p95%28value%2Chttp.request.duration%2Cdistribution%2Cmillisecond%29%22%2C%22kind%22%3A%22desc%22%7D%5D%2C%22mode%22%3A%22aggregate%22%7D
+      _Please share this link with the user to view the search results in their Sentry dashboard._
+
+      Found 1 aggregate result:
+
+      \`\`\`json
+      [
+        {
+          "transaction": "GET /api/users",
+          "p95(value,http.request.duration,distribution,millisecond)": 320,
+          "count(value,http.request.duration,distribution,millisecond)": 42
+        }
+      ]
+      \`\`\`
+
+      ## Next Steps
+
+      - Open the Metrics page link above to refine the selected metric
+      - Drill into a specific sample by opening its Trace URL or using \`get_sentry_resource\` with that trace ID
+      - Metrics do not expose a standalone detail resource here; use the related trace for deeper inspection
+      - Group by additional attributes to break down the metric further
+      - Switch between samples and aggregates in Sentry for deeper analysis
+      "
+    `);
+  });
+
+  it("should request trace metric identity fields for metrics sample queries", async () => {
+    mockGenerateText.mockResolvedValueOnce(
+      mockAIResponse(
+        "metrics",
+        "",
+        ["timestamp", "value"],
+        undefined,
+        "-timestamp",
+      ),
+    );
+
+    mswServer.use(
+      http.get(
+        "https://sentry.io/api/0/organizations/test-org/events/",
+        ({ request }) => {
+          const url = new URL(request.url);
+
+          expect(url.searchParams.getAll("field")).toEqual([
+            "timestamp",
+            "value",
+            "metric.name",
+            "metric.type",
+            "metric.unit",
+          ]);
+
+          return HttpResponse.json({
+            data: [
+              {
+                timestamp: "2026-04-13T14:19:18+00:00",
+                value: 12.4,
+                trace: "6a477f5b0f31ef7b6b9b5e1dea66c91d",
+                "metric.name": "http.request.duration",
+                "metric.type": "distribution",
+                "metric.unit": "millisecond",
+              },
+            ],
+          });
+        },
+      ),
+    );
+
+    const result = await searchEvents.handler(
+      {
+        organizationSlug: "test-org",
+        regionUrl: null,
+        projectSlug: null,
+        naturalLanguageQuery: "recent metrics",
+        limit: 10,
+        includeExplanation: false,
+      },
+      {
+        constraints: {
+          organizationSlug: null,
+          regionUrl: null,
+          projectSlug: null,
+        },
+        accessToken: "test-token",
+        userId: "1",
+      },
+    );
+
+    expect(typeof result).toBe("string");
+    if (typeof result !== "string") {
+      throw new Error("Expected string result");
+    }
+
+    const urlMatch = result.match(/https:\/\/[^\n]+/);
+    expect(urlMatch).not.toBeNull();
+
+    const url = new URL(urlMatch![0]);
+    const metricQuery = JSON.parse(url.searchParams.get("metric")!);
+
+    expect(url.pathname).toBe("/explore/metrics/");
+    expect(metricQuery.metric).toEqual({
+      name: "http.request.duration",
+      type: "distribution",
+      unit: "millisecond",
+    });
+    expect(metricQuery.mode).toBe("samples");
+    expect(metricQuery.aggregateFields).toEqual([{ yAxes: ["sum(value)"] }]);
+  });
+
+  it("should handle profiles dataset queries", async () => {
+    mockGenerateText.mockResolvedValueOnce(
+      mockAIResponse(
+        "profiles",
+        "transaction:/api/users",
+        [
+          "project",
+          "profile.id",
+          "timestamp",
+          "transaction",
+          "transaction.duration",
+          "release",
+          "trace",
+          "precise.start_ts",
+          "precise.finish_ts",
+        ],
+        undefined,
+        "-timestamp",
+      ),
+    );
+
+    mswServer.use(
+      http.get(
+        "https://sentry.io/api/0/organizations/test-org/events/",
+        ({ request }) => {
+          const url = new URL(request.url);
+          expect(url.searchParams.get("dataset")).toBe("profiles");
+          return HttpResponse.json({
+            data: [
+              {
+                project: "backend",
+                "profile.id": "cfe78a5c892d4a64a962d837673398d2",
+                timestamp: "2025-01-15T10:00:00Z",
+                transaction: "/api/users",
+                "transaction.duration": 120000000,
+                release: "backend@1.2.3",
+                trace: "a4d1aae7216b47ff8117cf4e09ce9d0a",
+                "precise.start_ts": "2025-01-15T10:00:00Z",
+                "precise.finish_ts": "2025-01-15T10:00:00.120Z",
+              },
+            ],
+          });
+        },
+      ),
+    );
+
+    const result = await searchEvents.handler(
+      {
+        organizationSlug: "test-org",
+        regionUrl: null,
+        projectSlug: null,
+        naturalLanguageQuery: "recent profiles for /api/users",
+        limit: 10,
+        includeExplanation: false,
+      },
+      {
+        constraints: {
+          organizationSlug: null,
+          regionUrl: null,
+          projectSlug: null,
+        },
+        accessToken: "test-token",
+        userId: "1",
+      },
+    );
+
+    expect(result).toContain("https://test-org.sentry.io/explore/profiling/");
+    expect(result).toContain(
+      "https://test-org.sentry.io/explore/profiling/profile/backend/cfe78a5c892d4a64a962d837673398d2/flamegraph/",
+    );
+    expect(result).toContain("**transaction.duration**: 120ms");
+  });
+
+  it("should build continuous profile links when precise timestamps are exact strings", async () => {
+    mockGenerateText.mockResolvedValueOnce(
+      mockAIResponse(
+        "profiles",
+        "transaction:/api/users",
+        [
+          "project",
+          "profiler.id",
+          "timestamp",
+          "transaction",
+          "transaction.duration",
+          "trace",
+          "precise.start_ts",
+          "precise.finish_ts",
+        ],
+        undefined,
+        "-timestamp",
+      ),
+    );
+
+    mswServer.use(
+      http.get(
+        "https://sentry.io/api/0/organizations/test-org/events/",
+        ({ request }) => {
+          const url = new URL(request.url);
+          expect(url.searchParams.get("dataset")).toBe("profiles");
+          return HttpResponse.json({
+            data: [
+              {
+                project: "backend",
+                "profiler.id": "7d0d8b4ef0c74b07a3d48886e9b198e5",
+                timestamp: "2025-01-15T10:00:00Z",
+                transaction: "/api/users",
+                "transaction.duration": 120000000,
+                trace: "a4d1aae7216b47ff8117cf4e09ce9d0a",
+                "precise.start_ts": "1736935200000000000",
+                "precise.finish_ts": "1736935200120000000",
+              },
+            ],
+          });
+        },
+      ),
+    );
+
+    const result = await searchEvents.handler(
+      {
+        organizationSlug: "test-org",
+        regionUrl: null,
+        projectSlug: null,
+        naturalLanguageQuery: "recent profiles for /api/users",
+        limit: 10,
+        includeExplanation: false,
+      },
+      {
+        constraints: {
+          organizationSlug: null,
+          regionUrl: null,
+          projectSlug: null,
+        },
+        accessToken: "test-token",
+        userId: "1",
+      },
+    );
+
+    expect(result).toContain(
+      "https://test-org.sentry.io/explore/profiling/profile/backend/flamegraph/?profilerId=7d0d8b4ef0c74b07a3d48886e9b198e5&start=1736935200000000000&end=1736935200120000000",
+    );
+    expect(result).toContain("**transaction.duration**: 120ms");
+  });
+
+  it("should omit continuous profile links when precise timestamps are unsafe numbers", async () => {
+    mockGenerateText.mockResolvedValueOnce(
+      mockAIResponse(
+        "profiles",
+        "transaction:/api/users",
+        [
+          "project",
+          "profiler.id",
+          "timestamp",
+          "transaction",
+          "transaction.duration",
+          "trace",
+          "precise.start_ts",
+          "precise.finish_ts",
+        ],
+        undefined,
+        "-timestamp",
+      ),
+    );
+
+    mswServer.use(
+      http.get(
+        "https://sentry.io/api/0/organizations/test-org/events/",
+        ({ request }) => {
+          const url = new URL(request.url);
+          expect(url.searchParams.get("dataset")).toBe("profiles");
+          return HttpResponse.json({
+            data: [
+              {
+                project: "backend",
+                "profiler.id": "7d0d8b4ef0c74b07a3d48886e9b198e5",
+                timestamp: "2025-01-15T10:00:00Z",
+                transaction: "/api/users",
+                "transaction.duration": 120000000,
+                trace: "a4d1aae7216b47ff8117cf4e09ce9d0a",
+                "precise.start_ts": 1736935200000000000,
+                "precise.finish_ts": 1736935200120000000,
+              },
+            ],
+          });
+        },
+      ),
+    );
+
+    const result = await searchEvents.handler(
+      {
+        organizationSlug: "test-org",
+        regionUrl: null,
+        projectSlug: null,
+        naturalLanguageQuery: "recent profiles for /api/users",
+        limit: 10,
+        includeExplanation: false,
+      },
+      {
+        constraints: {
+          organizationSlug: null,
+          regionUrl: null,
+          projectSlug: null,
+        },
+        accessToken: "test-token",
+        userId: "1",
+      },
+    );
+
+    expect(result).not.toContain(
+      "**Profile URL**: https://test-org.sentry.io/explore/profiling/profile/backend/flamegraph/?profilerId=7d0d8b4ef0c74b07a3d48886e9b198e5",
+    );
+    expect(result).toContain("**transaction.duration**: 120ms");
+  });
+
+  it("should preserve grouped profile fields in the explorer URL", async () => {
+    mockGenerateText.mockResolvedValueOnce(
+      mockAIResponse(
+        "profiles",
+        "",
+        ["release", "count()"],
+        undefined,
+        "-count()",
+      ),
+    );
+
+    mswServer.use(
+      http.get(
+        "https://sentry.io/api/0/organizations/test-org/events/",
+        ({ request }) => {
+          const url = new URL(request.url);
+          expect(url.searchParams.get("dataset")).toBe("profiles");
+          return HttpResponse.json({
+            data: [
+              {
+                release: "backend@1.2.3",
+                "count()": 3,
+              },
+            ],
+          });
+        },
+      ),
+    );
+
+    const result = await searchEvents.handler(
+      {
+        organizationSlug: "test-org",
+        regionUrl: null,
+        projectSlug: null,
+        naturalLanguageQuery: "count profiles by release",
+        limit: 10,
+        includeExplanation: false,
+      },
+      {
+        constraints: {
+          organizationSlug: null,
+          regionUrl: null,
+          projectSlug: null,
+        },
+        accessToken: "test-token",
+        userId: "1",
+      },
+    );
+
+    expect(typeof result).toBe("string");
+    if (typeof result !== "string") {
+      throw new Error("Expected string result");
+    }
+
+    const urlMatch = result.match(/https:\/\/[^\n]+/);
+    expect(urlMatch).not.toBeNull();
+
+    const url = new URL(urlMatch![0]);
+
+    expect(url.pathname).toBe("/explore/profiling/");
+    expect(url.searchParams.get("sort")).toBe("-count()");
+    expect(url.searchParams.getAll("field")).toEqual(["release", "count()"]);
+  });
+
+  it("should omit profile detail links when only project.name is selected", async () => {
+    mockGenerateText.mockResolvedValueOnce(
+      mockAIResponse(
+        "profiles",
+        "transaction:/api/users",
+        [
+          "project.name",
+          "profile.id",
+          "timestamp",
+          "transaction",
+          "transaction.duration",
+        ],
+        undefined,
+        "-timestamp",
+      ),
+    );
+
+    mswServer.use(
+      http.get(
+        "https://sentry.io/api/0/organizations/test-org/events/",
+        ({ request }) => {
+          const url = new URL(request.url);
+          expect(url.searchParams.get("dataset")).toBe("profiles");
+          return HttpResponse.json({
+            data: [
+              {
+                "project.name": "Backend API",
+                "profile.id": "cfe78a5c892d4a64a962d837673398d2",
+                timestamp: "2025-01-15T10:00:00Z",
+                transaction: "/api/users",
+                "transaction.duration": 120000000,
+              },
+            ],
+          });
+        },
+      ),
+    );
+
+    const result = await searchEvents.handler(
+      {
+        organizationSlug: "test-org",
+        regionUrl: null,
+        projectSlug: null,
+        naturalLanguageQuery: "recent profiles for /api/users",
+        limit: 10,
+        includeExplanation: false,
+      },
+      {
+        constraints: {
+          organizationSlug: null,
+          regionUrl: null,
+          projectSlug: null,
+        },
+        accessToken: "test-token",
+        userId: "1",
+      },
+    );
+
+    expect(result).not.toContain("**Profile URL**:");
+    expect(result).not.toContain("/profile/Backend API/");
+    expect(result).toContain("**project.name**: Backend API");
+  });
+
+  it("should handle replay dataset queries through search_events", async () => {
+    mockGenerateText.mockResolvedValueOnce(
+      mockAIResponse(
+        "replays",
+        "url:*checkout* count_errors:>0",
+        [],
+        undefined,
+        "-count_errors",
+        { statsPeriod: "24h" },
+        ["production", "staging"],
+      ),
+    );
+
+    mswServer.use(
+      http.get(
+        "https://sentry.io/api/0/organizations/test-org/replays/",
+        ({ request }) => {
+          const url = new URL(request.url);
+          expect(url.searchParams.get("query")).toBe(
+            "url:*checkout* count_errors:>0",
+          );
+          expect(url.searchParams.get("sort")).toBe("-count_errors");
+          expect(url.searchParams.getAll("environment")).toEqual([
+            "production",
+            "staging",
+          ]);
+          expect(url.searchParams.get("statsPeriod")).toBe("24h");
+          return HttpResponse.json({
+            data: [
+              {
+                id: "7e07485f12f9416b8b1426260799b51f",
+                duration: 576,
+                environment: "production",
+                count_errors: 2,
+                count_rage_clicks: 1,
+                count_dead_clicks: 3,
+                started_at: "2025-01-15T10:00:00Z",
+                browser: { name: "Chrome", version: "131.0.0" },
+                user: { display_name: "Jane Doe" },
+                urls: ["/checkout", "/checkout/payment", "/checkout/confirm"],
+                releases: ["frontend@1.2.3"],
+                trace_ids: ["a4d1aae7216b47ff8117cf4e09ce9d0a"],
+              },
+            ],
+          });
+        },
+      ),
+    );
+
+    const result = await searchEvents.handler(
+      {
+        organizationSlug: "test-org",
+        regionUrl: null,
+        projectSlug: null,
+        naturalLanguageQuery:
+          "production checkout replays with errors in the last day",
+        limit: 10,
+        includeExplanation: true,
+      },
+      {
+        constraints: {
+          organizationSlug: null,
+          regionUrl: null,
+          projectSlug: null,
+        },
+        accessToken: "test-token",
+        userId: "1",
+      },
+    );
+
+    expect(result).toContain("https://test-org.sentry.io/explore/replays/");
+    expect(result).toContain("environment=production&environment=staging");
+    expect(result).toContain("Environment: production, staging");
+    expect(result).toContain("Jane Doe");
+    expect(result).toContain("2 errors");
   });
 
   it("should handle errors dataset queries", async () => {
@@ -256,6 +868,177 @@ describe("search_events", () => {
     expect(result).toContain("email=foo@example.com");
     expect(result).toContain("os=iOS 17");
     expect(result).not.toContain("[object Object]");
+  });
+
+  it("should render geo-only users without raw user JSON in error results", async () => {
+    mockGenerateText.mockResolvedValueOnce(
+      mockAIResponse("errors", "issue:PROJ-123", [
+        "title",
+        "timestamp",
+        "user",
+      ]),
+    );
+
+    mswServer.use(
+      http.get("https://sentry.io/api/0/organizations/test-org/events/", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              id: "error1",
+              title: "Geo-only User Error",
+              timestamp: "2024-01-15T10:30:00Z",
+              user: {
+                geo: {
+                  country_code: "US",
+                  region: "United States",
+                },
+              },
+            },
+          ],
+        });
+      }),
+    );
+
+    const result = await searchEvents.handler(
+      {
+        organizationSlug: "test-org",
+        regionUrl: null,
+        projectSlug: null,
+        naturalLanguageQuery: "recent errors with geo-only user data",
+        limit: 10,
+        includeExplanation: false,
+      },
+      {
+        constraints: {
+          organizationSlug: null,
+          regionUrl: null,
+          projectSlug: null,
+        },
+        accessToken: "test-token",
+        userId: "1",
+      },
+    );
+
+    expect(result).toContain("**user.geo**: US, United States");
+    expect(result).not.toContain('**user**: {"geo"');
+    expect(result).not.toContain("**user**:");
+  });
+
+  it("should render log user geo on a dedicated line", async () => {
+    mockGenerateText.mockResolvedValueOnce(
+      mockAIResponse("logs", "user logs", [
+        "timestamp",
+        "message",
+        "severity",
+        "user",
+      ]),
+    );
+
+    mswServer.use(
+      http.get("https://sentry.io/api/0/organizations/test-org/events/", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              timestamp: "2024-01-15T10:30:00Z",
+              message: "User log message",
+              severity: "info",
+              user: {
+                id: "user-123",
+                geo: {
+                  country_code: "US",
+                  region: "United States",
+                },
+              },
+            },
+          ],
+        });
+      }),
+    );
+
+    const result = await searchEvents.handler(
+      {
+        organizationSlug: "test-org",
+        regionUrl: null,
+        projectSlug: null,
+        naturalLanguageQuery: "logs with user geo",
+        limit: 10,
+        includeExplanation: false,
+      },
+      {
+        constraints: {
+          organizationSlug: null,
+          regionUrl: null,
+          projectSlug: null,
+        },
+        accessToken: "test-token",
+        userId: "1",
+      },
+    );
+
+    expect(result).toContain("- **user**: id=user-123");
+    expect(result).toContain("- **user.geo**: US, United States");
+    expect(result).not.toContain(
+      "- **user**: id=user-123, geo=US, United States",
+    );
+  });
+
+  it("should render span user geo on a dedicated line", async () => {
+    mockGenerateText.mockResolvedValueOnce(
+      mockAIResponse("spans", "span users", [
+        "span.description",
+        "span.duration",
+        "timestamp",
+        "user",
+      ]),
+    );
+
+    mswServer.use(
+      http.get("https://sentry.io/api/0/organizations/test-org/events/", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              id: "span1",
+              "span.description": "SELECT * FROM users",
+              "span.duration": 1500,
+              timestamp: "2024-01-15T10:30:00Z",
+              user: {
+                id: "user-123",
+                geo: {
+                  country_code: "US",
+                  region: "United States",
+                },
+              },
+            },
+          ],
+        });
+      }),
+    );
+
+    const result = await searchEvents.handler(
+      {
+        organizationSlug: "test-org",
+        regionUrl: null,
+        projectSlug: null,
+        naturalLanguageQuery: "spans with user geo",
+        limit: 10,
+        includeExplanation: false,
+      },
+      {
+        constraints: {
+          organizationSlug: null,
+          regionUrl: null,
+          projectSlug: null,
+        },
+        accessToken: "test-token",
+        userId: "1",
+      },
+    );
+
+    expect(result).toContain("**user**: id=user-123");
+    expect(result).toContain("**user.geo**: US, United States");
+    expect(result).not.toContain(
+      "**user**: id=user-123, geo=US, United States",
+    );
   });
 
   it("should handle logs dataset queries", async () => {

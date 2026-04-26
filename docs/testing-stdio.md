@@ -176,6 +176,19 @@ This opens the MCP Inspector at `http://localhost:6274`
 }
 ```
 
+**For self-hosted Sentry on plain HTTP:**
+```json
+{
+  "command": "npx",
+  "args": [
+    "@sentry/mcp-server@latest",
+    "--access-token=YOUR_TOKEN",
+    "--host=sentry.internal:9000",
+    "--insecure-http"
+  ]
+}
+```
+
 4. Click "Connect"
 5. Click "List Tools" to verify connection
 
@@ -414,7 +427,7 @@ SENTRY_HOST=sentry.example.com
 MCP_SKILLS=inspect,docs,triage           # Limit to specific skills
 
 # AI features
-OPENAI_API_KEY=your-key                  # For search_events/search_issues
+OPENAI_API_KEY=your-key                  # For AI-powered search tools like search_events/search_issues
 
 # Sentry reporting
 SENTRY_DSN=your-dsn
