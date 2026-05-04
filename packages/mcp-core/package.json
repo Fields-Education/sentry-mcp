@@ -1,6 +1,6 @@
 {
   "name": "@sentry/mcp-core",
-  "version": "0.31.0",
+  "version": "0.33.0",
   "type": "module",
   "private": true,
   "packageManager": "pnpm@10.8.1",
@@ -112,6 +112,10 @@
     "./internal/agents/openai-provider": {
       "types": "./dist/internal/agents/openai-provider.ts",
       "default": "./dist/internal/agents/openai-provider.js"
+    },
+    "./internal/agents/azure-openai-provider": {
+      "types": "./dist/internal/agents/azure-openai-provider.ts",
+      "default": "./dist/internal/agents/azure-openai-provider.js"
     },
     "./internal/agents/anthropic-provider": {
       "types": "./dist/internal/agents/anthropic-provider.ts",

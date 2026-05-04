@@ -35,6 +35,16 @@ describe("getIssueUrl", () => {
       `"https://localhost:8000/organizations/sentry-mcp/issues/123456"`,
     );
   });
+  it("should support HTTP issue URLs for self-hosted instances when configured", () => {
+    const apiService = new SentryApiService({
+      host: "localhost:8000",
+      protocol: "http",
+    });
+    const result = apiService.getIssueUrl("sentry-mcp", "123456");
+    expect(result).toMatchInlineSnapshot(
+      `"http://localhost:8000/organizations/sentry-mcp/issues/123456"`,
+    );
+  });
   it("should handle regional URLs correctly for SaaS", () => {
     const apiService = new SentryApiService({ host: "us.sentry.io" });
     const result = apiService.getIssueUrl("sentry", "PROJ-THREAD-LEAKS-12");
@@ -624,6 +634,20 @@ describe("host configuration", () => {
     expect(apiService.apiPrefix).toBe("https://localhost:8000/api/0");
   });
 
+  it("should support opt-in HTTP for self-hosted instances", () => {
+    const apiService = new SentryApiService({
+      host: "sentry.internal:9000",
+      protocol: "http",
+    });
+    // @ts-expect-error - accessing private property for testing
+    expect(apiService.host).toBe("sentry.internal:9000");
+    // @ts-expect-error - accessing private property for testing
+    expect(apiService.apiPrefix).toBe("http://sentry.internal:9000/api/0");
+    expect(apiService.getIssueUrl("sentry-mcp", "123456")).toBe(
+      "http://sentry.internal:9000/organizations/sentry-mcp/issues/123456",
+    );
+  });
+
   it("should update host and API prefix with setHost", () => {
     const apiService = new SentryApiService({ host: "sentry.io" });
 
@@ -853,6 +877,27 @@ describe("API query builders", () => {
       // Should not crash and should return the original sort if malformed
       expect(params.get("sort")).toBe("-count(((");
     });
+
+    it("should preserve raw sort parameters for tracemetrics", () => {
+      const apiService = new SentryApiService({ host: "sentry.io" });
+
+      // @ts-expect-error - accessing private method for testing
+      const params = apiService.buildDiscoverApiQuery({
+        query: "",
+        fields: [
+          "transaction",
+          "p95(value,http.request.duration,distribution,millisecond)",
+        ],
+        limit: 10,
+        dataset: "tracemetrics",
+        sort: "-p95(value,http.request.duration,distribution,millisecond)",
+      });
+
+      expect(params.get("dataset")).toBe("tracemetrics");
+      expect(params.get("sort")).toBe(
+        "-p95(value,http.request.duration,distribution,millisecond)",
+      );
+    });
   });
 
   describe("buildEapApiQuery", () => {
@@ -977,6 +1022,76 @@ describe("API query builders", () => {
       );
       expect(globalThis.fetch).toHaveBeenCalledWith(
         expect.stringContaining("sampling=NORMAL"),
+        expect.any(Object),
+      );
+    });
+
+    it("should normalize metrics dataset to tracemetrics for Discover queries", async () => {
+      const apiService = new SentryApiService({
+        host: "sentry.io",
+        accessToken: "test-token",
+      });
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: {
+          get: (key: string) =>
+            key === "content-type" ? "application/json" : null,
+        },
+        json: () => Promise.resolve({ data: [] }),
+      });
+
+      await apiService.searchEvents({
+        organizationSlug: "test-org",
+        query: "",
+        fields: [
+          "transaction",
+          "p95(value,http.request.duration,distribution,millisecond)",
+        ],
+        dataset: "metrics",
+        sort: "-p95(value,http.request.duration,distribution,millisecond)",
+      });
+
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("dataset=tracemetrics"),
+        expect.any(Object),
+      );
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "sort=-p95%28value%2Chttp.request.duration%2Cdistribution%2Cmillisecond%29",
+        ),
+        expect.any(Object),
+      );
+    });
+
+    it("should build replay search requests with repeated environment params", async () => {
+      const apiService = new SentryApiService({
+        host: "sentry.io",
+        accessToken: "test-token",
+      });
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: {
+          get: (key: string) =>
+            key === "content-type" ? "application/json" : null,
+        },
+        json: () => Promise.resolve({ data: [] }),
+      });
+
+      await apiService.searchReplays({
+        organizationSlug: "test-org",
+        query: "count_errors:>0",
+        sort: "-count_errors",
+        environment: ["production", "staging"],
+        statsPeriod: "24h",
+        limit: 25,
+      });
+
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "/api/0/organizations/test-org/replays/?query=count_errors%3A%3E0&per_page=25&sort=-count_errors&environment=production&environment=staging&statsPeriod=24h",
+        ),
         expect.any(Object),
       );
     });
@@ -1160,6 +1275,114 @@ describe("API query builders", () => {
         expect(url).toMatchInlineSnapshot(
           `"https://sentry.example.com/organizations/my-org/explore/traces/?query=&field=span.op&statsPeriod=24h&table=span"`,
         );
+      });
+    });
+
+    describe("metrics page URLs", () => {
+      it("should build a metrics page URL for metrics aggregates", () => {
+        const apiService = new SentryApiService({ host: "sentry.io" });
+
+        const url = apiService.getEventsExplorerUrl(
+          "my-org",
+          "",
+          "123456",
+          "metrics",
+          [
+            "transaction",
+            "p95(value,http.request.duration,distribution,millisecond)",
+            "count(value,http.request.duration,distribution,millisecond)",
+          ],
+          "-p95(value,http.request.duration,distribution,millisecond)",
+          [
+            "p95(value,http.request.duration,distribution,millisecond)",
+            "count(value,http.request.duration,distribution,millisecond)",
+          ],
+          ["transaction"],
+          "7d",
+        );
+
+        expect(url).toContain("https://my-org.sentry.io/explore/metrics/");
+        expect(url).toContain("project=123456");
+        expect(url).toContain("statsPeriod=7d");
+        expect(url).toContain(`%22mode%22%3A%22aggregate%22`);
+        expect(url).toContain(
+          `%22field%22%3A%22p95%28value%2Chttp.request.duration%2Cdistribution%2Cmillisecond%29%22`,
+        );
+      });
+
+      it("should derive concrete sample metrics from result rows", () => {
+        const apiService = new SentryApiService({ host: "sentry.io" });
+
+        const url = apiService.getEventsExplorerUrl(
+          "my-org",
+          "",
+          "123456",
+          "metrics",
+          ["timestamp", "value"],
+          "-timestamp",
+          undefined,
+          undefined,
+          "14d",
+          undefined,
+          undefined,
+          [
+            {
+              timestamp: "2026-04-13T14:19:18+00:00",
+              "metric.name": "http.request.duration",
+              "metric.type": "distribution",
+              "metric.unit": "millisecond",
+              value: 12.4,
+            },
+          ],
+        );
+
+        const parsedUrl = new URL(url);
+        const metricQueries = parsedUrl.searchParams
+          .getAll("metric")
+          .map((value) => JSON.parse(value));
+
+        expect(metricQueries).toEqual([
+          {
+            metric: {
+              name: "http.request.duration",
+              type: "distribution",
+              unit: "millisecond",
+            },
+            query: "",
+            aggregateFields: [{ yAxes: ["sum(value)"] }],
+            aggregateSortBys: [{ field: "sum(value)", kind: "desc" }],
+            mode: "samples",
+          },
+        ]);
+      });
+    });
+
+    describe("profiles page URLs", () => {
+      it("should preserve grouped profile field selection", () => {
+        const apiService = new SentryApiService({ host: "sentry.io" });
+
+        const url = apiService.getEventsExplorerUrl(
+          "my-org",
+          "",
+          "123456",
+          "profiles",
+          ["release", "count()"],
+          "-count()",
+          ["count()"],
+          ["release"],
+          "7d",
+        );
+
+        const parsedUrl = new URL(url);
+
+        expect(parsedUrl.pathname).toBe("/explore/profiling/");
+        expect(parsedUrl.searchParams.get("project")).toBe("123456");
+        expect(parsedUrl.searchParams.get("statsPeriod")).toBe("7d");
+        expect(parsedUrl.searchParams.get("sort")).toBe("-count()");
+        expect(parsedUrl.searchParams.getAll("field")).toEqual([
+          "release",
+          "count()",
+        ]);
       });
     });
   });

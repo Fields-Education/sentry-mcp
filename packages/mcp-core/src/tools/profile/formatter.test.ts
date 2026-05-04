@@ -1,9 +1,16 @@
-import { describe, it, expect } from "vitest";
-import type { Flamegraph, ProfileChunk } from "../../api-client/types";
+import { transactionProfileV1Fixture } from "@sentry/mcp-server-mocks";
+import { describe, expect, it } from "vitest";
+import { TransactionProfileSchema } from "../../api-client/schema";
+import type {
+  Flamegraph,
+  ProfileChunk,
+  TransactionProfile,
+} from "../../api-client/types";
 import {
   formatFlamegraphAnalysis,
   formatFlamegraphComparison,
   formatProfileChunkAnalysis,
+  formatTransactionProfileAnalysis,
 } from "./formatter";
 
 /**
@@ -147,6 +154,16 @@ function createMockProfileChunk(): ProfileChunk {
   } as ProfileChunk;
 }
 
+function createMockTransactionProfile(): TransactionProfile {
+  // Parse the fixture through the schema so transforms run (e.g. normalizing
+  // numeric thread_id and active_thread_id to strings). This keeps test
+  // fixtures in sync with what production code actually receives after the
+  // API client validates the response.
+  return TransactionProfileSchema.parse(
+    structuredClone(transactionProfileV1Fixture),
+  );
+}
+
 describe("formatter", () => {
   describe("formatFlamegraphAnalysis", () => {
     it("includes transaction information", () => {
@@ -198,6 +215,22 @@ describe("formatter", () => {
       expect(output).toContain("## Top Hot Paths");
       expect(output).toContain("### Path #1:");
       expect(output).toContain("samples");
+    });
+
+    it("falls back to thread profiles when shared profile metadata is omitted", () => {
+      const flamegraph = createMockFlamegraph({
+        shared: {
+          ...createMockFlamegraph().shared,
+          profiles: [],
+        },
+      });
+      const output = formatFlamegraphAnalysis(flamegraph, {
+        focusOnUserCode: false,
+        maxHotPaths: 5,
+      });
+
+      expect(output).toContain("**Total Profiles**: 1");
+      expect(output).toContain("across 1 profiles");
     });
 
     it("includes actionable next steps", () => {
@@ -409,6 +442,132 @@ describe("formatter", () => {
       });
 
       expect(output).toContain("libc.so");
+    });
+  });
+
+  describe("formatTransactionProfileAnalysis", () => {
+    it("counts frame occurrences from samples instead of unique stack definitions", () => {
+      const profile = createMockTransactionProfile();
+
+      const output = formatTransactionProfileAnalysis(profile, {
+        focusOnUserCode: true,
+        profileUrl:
+          "https://sentry-mcp-evals.sentry.io/explore/profiling/profile/backend/cfe78a5c892d4a64a962d837673398d2/flamegraph/",
+        projectSlug: "backend",
+        traceUrl:
+          "https://sentry-mcp-evals.sentry.io/explore/traces/trace/a4d1aae7216b47ff8117cf4e09ce9d0a",
+      });
+
+      expect(output).toContain(
+        "| `handle_request` | main.py:42 | 3 | User Code |",
+      );
+      expect(output).toContain(
+        "| `execute_query` | db.py:118 | 2 | User Code |",
+      );
+    });
+
+    it("filters to user code before limiting hotspot rows", () => {
+      const profile = createMockTransactionProfile();
+
+      profile.profile.frames = [
+        ...Array.from({ length: 11 }, (_, index) => ({
+          filename: `vendor_${index}.py`,
+          function: `library_${index}`,
+          in_app: false,
+          lineno: index + 1,
+          module: `vendor.module_${index}`,
+          abs_path: `/usr/lib/vendor_${index}.py`,
+          platform: "python",
+          lang: "python",
+        })),
+        {
+          filename: "app.py",
+          function: "app_handler",
+          in_app: true,
+          lineno: 99,
+          module: "app.handlers",
+          abs_path: "/app/src/app.py",
+          platform: "python",
+          lang: "python",
+        },
+      ];
+      profile.profile.stacks = profile.profile.frames.map((_, index) => [
+        index,
+      ]);
+      profile.profile.samples = [
+        ...Array.from({ length: 22 }, (_, index) => ({
+          stack_id: Math.floor(index / 2),
+          thread_id: "1",
+          elapsed_since_start_ns: index * 10_000_000,
+        })),
+        {
+          stack_id: 11,
+          thread_id: "1",
+          elapsed_since_start_ns: 220_000_000,
+        },
+      ];
+
+      const output = formatTransactionProfileAnalysis(profile, {
+        focusOnUserCode: true,
+        profileUrl:
+          "https://sentry-mcp-evals.sentry.io/explore/profiling/profile/backend/cfe78a5c892d4a64a962d837673398d2/flamegraph/",
+        projectSlug: "backend",
+      });
+
+      expect(output).toContain("## Top Frames by Occurrence");
+      expect(output).toContain("| `app_handler` | app.py:99 | 1 | User Code |");
+      expect(output).not.toContain("`library_0`");
+    });
+
+    it("falls back to elapsed_since_start_ns for V1 transaction profiles when relative bounds are missing", () => {
+      // Regression test for getsentry/sentry-mcp issue MCP-SERVER-FRN: vroom
+      // emits V1 samples with elapsed_since_start_ns (uint64 nanoseconds)
+      // instead of timestamp, and numeric thread_id.
+      const profile = createMockTransactionProfile();
+
+      if (profile.transaction) {
+        profile.transaction.relative_start_ns = undefined;
+        profile.transaction.relative_end_ns = undefined;
+      }
+
+      profile.profile.samples = [
+        { stack_id: 0, thread_id: "1", elapsed_since_start_ns: 0 },
+        { stack_id: 1, thread_id: "1", elapsed_since_start_ns: 50_000_000 },
+        { stack_id: 1, thread_id: "1", elapsed_since_start_ns: 100_000_000 },
+      ];
+
+      const output = formatTransactionProfileAnalysis(profile, {
+        focusOnUserCode: true,
+        profileUrl:
+          "https://sentry-mcp-evals.sentry.io/explore/profiling/profile/backend/cfe78a5c892d4a64a962d837673398d2/flamegraph/",
+        projectSlug: "backend",
+      });
+
+      expect(output).toContain("- **Duration**: 100ms");
+    });
+
+    it("preserves sub-millisecond V1 sample durations", () => {
+      const profile = createMockTransactionProfile();
+
+      if (profile.transaction) {
+        profile.transaction.relative_start_ns = undefined;
+        profile.transaction.relative_end_ns = undefined;
+      }
+
+      profile.profile.samples = [
+        { stack_id: 0, thread_id: "1", elapsed_since_start_ns: 0 },
+        { stack_id: 1, thread_id: "1", elapsed_since_start_ns: 250_000 },
+        { stack_id: 1, thread_id: "1", elapsed_since_start_ns: 500_000 },
+      ];
+
+      const output = formatTransactionProfileAnalysis(profile, {
+        focusOnUserCode: true,
+        profileUrl:
+          "https://sentry-mcp-evals.sentry.io/explore/profiling/profile/backend/cfe78a5c892d4a64a962d837673398d2/flamegraph/",
+        projectSlug: "backend",
+      });
+
+      expect(output).toContain("- **Duration**: 500µs");
     });
   });
 

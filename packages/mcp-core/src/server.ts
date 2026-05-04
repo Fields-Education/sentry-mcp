@@ -25,16 +25,14 @@ import type {
   ServerRequest,
   ServerNotification,
 } from "@modelcontextprotocol/sdk/types.js";
-import tools, {
-  AGENT_DEPENDENT_TOOLS,
-  SIMPLE_REPLACEMENT_TOOLS,
-} from "./tools/index";
+import tools from "./tools/index";
 import {
   type ToolConfig,
   resolveDescription,
   isToolVisibleInMode,
 } from "./tools/types";
 import type { ServerContext, ProjectCapabilities } from "./types";
+import { isApiAuthenticationErrorDeep } from "./api-client";
 import {
   setTag,
   setUser,
@@ -50,7 +48,6 @@ import {
   getConstraintParametersToInject,
   getConstraintKeysToFilter,
 } from "./internal/constraint-helpers";
-import { hasAgentProvider } from "./internal/agents/provider-factory";
 
 /**
  * Creates and configures a complete MCP server with Sentry instrumentation.
@@ -165,21 +162,6 @@ function configureServer({
   let toolsToRegister = agentMode
     ? { use_sentry: tools.use_sentry }
     : (customTools ?? tools);
-
-  // Filter tools based on agent provider availability
-  // Skip filtering in agent mode (use_sentry handles all tools internally) or when custom tools are provided
-  if (!agentMode && !customTools) {
-    const hasAgent = hasAgentProvider();
-    const toolsToExclude = new Set<string>(
-      hasAgent ? SIMPLE_REPLACEMENT_TOOLS : AGENT_DEPENDENT_TOOLS,
-    );
-
-    toolsToRegister = Object.fromEntries(
-      Object.entries(toolsToRegister).filter(
-        ([key]) => !toolsToExclude.has(key),
-      ),
-    ) as typeof toolsToRegister;
-  }
 
   // Filter tools based on public visibility and experimental mode
   // (applies to all tools, including custom)
@@ -342,6 +324,8 @@ function configureServer({
             tool.inputSchema,
           );
 
+          // Constraints override raw tool arguments. String constraint fields are
+          // also removed from tool schemas and re-injected (see getConstraintKeysToFilter).
           const paramsWithConstraints = {
             ...params,
             ...applicableConstraints,
@@ -379,6 +363,18 @@ function configureServer({
               code: 2, // error
             });
             activeSpan.recordException(error);
+          }
+
+          // Upstream 401 during a tool call — route via the transport so it
+          // can revoke the MCP grant; swallow callback errors since the
+          // formatted tool response still needs to land.
+          if (
+            isApiAuthenticationErrorDeep(error) &&
+            context.onUpstreamUnauthorized
+          ) {
+            try {
+              await context.onUpstreamUnauthorized();
+            } catch {}
           }
 
           // CRITICAL: Tool errors MUST be returned as formatted text responses,

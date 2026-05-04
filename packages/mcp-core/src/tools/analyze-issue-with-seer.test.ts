@@ -1,6 +1,6 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { autofixStateFixture, mswServer } from "@sentry/mcp-server-mocks";
 import { http, HttpResponse } from "msw";
-import { mswServer, autofixStateFixture } from "@sentry/mcp-server-mocks";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import analyzeIssueWithSeer from "./analyze-issue-with-seer.js";
 
 describe("analyze_issue_with_seer", () => {
@@ -270,7 +270,7 @@ describe("analyze_issue_with_seer", () => {
             instruction: "Focus on memory leaks",
           });
           return HttpResponse.json({
-            run_id: "new-run-123",
+            run_id: 123,
           });
         },
       ),
@@ -298,7 +298,30 @@ describe("analyze_issue_with_seer", () => {
     const result = await promise;
 
     expect(result).toContain("Starting new analysis...");
-    expect(result).toContain("Analysis started with Run ID: new-run-123");
+    expect(result).toContain("Analysis started with Run ID: 123");
     expect(result).toContain("## Analysis Complete");
+  });
+
+  it("rejects issues outside the active project constraint", async () => {
+    await expect(
+      analyzeIssueWithSeer.handler(
+        {
+          organizationSlug: "sentry-mcp-evals",
+          regionUrl: null,
+          issueId: "CLOUDFLARE-MCP-41",
+          instruction: undefined,
+        },
+        {
+          constraints: {
+            organizationSlug: undefined,
+            projectSlug: "frontend",
+          },
+          accessToken: "access-token",
+          userId: "1",
+        },
+      ),
+    ).rejects.toThrow(
+      'Issue is outside the active project constraint. Expected project "frontend".',
+    );
   });
 });
