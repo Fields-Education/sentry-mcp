@@ -29,6 +29,18 @@ describe("cli/finalize", () => {
       unknownArgs: [],
     });
     expect(cfg.sentryHost).toBe("sentry.example.com");
+    expect(cfg.sentryProtocol).toBe("https");
+  });
+
+  it("uses http protocol for self-hosted hosts when --insecure-http is enabled", () => {
+    const cfg = finalize({
+      accessToken: "tok",
+      host: "sentry.internal:9000",
+      insecureHttp: true,
+      unknownArgs: [],
+    });
+    expect(cfg.sentryHost).toBe("sentry.internal:9000");
+    expect(cfg.sentryProtocol).toBe("http");
   });
 
   it("accepts valid OpenAI base URL", () => {
@@ -52,10 +64,65 @@ describe("cli/finalize", () => {
     ).toThrow(/OPENAI base URL must use http or https scheme/);
   });
 
+  it("accepts azure-openai as a valid explicit provider", () => {
+    const cfg = finalize({
+      accessToken: "tok",
+      agentProvider: "azure-openai",
+      unknownArgs: [],
+    });
+    expect(cfg.agentProvider).toBe("azure-openai");
+  });
+
+  it("rejects invalid explicit provider values", () => {
+    expect(() =>
+      finalize({
+        accessToken: "tok",
+        agentProvider: "openrouter",
+        unknownArgs: [],
+      }),
+    ).toThrow(/Must be "openai", "azure-openai", or "anthropic"/);
+  });
+
   it("throws on non-https URL", () => {
     expect(() =>
       finalize({ accessToken: "tok", url: "http://bad", unknownArgs: [] }),
     ).toThrow(/must be a full HTTPS URL/);
+  });
+
+  it("throws when --insecure-http is used with --url", () => {
+    expect(() =>
+      finalize({
+        accessToken: "tok",
+        url: "https://sentry.example.com",
+        insecureHttp: true,
+        unknownArgs: [],
+      }),
+    ).toThrow(/cannot be used with --url or SENTRY_URL/);
+  });
+
+  it("surfaces the --insecure-http + --url conflict before URL validation", () => {
+    // Even with a non-HTTPS --url, the --insecure-http conflict should win
+    // so the user gets the actionable guidance rather than the generic
+    // "must be a full HTTPS URL" error.
+    expect(() =>
+      finalize({
+        accessToken: "tok",
+        url: "http://sentry.internal:9000",
+        insecureHttp: true,
+        unknownArgs: [],
+      }),
+    ).toThrow(/cannot be used with --url or SENTRY_URL/);
+  });
+
+  it("throws when --insecure-http targets sentry.io", () => {
+    expect(() =>
+      finalize({
+        accessToken: "tok",
+        host: "sentry.io",
+        insecureHttp: true,
+        unknownArgs: [],
+      }),
+    ).toThrow(/only supported for self-hosted Sentry hosts/);
   });
 
   // Skills tests

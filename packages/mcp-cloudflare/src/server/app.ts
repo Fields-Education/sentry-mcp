@@ -1,18 +1,18 @@
-import { Hono, type Context } from "hono";
+import { logIssue } from "@sentry/mcp-core/telem/logging";
+import { type Context, Hono } from "hono";
 import { csrf } from "hono/csrf";
 import { secureHeaders } from "hono/secure-headers";
-import * as Sentry from "@sentry/cloudflare";
-import type { Env } from "./types";
-import sentryOauth from "./oauth";
-import chatOauth from "./routes/chat-oauth";
-import chat from "./routes/chat";
-import search from "./routes/search";
-import metadata from "./routes/metadata";
-import { logIssue } from "@sentry/mcp-core/telem/logging";
+import { createScopedAuthorizationServerMetadataResponse } from "./authorization-server-metadata";
 import { createRequestLogger } from "./logging";
-import mcpRoutes from "./routes/mcp";
-import { getClientIp } from "./utils/client-ip";
+import sentryOauth from "./oauth";
 import { createProtectedResourceMetadataResponse } from "./protected-resource-metadata";
+import chat from "./routes/chat";
+import chatOauth from "./routes/chat-oauth";
+import mcpRoutes from "./routes/mcp";
+import metadata from "./routes/metadata";
+import search from "./routes/search";
+import type { Env } from "./types";
+import { setSentryUserFromRequest } from "./utils/sentry-user";
 
 /** Derive the base URL (origin) from the current request. */
 function getBaseUrl(c: Context): string {
@@ -89,16 +89,9 @@ const app = new Hono<{
   Bindings: Env;
 }>()
   .use("*", createRequestLogger())
-  // Set user IP address for Sentry (optional in local dev)
+  // Seed Sentry telemetry context with the request IP when available.
   .use("*", async (c, next) => {
-    const clientIP = getClientIp(c.req.raw);
-
-    if (clientIP) {
-      Sentry.setUser({ ip_address: clientIP });
-    }
-    // In local development, IP extraction may fail - this is expected and safe to ignore
-    // as it's only used for Sentry telemetry context
-
+    setSentryUserFromRequest(c.req.raw);
     await next();
   })
   // Apply security middleware globally
@@ -171,6 +164,14 @@ const app = new Hono<{
   .get(
     "/.well-known/oauth-protected-resource/mcp/*",
     handleOAuthProtectedResourceMetadata,
+  )
+  // Compatibility shim for clients that probe path-scoped RFC 8414 discovery
+  // endpoints instead of RFC 9728 protected resource metadata.
+  .get("/.well-known/oauth-authorization-server/mcp", (c) =>
+    createScopedAuthorizationServerMetadataResponse(new URL(c.req.url)),
+  )
+  .get("/.well-known/oauth-authorization-server/mcp/*", (c) =>
+    createScopedAuthorizationServerMetadataResponse(new URL(c.req.url)),
   )
   .route("/oauth", sentryOauth)
   .route("/api/auth", chatOauth)

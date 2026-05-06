@@ -176,6 +176,19 @@ This opens the MCP Inspector at `http://localhost:6274`
 }
 ```
 
+**For self-hosted Sentry on plain HTTP:**
+```json
+{
+  "command": "npx",
+  "args": [
+    "@sentry/mcp-server@latest",
+    "--access-token=YOUR_TOKEN",
+    "--host=sentry.internal:9000",
+    "--insecure-http"
+  ]
+}
+```
+
 4. Click "Connect"
 5. Click "List Tools" to verify connection
 
@@ -185,7 +198,7 @@ This opens the MCP Inspector at `http://localhost:6274`
 1. **List Tools** - Verify expected tools appear
 2. **Call a tool** - Start with `whoami` (no parameters required)
 3. **Test with parameters** - Try `find_organizations()`
-4. **Test complex operations** - Try `search_events(naturalLanguageQuery="errors in the last hour")`
+4. **Test complex operations** - Try `search_events(query="errors in the last hour")`
 
 **Example test sequence:**
 ```
@@ -194,7 +207,7 @@ This opens the MCP Inspector at `http://localhost:6274`
 3. find_projects(organizationSlug="your-org")
 4. search_events(
      organizationSlug="your-org",
-     naturalLanguageQuery="errors from yesterday"
+     query="errors from yesterday"
    )
 ```
 
@@ -414,7 +427,7 @@ SENTRY_HOST=sentry.example.com
 MCP_SKILLS=inspect,docs,triage           # Limit to specific skills
 
 # AI features
-OPENAI_API_KEY=your-key                  # For search_events/search_issues
+OPENAI_API_KEY=your-key                  # For AI-powered search tools like search_events/search_issues
 
 # Sentry reporting
 SENTRY_DSN=your-dsn
@@ -472,8 +485,8 @@ OPENAI_API_KEY=your-key pnpm start --access-token=TOKEN
 
 # Test search_events and search_issues work
 # In MCP Inspector:
-# - Call search_events(naturalLanguageQuery="errors in production")
-# - Call search_issues(naturalLanguageQuery="unresolved crashes")
+# - Call search_events(query="errors in production")
+# - Call search_issues(query="unresolved crashes")
 ```
 
 ### 5. Test Agent Mode

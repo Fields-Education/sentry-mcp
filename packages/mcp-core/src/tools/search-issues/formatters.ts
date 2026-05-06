@@ -2,9 +2,10 @@ import type { Issue } from "../../api-client";
 import { logInfo } from "../../telem/logging";
 import { getIssueUrl, getIssuesSearchUrl } from "../../utils/url-utils";
 import { getSeerActionabilityLabel } from "../../internal/formatting";
+import type { SentryProtocol } from "../../types";
 
 /**
- * Format an explanation for how a natural language query was translated
+ * Format an explanation for how the input query was translated
  */
 export function formatExplanation(explanation: string): string {
   return `## How I interpreted your query\n\n${explanation}`;
@@ -16,7 +17,9 @@ export interface FormatIssueResultsParams {
   projectSlugOrId?: string;
   query?: string | null;
   regionUrl?: string;
-  naturalLanguageQuery?: string;
+  host?: string;
+  protocol?: SentryProtocol;
+  inputQuery?: string;
   skipHeader?: boolean;
 }
 
@@ -30,19 +33,25 @@ export function formatIssueResults(params: FormatIssueResultsParams): string {
     projectSlugOrId,
     query,
     regionUrl,
-    naturalLanguageQuery,
+    host,
+    protocol = "https",
+    inputQuery,
     skipHeader = false,
   } = params;
 
-  const host = regionUrl ? new URL(regionUrl).host : "sentry.io";
+  const region = regionUrl ? new URL(regionUrl) : null;
+  const resolvedHost = region?.host || host || "sentry.io";
+  const resolvedProtocol =
+    (region?.protocol.replace(":", "") as SentryProtocol | undefined) ||
+    protocol;
 
   let output = "";
 
   // Skip header section if requested (when called from handler with includeExplanation)
   if (!skipHeader) {
-    // Use natural language query in title if provided, otherwise fall back to org/project
-    if (naturalLanguageQuery) {
-      output = `# Search Results for "${naturalLanguageQuery}"\n\n`;
+    // Use the original input in the title if provided, otherwise fall back to org/project.
+    if (inputQuery) {
+      output = `# Search Results for "${inputQuery}"\n\n`;
     } else {
       output = `# Issues in **${organizationSlug}`;
       if (projectSlugOrId) {
@@ -56,12 +65,12 @@ export function formatIssueResults(params: FormatIssueResultsParams): string {
   }
 
   if (issues.length === 0) {
-    logInfo(`No issues found for query: ${naturalLanguageQuery || query}`, {
+    logInfo(`No issues found for query: ${inputQuery || query}`, {
       extra: {
         query,
         organizationSlug,
         projectSlug: projectSlugOrId,
-        naturalLanguageQuery,
+        inputQuery,
       },
     });
     output += "No issues found matching your search criteria.\n\n";
@@ -71,10 +80,11 @@ export function formatIssueResults(params: FormatIssueResultsParams): string {
 
   // Generate search URL for viewing results
   const searchUrl = getIssuesSearchUrl(
-    host,
+    resolvedHost,
     organizationSlug,
     query,
     projectSlugOrId,
+    resolvedProtocol,
   );
 
   // Add view link with emoji and guidance text (like search_events)
@@ -86,7 +96,12 @@ export function formatIssueResults(params: FormatIssueResultsParams): string {
   // Format each issue
   issues.forEach((issue, index) => {
     // Generate issue URL using the utility function
-    const issueUrl = getIssueUrl(host, organizationSlug, issue.shortId);
+    const issueUrl = getIssueUrl(
+      resolvedHost,
+      organizationSlug,
+      issue.shortId,
+      resolvedProtocol,
+    );
 
     output += `## ${index + 1}. [${issue.shortId}](${issueUrl})\n\n`;
     output += `**${issue.title}**\n\n`;

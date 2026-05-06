@@ -2,7 +2,14 @@ import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import * as Sentry from "@sentry/cloudflare";
 import { SCOPES } from "../constants";
 import app from "./app";
+import { resolveClientFamily } from "./lib/client-family";
 import sentryMcpHandler from "./lib/mcp-handler";
+import {
+  type RateLimitScope,
+  extractResponseMetricOptions,
+  recordResponseMetric,
+  stripResponseMetricHeaders,
+} from "./metrics";
 import { tokenExchangeCallback } from "./oauth";
 import getSentryConfig from "./sentry.config";
 import type { Env } from "./types";
@@ -13,15 +20,10 @@ import {
   stripCorsHeaders,
 } from "./utils/cors";
 import {
-  checkRateLimit,
   MCP_RATE_LIMIT_EXCEEDED_MESSAGE,
+  checkRateLimit,
 } from "./utils/rate-limiter";
-import {
-  extractResponseMetricOptions,
-  recordResponseMetric,
-  stripResponseMetricHeaders,
-  type RateLimitScope,
-} from "./metrics";
+import { setSentryUserFromRequest } from "./utils/sentry-user";
 
 /**
  * RFC 9728 §3.1: Patch 401 responses on MCP routes to include a
@@ -81,6 +83,7 @@ function finalizeResponse(
 const wrappedOAuthProvider = {
   fetch: async (request: Request, env: Env, ctx: ExecutionContext) => {
     const url = new URL(request.url);
+    setSentryUserFromRequest(request);
 
     // --- Phase 1: Intercept preflight before the library can respond ---
     // Public metadata gets restrictive CORS; everything else gets a bare 204
@@ -138,6 +141,8 @@ const wrappedOAuthProvider = {
       }
     }
 
+    const clientFamily = resolveClientFamily(request.headers.get("user-agent"));
+
     // --- Phase 2: Let the OAuth library handle the request ---
     // We normalize any CORS headers it returns in the response handling below.
     const oAuthProvider = new OAuthProvider({
@@ -149,7 +154,8 @@ const wrappedOAuthProvider = {
       authorizeEndpoint: "/oauth/authorize",
       tokenEndpoint: "/oauth/token",
       clientRegistrationEndpoint: "/oauth/register",
-      tokenExchangeCallback: (options) => tokenExchangeCallback(options, env),
+      tokenExchangeCallback: (options) =>
+        tokenExchangeCallback(options, env, request, clientFamily),
       scopesSupported: Object.keys(SCOPES),
       // Expire grants after 30 days to prevent unbounded KV accumulation.
       // Sentry access tokens also have a 30-day lifetime, so re-auth is
@@ -158,6 +164,16 @@ const wrappedOAuthProvider = {
     });
 
     const response = await oAuthProvider.fetch(request, env, ctx);
+
+    if (
+      request.method === "POST" &&
+      url.pathname === "/oauth/register" &&
+      response.ok
+    ) {
+      Sentry.metrics.count("mcp.oauth.register", 1, {
+        attributes: { client_family: clientFamily },
+      });
+    }
 
     // --- Phase 3: Patch headers, then apply our CORS policy ---
     const patched = patchWwwAuthenticate(response, url);
