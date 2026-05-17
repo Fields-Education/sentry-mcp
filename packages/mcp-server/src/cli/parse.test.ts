@@ -6,6 +6,7 @@ describe("cli/parseArgv", () => {
     const parsed = parseArgv([
       "--access-token=tok",
       "--host=sentry.io",
+      "--insecure-http",
       "--url=https://example.com",
       "--mcp-url=https://mcp.example.com",
       "--sentry-dsn=dsn",
@@ -16,6 +17,7 @@ describe("cli/parseArgv", () => {
     ]);
     expect(parsed.accessToken).toBe("tok");
     expect(parsed.host).toBe("sentry.io");
+    expect(parsed.insecureHttp).toBe(true);
     expect(parsed.url).toBe("https://example.com");
     expect(parsed.mcpUrl).toBe("https://mcp.example.com");
     expect(parsed.sentryDsn).toBe("dsn");
@@ -35,6 +37,24 @@ describe("cli/parseArgv", () => {
   it("parses --disable-skills", () => {
     const parsed = parseArgv(["--access-token=tok", "--disable-skills=seer"]);
     expect(parsed.disableSkills).toBe("seer");
+  });
+
+  it("parses --insecure-http", () => {
+    const parsed = parseArgv([
+      "--access-token=tok",
+      "--host=sentry.internal:9000",
+      "--insecure-http",
+    ]);
+    expect(parsed.host).toBe("sentry.internal:9000");
+    expect(parsed.insecureHttp).toBe(true);
+  });
+
+  it("parses --agent-provider=azure-openai", () => {
+    const parsed = parseArgv([
+      "--access-token=tok",
+      "--agent-provider=azure-openai",
+    ]);
+    expect(parsed.agentProvider).toBe("azure-openai");
   });
 
   it("collects unknown args", () => {
@@ -79,6 +99,7 @@ describe("cli/merge", () => {
     const cli = parseArgv([
       "--access-token=clitok",
       "--host=clihost",
+      "--insecure-http",
       "--mcp-url=climcp",
       "--sentry-dsn=clidsn",
       "--openai-base-url=https://api.cli/v1",
@@ -86,6 +107,7 @@ describe("cli/merge", () => {
     const merged = merge(cli, env);
     expect(merged.accessToken).toBe("clitok");
     expect(merged.host).toBe("clihost");
+    expect(merged.insecureHttp).toBe(true);
     expect(merged.mcpUrl).toBe("climcp");
     expect(merged.sentryDsn).toBe("clidsn");
     expect(merged.openaiBaseUrl).toBe("https://api.cli/v1");
@@ -129,5 +151,18 @@ describe("cli/merge", () => {
     const cli = parseArgv(["--access-token=clitok"]);
     const merged = merge(cli, env);
     expect(merged.disableSkills).toBe("seer");
+  });
+
+  it("applies precedence for agentProvider: CLI over env", () => {
+    const env = parseEnv({
+      SENTRY_ACCESS_TOKEN: "envtok",
+      EMBEDDED_AGENT_PROVIDER: "openai",
+    } as any);
+    const cli = parseArgv([
+      "--access-token=clitok",
+      "--agent-provider=azure-openai",
+    ]);
+    const merged = merge(cli, env);
+    expect(merged.agentProvider).toBe("azure-openai");
   });
 });

@@ -58,6 +58,39 @@ describe("oauth authorize routes", () => {
       expect(html).toContain("<form");
       expect(html).toContain('name="state"');
     });
+
+    it("renders only the requested redirect URI when the client has multiple registered URIs", async () => {
+      mockOAuthProvider.parseAuthRequest.mockResolvedValueOnce({
+        clientId: "test-client",
+        redirectUri: "https://example.com/requested-callback",
+        scope: ["read"],
+        state: "orig",
+      });
+      mockOAuthProvider.lookupClient.mockResolvedValueOnce({
+        clientId: "test-client",
+        clientName: "Test Client",
+        redirectUris: [
+          "https://example.com/requested-callback",
+          "https://example.com/another-callback",
+          "https://example.com/fallback-callback",
+        ],
+        tokenEndpointAuthMethod: "client_secret_basic",
+      });
+
+      const request = new Request("http://localhost/oauth/authorize", {
+        method: "GET",
+      });
+      const response = await app.fetch(request, testEnv as Env);
+
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain("https://example.com/requested-callback");
+      expect(html).not.toContain("https://example.com/another-callback");
+      expect(html).not.toContain("https://example.com/fallback-callback");
+      expect(
+        html.match(/After approval, you will be redirected to this URL\./g),
+      ).toHaveLength(1);
+    });
   });
 
   describe("POST /oauth/authorize", () => {
@@ -253,6 +286,7 @@ describe("oauth authorize routes", () => {
         expect(response.status).toBe(200);
         const html = await response.text();
         expect(html).toContain("<form");
+        expect(html).not.toContain("Session scope");
       });
 
       it("should allow request with valid resource parameter", async () => {
@@ -276,6 +310,8 @@ describe("oauth authorize routes", () => {
 
         // Should proceed normally
         expect(response.status).toBe(200);
+        const html = await response.text();
+        expect(html).not.toContain("Session scope");
       });
 
       it("should reject request with origin-only resource parameter", async () => {
@@ -348,6 +384,8 @@ describe("oauth authorize routes", () => {
         const response = await app.fetch(request, testEnv as Env);
 
         expect(response.status).toBe(200);
+        const html = await response.text();
+        expect(html).not.toContain("Session scope");
       });
 
       it("should allow request with organization-scoped resource parameter", async () => {
@@ -370,6 +408,8 @@ describe("oauth authorize routes", () => {
         const response = await app.fetch(request, testEnv as Env);
 
         expect(response.status).toBe(200);
+        const html = await response.text();
+        expect(html).toContain(">test-org</strong> organization");
       });
 
       it("should allow request with project-scoped resource parameter", async () => {
@@ -395,6 +435,9 @@ describe("oauth authorize routes", () => {
         const response = await app.fetch(request, testEnv as Env);
 
         expect(response.status).toBe(200);
+        const html = await response.text();
+        expect(html).toContain(">test-project</strong> project");
+        expect(html).toContain(">test-org</strong> organization");
       });
 
       it("should reject request with invalid resource hostname", async () => {

@@ -45,45 +45,48 @@ import type {
   AutofixRunStateSchema,
   ClientKeyListSchema,
   ClientKeySchema,
-  ErrorEventSchema,
   DefaultEventSchema,
-  TransactionEventSchema,
-  GenericEventSchema,
-  UnknownEventSchema,
-  EventSchema,
-  EventAttachmentSchema,
+  ErrorEventSchema,
   EventAttachmentListSchema,
+  EventAttachmentSchema,
+  EventSchema,
+  ExternalIssueListSchema,
+  ExternalIssueSchema,
+  FlamegraphFrameInfoSchema,
+  FlamegraphFrameSchema,
+  FlamegraphProfileMetadataSchema,
+  FlamegraphProfileSchema,
+  FlamegraphSchema,
+  GenericEventSchema,
   IssueListSchema,
   IssueSchema,
   IssueTagValuesSchema,
-  ExternalIssueSchema,
-  ExternalIssueListSchema,
-  ReplayDetailsSchema,
-  ReplayRecordingSegmentsSchema,
   OrganizationListSchema,
   OrganizationSchema,
+  ProfileChunkResponseSchema,
+  ProfileChunkSampleSchema,
+  ProfileChunkSchema,
+  ProfileFrameSchema,
   ProjectListSchema,
   ProjectSchema,
   ReleaseListSchema,
   ReleaseSchema,
+  ReplayDetailsSchema,
+  ReplayListResponseSchema,
+  ReplayRecordingSegmentsSchema,
   TagListSchema,
   TagSchema,
   TeamListSchema,
   TeamSchema,
+  TraceIssueSchema,
   TraceMetaSchema,
   TraceSchema,
   TraceSpanSchema,
-  TraceIssueSchema,
+  TransactionEventSchema,
+  TransactionProfileSampleSchema,
+  TransactionProfileSchema,
+  UnknownEventSchema,
   UserSchema,
-  FlamegraphSchema,
-  FlamegraphFrameSchema,
-  FlamegraphFrameInfoSchema,
-  FlamegraphProfileSchema,
-  FlamegraphProfileMetadataSchema,
-  ProfileChunkSchema,
-  ProfileChunkResponseSchema,
-  ProfileFrameSchema,
-  ProfileSampleSchema,
 } from "./schema";
 
 export type User = z.infer<typeof UserSchema>;
@@ -116,6 +119,7 @@ export type AutofixRun = z.infer<typeof AutofixRunSchema>;
 export type AutofixRunState = z.infer<typeof AutofixRunStateSchema>;
 export type AssignedTo = z.infer<typeof AssignedToSchema>;
 export type ReplayDetails = z.infer<typeof ReplayDetailsSchema>;
+export type ReplayList = z.infer<typeof ReplayListResponseSchema>["data"];
 export type ReplayRecordingSegments = z.infer<
   typeof ReplayRecordingSegmentsSchema
 >;
@@ -145,8 +149,12 @@ export type FlamegraphProfileMetadata = z.infer<
 >;
 export type ProfileChunk = z.infer<typeof ProfileChunkSchema>;
 export type ProfileChunkResponse = z.infer<typeof ProfileChunkResponseSchema>;
+export type ProfileChunkSample = z.infer<typeof ProfileChunkSampleSchema>;
+export type TransactionProfile = z.infer<typeof TransactionProfileSchema>;
+export type TransactionProfileSample = z.infer<
+  typeof TransactionProfileSampleSchema
+>;
 export type ProfileFrame = z.infer<typeof ProfileFrameSchema>;
-export type ProfileSample = z.infer<typeof ProfileSampleSchema>;
 
 // Issue tag values
 export type IssueTagValues = z.infer<typeof IssueTagValuesSchema>;

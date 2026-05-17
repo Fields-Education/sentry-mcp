@@ -1,24 +1,31 @@
 import { z } from "zod";
-import { setTag } from "@sentry/core";
+import { getActiveSpan, setTag } from "@sentry/core";
 import { defineTool } from "../internal/tool-helpers/define";
 import { UserInputError } from "../errors";
 import type { ServerContext } from "../types";
 import { ParamOrganizationSlug } from "../schema";
 import { parseSentryUrl, type ParsedSentryUrl } from "../internal/url-helpers";
+import {
+  resolveScopedOrganizationSlug,
+  resolveScopedProjectSlug,
+} from "../internal/url-scope";
 import { apiServiceFromContext } from "../internal/tool-helpers/api";
-import { ApiNotFoundError } from "../api-client";
+import { ApiNotFoundError, type SentryApiService } from "../api-client";
 import { enhanceNotFoundError } from "../internal/tool-helpers/enhance-error";
+import { ensureIssueWithinProjectConstraint } from "../internal/tool-helpers/issue";
 import { fetchAndFormatBreadcrumbs } from "../internal/tool-helpers/breadcrumbs";
 import getIssueDetails from "./get-issue-details";
 import getTraceDetails from "./get-trace-details";
-import getProfile from "./get-profile";
+import getProfileDetails from "./get-profile-details";
 import getReplayDetails from "./get-replay-details";
+import getSnapshotDetails from "./get-snapshot-details";
 
 /** Types with full API integration. */
 export const FULLY_SUPPORTED_TYPES = [
   "issue",
   "event",
   "trace",
+  "span",
   "breadcrumbs",
   "replay",
 ] as const;
@@ -27,14 +34,12 @@ export type FullySupportedType = (typeof FULLY_SUPPORTED_TYPES)[number];
 /** Recognized from URLs but not yet fully supported -- return guidance messages. */
 export type RecognizedType = "monitor" | "release";
 
-/**
- * All resource types. Profile is URL-only (requires transactionName,
- * which is not expressible through a single resourceId).
- */
+/** All resource types. */
 export type ResolvedResourceType =
   | FullySupportedType
   | RecognizedType
-  | "profile";
+  | "profile"
+  | "snapshot";
 
 export interface ResolvedResourceParams {
   type: ResolvedResourceType;
@@ -42,20 +47,24 @@ export interface ResolvedResourceParams {
   // Issue/Event params
   issueId?: string;
   eventId?: string;
-  // Trace params
+  // Trace/Span params
   traceId?: string;
-  // TODO: spanId is parsed from URLs but not yet used - add when get_trace_details supports span focusing
   spanId?: string;
   // Profile params
   projectSlug?: string;
+  profileId?: string;
   profilerId?: string;
-  transactionName?: string;
+  start?: string;
+  end?: string;
   // Replay params
   replayId?: string;
   // Monitor params
   monitorSlug?: string;
   // Release params
   releaseVersion?: string;
+  // Snapshot params
+  snapshotId?: string;
+  selectedSnapshot?: string;
 }
 
 export function resolveResourceParams(params: {
@@ -63,6 +72,7 @@ export function resolveResourceParams(params: {
   resourceType?: string | null;
   resourceId?: string | null;
   organizationSlug?: string | null;
+  projectSlug?: string | null;
 }): ResolvedResourceParams {
   if (params.url) {
     const parsed = parseSentryUrl(params.url);
@@ -122,6 +132,16 @@ export function resolveResourceParams(params: {
         traceId: resourceId,
       };
 
+    case "span": {
+      const { traceId, spanId } = parseSpanResourceId(resourceId);
+      return {
+        type: "span",
+        organizationSlug,
+        traceId,
+        spanId,
+      };
+    }
+
     case "breadcrumbs":
       return {
         type: "breadcrumbs",
@@ -140,13 +160,23 @@ export function resolveResourceParams(params: {
 
 /**
  * When resourceType is provided alongside a URL, it overrides the auto-detected type.
- * Only 'breadcrumbs' is allowed as an override (requires an issue URL).
+ * Breadcrumbs can override issue/event URLs, and trace URLs can override span-focused trace URLs.
  */
 function resolveFromParsedUrl(
   parsed: ParsedSentryUrl,
-  params: { resourceType?: string | null },
+  params: {
+    resourceType?: string | null;
+    organizationSlug?: string | null;
+    projectSlug?: string | null;
+  },
 ): ResolvedResourceParams {
-  const { type: detectedType, organizationSlug } = parsed;
+  const detectedType: ResolvedResourceType | "unknown" =
+    parsed.type === "trace" && parsed.spanId ? "span" : parsed.type;
+  const organizationSlug = resolveScopedOrganizationSlug({
+    resourceLabel: "Sentry resource",
+    scopedOrganizationSlug: params.organizationSlug,
+    urlOrganizationSlug: parsed.organizationSlug,
+  });
 
   if (detectedType === "unknown") {
     if (parsed.transaction) {
@@ -161,9 +191,24 @@ function resolveFromParsedUrl(
   }
 
   if (params.resourceType && params.resourceType !== detectedType) {
+    if (params.resourceType === "trace" && detectedType === "span") {
+      if (!parsed.traceId) {
+        throw new UserInputError("Could not extract trace ID from URL.");
+      }
+      return {
+        type: "trace",
+        organizationSlug,
+        traceId: parsed.traceId,
+      };
+    }
+    if (params.resourceType === "span" && detectedType === "trace") {
+      throw new UserInputError(
+        "Could not extract span ID from URL for span resource. Provide a trace URL with `?node=span-<spanId>` or use `resourceId='<traceId>:<spanId>'`.",
+      );
+    }
     if (params.resourceType !== "breadcrumbs") {
       throw new UserInputError(
-        `Cannot override URL type with resourceType '${params.resourceType}'. Only 'breadcrumbs' can be used as a resourceType override with a URL.`,
+        `Cannot override URL type with resourceType '${params.resourceType}'. Only 'breadcrumbs' or 'trace' on a span URL can be used as a resourceType override with a URL.`,
       );
     }
     if (!parsed.issueId) {
@@ -210,6 +255,18 @@ function resolveFromParsedUrl(
         type: "trace",
         organizationSlug,
         traceId: parsed.traceId,
+      };
+
+    case "span":
+      if (!parsed.traceId || !parsed.spanId) {
+        throw new UserInputError(
+          "Could not extract trace ID and span ID from URL.",
+        );
+      }
+      return {
+        type: "span",
+        organizationSlug,
+        traceId: parsed.traceId,
         spanId: parsed.spanId,
       };
 
@@ -222,8 +279,15 @@ function resolveFromParsedUrl(
       return {
         type: "profile",
         organizationSlug,
-        projectSlug: parsed.projectSlug,
+        projectSlug: resolveScopedProjectSlug({
+          resourceLabel: "Profile",
+          scopedProjectSlug: params.projectSlug,
+          urlProjectSlug: parsed.projectSlug,
+        }),
+        profileId: parsed.profileId,
         profilerId: parsed.profilerId,
+        start: parsed.start,
+        end: parsed.end,
       };
 
     case "replay":
@@ -244,7 +308,13 @@ function resolveFromParsedUrl(
         type: "monitor",
         organizationSlug,
         monitorSlug: parsed.monitorSlug,
-        projectSlug: parsed.projectSlug,
+        projectSlug: parsed.projectSlug
+          ? resolveScopedProjectSlug({
+              resourceLabel: "Monitor",
+              scopedProjectSlug: params.projectSlug,
+              urlProjectSlug: parsed.projectSlug,
+            })
+          : undefined,
       };
 
     case "release":
@@ -256,11 +326,41 @@ function resolveFromParsedUrl(
         organizationSlug,
         releaseVersion: parsed.releaseVersion,
       };
+
+    case "snapshot":
+      if (!parsed.snapshotId) {
+        throw new UserInputError("Could not extract snapshot ID from URL.");
+      }
+      return {
+        type: "snapshot",
+        organizationSlug,
+        snapshotId: parsed.snapshotId,
+        selectedSnapshot: parsed.selectedSnapshot,
+      };
   }
+}
+
+function parseSpanResourceId(resourceId: string): {
+  traceId: string;
+  spanId: string;
+} {
+  const parts = resourceId.trim().split(":");
+
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    throw new UserInputError(
+      "Span resourceId must use the format `<traceId>:<spanId>`.",
+    );
+  }
+
+  return {
+    traceId: parts[0],
+    spanId: parts[1],
+  };
 }
 
 function generateUnsupportedResourceMessage(
   resolved: ResolvedResourceParams,
+  apiService: SentryApiService,
 ): string {
   const { type, organizationSlug } = resolved;
 
@@ -269,8 +369,11 @@ function generateUnsupportedResourceMessage(
       // Include projectSlug in URL when present
       const monitorPath = resolved.projectSlug
         ? `${resolved.projectSlug}/${resolved.monitorSlug}`
-        : resolved.monitorSlug;
-      const monitorUrl = `https://${organizationSlug}.sentry.io/crons/${monitorPath}/`;
+        : (resolved.monitorSlug ?? "");
+      const monitorUrl = apiService.getMonitorUrl(
+        organizationSlug,
+        monitorPath,
+      );
       return [
         "# Cron Monitor Detected",
         "",
@@ -288,7 +391,10 @@ function generateUnsupportedResourceMessage(
     }
 
     case "release": {
-      const releaseUrl = `https://${organizationSlug}.sentry.io/releases/${resolved.releaseVersion}/`;
+      const releaseUrl = apiService.getReleaseUrl(
+        organizationSlug,
+        resolved.releaseVersion ?? "",
+      );
       return [
         "# Release Detected",
         "",
@@ -311,11 +417,21 @@ function generateUnsupportedResourceMessage(
 
 export default defineTool({
   name: "get_sentry_resource",
-  skills: ["inspect", "triage", "seer"], // Preserve legacy issue-detail access for triage and Seer workflows.
-  requiredScopes: ["event:read"],
+  skills: ["inspect", "triage", "seer", "preprod"],
+  requiredScopes: ["event:read", "project:read"],
 
   description: [
-    "Fetch a Sentry resource by URL or by type and ID.",
+    "Fetch a Sentry resource by URL or by type and ID. Pass a Sentry URL directly and the resource type is auto-detected.",
+    "",
+    "Supports issues, events, traces, spans, replays, breadcrumbs, and preprod snapshots.",
+    "Sentry URLs require authentication that this tool handles.",
+    "Trace lookups return a condensed overview by default.",
+    "",
+    "For preprod snapshot URLs (matching 'sentry.io/preprod/snapshots/'):",
+    "- Without ?selectedSnapshot=: returns the snapshot diff summary (changed, added, removed images)",
+    "- With ?selectedSnapshot=<image_file_name>: returns the specific image and full metadata",
+    "",
+    "For `resourceType='span'`, pass `resourceId` as `<traceId>:<spanId>`.",
     "",
     "<examples>",
     "### From a Sentry URL",
@@ -326,6 +442,18 @@ export default defineTool({
     "",
     "### By type and ID",
     "get_sentry_resource(resourceType='issue', organizationSlug='my-org', resourceId='PROJECT-123')",
+    "",
+    "### Span by trace and span ID",
+    "get_sentry_resource(resourceType='span', organizationSlug='my-org', resourceId='a4d1aae7216b47ff8117cf4e09ce9d0a:aa8e7f3384ef4ff5')",
+    "",
+    "### Replay by ID",
+    "get_sentry_resource(resourceType='replay', organizationSlug='my-org', resourceId='7e07485f-12f9-416b-8b14-26260799b51f')",
+    "",
+    "### Investigate a failed snapshot test from CI",
+    "get_sentry_resource(url='https://sentry.sentry.io/preprod/snapshots/241539/')",
+    "",
+    "### View a specific changed snapshot image",
+    "get_sentry_resource(url='https://sentry.sentry.io/preprod/snapshots/241539/?selectedSnapshot=login_screen.png')",
     "</examples>",
   ].join("\n"),
 
@@ -339,10 +467,10 @@ export default defineTool({
       ),
 
     resourceType: z
-      .enum(["issue", "event", "trace", "breadcrumbs", "replay"])
+      .enum(["issue", "event", "trace", "span", "breadcrumbs", "replay"])
       .optional()
       .describe(
-        "Resource type. With a URL, overrides the auto-detected type (e.g., 'breadcrumbs' on an issue URL).",
+        "Resource type. With a URL, can override the auto-detected type for breadcrumbs on an issue/event URL or for `trace` on a span-focused trace URL.",
       ),
 
     resourceId: z
@@ -350,7 +478,7 @@ export default defineTool({
       .trim()
       .optional()
       .describe(
-        "Resource identifier: issue shortId (e.g., 'PROJECT-123'), event ID, or trace ID. Required when not using a URL.",
+        "Resource identifier: issue shortId (e.g., 'PROJECT-123'), event ID, trace ID, replay ID, or `traceId:spanId` for span resources. Required when not using a URL.",
       ),
 
     organizationSlug: ParamOrganizationSlug.optional(),
@@ -363,15 +491,25 @@ export default defineTool({
       url: params.url,
       resourceType: params.resourceType,
       resourceId: params.resourceId,
-      organizationSlug: params.organizationSlug,
+      organizationSlug:
+        params.organizationSlug ?? context.constraints.organizationSlug,
+      projectSlug: context.constraints.projectSlug,
     });
 
     setTag("resource.type", resolved.type);
     setTag("organization.slug", resolved.organizationSlug);
+    if (resolved.spanId) {
+      setTag("trace.span_id", resolved.spanId);
+    }
+
+    getActiveSpan()?.setAttribute("app.resource.type", resolved.type);
 
     // Recognized but not yet fully supported types return guidance messages
     if (resolved.type === "monitor" || resolved.type === "release") {
-      return generateUnsupportedResourceMessage(resolved);
+      const apiService = apiServiceFromContext(context, {
+        regionUrl: context.constraints.regionUrl ?? undefined,
+      });
+      return generateUnsupportedResourceMessage(resolved, apiService);
     }
 
     switch (resolved.type) {
@@ -380,7 +518,7 @@ export default defineTool({
           {
             organizationSlug: resolved.organizationSlug,
             issueId: resolved.issueId,
-            regionUrl: null,
+            regionUrl: context.constraints.regionUrl ?? null,
           },
           context,
         );
@@ -391,7 +529,7 @@ export default defineTool({
             organizationSlug: resolved.organizationSlug,
             issueId: resolved.issueId,
             eventId: resolved.eventId,
-            regionUrl: null,
+            regionUrl: context.constraints.regionUrl ?? null,
           },
           context,
         );
@@ -401,14 +539,33 @@ export default defineTool({
           {
             organizationSlug: resolved.organizationSlug,
             traceId: resolved.traceId!,
-            regionUrl: null,
+            regionUrl: context.constraints.regionUrl ?? null,
+          },
+          context,
+        );
+
+      case "span":
+        return getTraceDetails.handler(
+          {
+            organizationSlug: resolved.organizationSlug,
+            traceId: resolved.traceId!,
+            spanId: resolved.spanId,
+            regionUrl: context.constraints.regionUrl ?? null,
           },
           context,
         );
 
       case "breadcrumbs": {
-        const apiService = apiServiceFromContext(context);
+        const apiService = apiServiceFromContext(context, {
+          regionUrl: context.constraints.regionUrl ?? undefined,
+        });
         try {
+          await ensureIssueWithinProjectConstraint({
+            apiService,
+            organizationSlug: resolved.organizationSlug,
+            issueId: resolved.issueId!,
+            projectSlug: context.constraints.projectSlug,
+          });
           return await fetchAndFormatBreadcrumbs(
             apiService,
             resolved.organizationSlug,
@@ -431,20 +588,35 @@ export default defineTool({
             replayUrl: params.url,
             organizationSlug: resolved.organizationSlug,
             replayId: resolved.replayId,
+            regionUrl: context.constraints.regionUrl ?? undefined,
           },
           context,
         );
 
       case "profile":
-        return getProfile.handler(
+        return getProfileDetails.handler(
           {
+            profileUrl: params.url,
             organizationSlug: resolved.organizationSlug,
             projectSlugOrId: resolved.projectSlug,
-            transactionName: resolved.transactionName,
-            regionUrl: null,
-            statsPeriod: "7d",
+            profileId: resolved.profileId,
+            profilerId: resolved.profilerId,
+            start: resolved.start,
+            end: resolved.end,
+            regionUrl: context.constraints.regionUrl ?? null,
             focusOnUserCode: true,
-            maxHotPaths: 10,
+          },
+          context,
+        );
+
+      case "snapshot":
+        return getSnapshotDetails.handler(
+          {
+            snapshotUrl: params.url ?? null,
+            organizationSlug: resolved.organizationSlug,
+            snapshotId: resolved.snapshotId ?? null,
+            selectedSnapshot: resolved.selectedSnapshot ?? null,
+            regionUrl: context.constraints.regionUrl ?? null,
           },
           context,
         );

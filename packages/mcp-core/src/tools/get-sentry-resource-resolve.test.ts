@@ -167,13 +167,13 @@ describe("resolveResourceParams", () => {
       });
     });
 
-    it("extracts spanId from query param", () => {
+    it("treats focused trace URLs as span resources", () => {
       expect(
         resolveResourceParams({
           url: `https://my-org.sentry.io/performance/trace/${traceId}?node=span-abc123`,
         }),
       ).toEqual<ResolvedResourceParams>({
-        type: "trace",
+        type: "span",
         organizationSlug: "my-org",
         traceId,
         spanId: "abc123",
@@ -219,7 +219,7 @@ describe("resolveResourceParams", () => {
 
   // ─── URL mode: profile URLs ───────────────────────────────────────────────
   describe("URL mode — profile URLs", () => {
-    it("parses flamegraph URL", () => {
+    it("parses continuous flamegraph URL", () => {
       expect(
         resolveResourceParams({
           url: "https://my-org.sentry.io/explore/profiling/profile/my-project/flamegraph/",
@@ -228,6 +228,10 @@ describe("resolveResourceParams", () => {
         type: "profile",
         organizationSlug: "my-org",
         projectSlug: "my-project",
+        profileId: undefined,
+        profilerId: undefined,
+        start: undefined,
+        end: undefined,
       });
     });
 
@@ -240,13 +244,14 @@ describe("resolveResourceParams", () => {
         type: "profile",
         organizationSlug: "my-org",
         projectSlug: "my-project",
+        profileId: undefined,
         profilerId: "abc123",
+        start: undefined,
+        end: undefined,
       });
     });
 
-    it("parses flamegraph URL with profiler ID in path segment", () => {
-      // Pattern: /profiling/profile/{project}/{profilerId}/flamegraph/
-      // The URL parser treats the segment after project as part of the path
+    it("parses transaction flamegraph URL with profile ID in path segment", () => {
       expect(
         resolveResourceParams({
           url: "https://sentry.sentry.io/explore/profiling/profile/sentry/cfe78a5c892d4a64/flamegraph/",
@@ -255,10 +260,14 @@ describe("resolveResourceParams", () => {
         type: "profile",
         organizationSlug: "sentry",
         projectSlug: "sentry",
+        profileId: "cfe78a5c892d4a64",
+        profilerId: undefined,
+        start: undefined,
+        end: undefined,
       });
     });
 
-    it("parses /profiling/profile/ URL (without /explore/)", () => {
+    it("parses continuous /profiling/profile/ URL (without /explore/)", () => {
       expect(
         resolveResourceParams({
           url: "https://my-org.sentry.io/profiling/profile/my-project/flamegraph/",
@@ -267,6 +276,10 @@ describe("resolveResourceParams", () => {
         type: "profile",
         organizationSlug: "my-org",
         projectSlug: "my-project",
+        profileId: undefined,
+        profilerId: undefined,
+        start: undefined,
+        end: undefined,
       });
     });
 
@@ -279,10 +292,14 @@ describe("resolveResourceParams", () => {
         type: "profile",
         organizationSlug: "my-org",
         projectSlug: "my-project",
+        profileId: undefined,
+        profilerId: undefined,
+        start: undefined,
+        end: undefined,
       });
     });
 
-    it("parses flamegraph URL with extra query params", () => {
+    it("parses transaction flamegraph URL with extra query params", () => {
       expect(
         resolveResourceParams({
           url: "https://sentry.sentry.io/explore/profiling/profile/sentry/cfe78a5c/flamegraph/?colorCoding=by%20system%20vs%20application%20frame&frameName=SentryEnvMiddleware",
@@ -291,7 +308,33 @@ describe("resolveResourceParams", () => {
         type: "profile",
         organizationSlug: "sentry",
         projectSlug: "sentry",
+        profileId: "cfe78a5c",
+        profilerId: undefined,
+        start: undefined,
+        end: undefined,
       });
+    });
+
+    it("rejects profile URLs outside the active organization constraint", () => {
+      expect(() =>
+        resolveResourceParams({
+          url: "https://my-org.sentry.io/explore/profiling/profile/my-project/flamegraph/",
+          organizationSlug: "other-org",
+        }),
+      ).toThrow(
+        'Sentry resource URL is outside the active organization constraint. Expected organization "other-org" but got "my-org".',
+      );
+    });
+
+    it("rejects profile URLs outside the active project constraint", () => {
+      expect(() =>
+        resolveResourceParams({
+          url: "https://my-org.sentry.io/explore/profiling/profile/my-project/flamegraph/",
+          projectSlug: "other-project",
+        }),
+      ).toThrow(
+        'Profile URL is outside the active project constraint. Expected project "other-project" but got "my-project".',
+      );
     });
   });
 
@@ -454,6 +497,28 @@ describe("resolveResourceParams", () => {
       });
     });
 
+    it("allows trace override on a focused span URL", () => {
+      expect(
+        resolveResourceParams({
+          url: "https://my-org.sentry.io/explore/traces/trace/abc123?node=span-def456",
+          resourceType: "trace",
+        }),
+      ).toEqual<ResolvedResourceParams>({
+        type: "trace",
+        organizationSlug: "my-org",
+        traceId: "abc123",
+      });
+    });
+
+    it("rejects span override on a plain trace URL", () => {
+      expect(() =>
+        resolveResourceParams({
+          url: "https://my-org.sentry.io/explore/traces/trace/abc123",
+          resourceType: "span",
+        }),
+      ).toThrow("Could not extract span ID from URL for span resource");
+    });
+
     it("rejects non-breadcrumbs override on different type URL", () => {
       expect(() =>
         resolveResourceParams({
@@ -537,6 +602,21 @@ describe("resolveResourceParams", () => {
         type: "trace",
         organizationSlug: "my-org",
         traceId: "a4d1aae7216b47ff8117cf4e09ce9d0a",
+      });
+    });
+
+    it("resolves span type from a compound resourceId", () => {
+      expect(
+        resolveResourceParams({
+          resourceType: "span",
+          organizationSlug: "my-org",
+          resourceId: "a4d1aae7216b47ff8117cf4e09ce9d0a:aa8e7f3384ef4ff5",
+        }),
+      ).toEqual<ResolvedResourceParams>({
+        type: "span",
+        organizationSlug: "my-org",
+        traceId: "a4d1aae7216b47ff8117cf4e09ce9d0a",
+        spanId: "aa8e7f3384ef4ff5",
       });
     });
 
@@ -633,6 +713,16 @@ describe("resolveResourceParams", () => {
           resourceId: "something",
         }),
       ).toThrow("Invalid resourceType: monitor");
+    });
+
+    it("throws when span resourceId is malformed", () => {
+      expect(() =>
+        resolveResourceParams({
+          resourceType: "span",
+          organizationSlug: "my-org",
+          resourceId: "a4d1aae7216b47ff8117cf4e09ce9d0a",
+        }),
+      ).toThrow("Span resourceId must use the format `<traceId>:<spanId>`.");
     });
 
     it("throws for completely invalid resourceType", () => {

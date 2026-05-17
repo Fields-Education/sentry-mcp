@@ -1,17 +1,21 @@
-import { Hono } from "hono";
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
+import * as Sentry from "@sentry/cloudflare";
+import { getScopesForSkills, parseSkills } from "@sentry/mcp-core/skills";
+import { logIssue, logWarn } from "@sentry/mcp-core/telem/logging";
+import { Hono } from "hono";
 import { clientIdAlreadyApproved } from "../../lib/approval-dialog";
+import { resolveClientFamilyFromName } from "../../lib/client-family";
 import type { Env, WorkerProps } from "../../types";
+import { setSentryUserFromRequest } from "../../utils/sentry-user";
 import { SENTRY_TOKEN_URL } from "../constants";
 import {
-  createOAuthErrorMessage,
   createOAuthFailureResponse,
   exchangeCodeForAccessToken,
+  getOAuthCallbackFailureDetails,
   validateResourceParameter,
 } from "../helpers";
-import { verifyAndParseState, type OAuthState } from "../state";
-import { logError, logIssue, logWarn } from "@sentry/mcp-core/telem/logging";
-import { parseSkills, getScopesForSkills } from "@sentry/mcp-core/skills";
+import { parseResourceMcpConstraints } from "../resource-scope";
+import { type OAuthState, verifyAndParseState } from "../state";
 
 /**
  * Extended AuthRequest that includes skills and resource parameter
@@ -19,6 +23,22 @@ import { parseSkills, getScopesForSkills } from "@sentry/mcp-core/skills";
 interface AuthRequestWithSkills extends AuthRequest {
   skills?: unknown; // Skill-based authorization system
   resource?: string;
+}
+
+function getUpstreamTokenExpiryTimestamp(payload: {
+  expires_at: string;
+  expires_in: number;
+}): number {
+  const parsed = new Date(payload.expires_at).getTime();
+  return Number.isFinite(parsed)
+    ? parsed
+    : Date.now() + payload.expires_in * 1000;
+}
+
+function getUpstreamUserLabel(payload: {
+  user: { name: string | null; email?: string | null; id: string };
+}): string {
+  return payload.user.name ?? payload.user.email ?? payload.user.id;
 }
 
 /**
@@ -91,7 +111,9 @@ export default new Hono<{ Bindings: Env }>().get("/", async (c) => {
 
   const oauthError = c.req.query("error") ?? undefined;
   if (oauthError) {
-    logIssue("[oauth] Upstream authorization callback error", {
+    const failure = getOAuthCallbackFailureDetails({ oauthError });
+    const logMessage = "[oauth] Upstream authorization callback error";
+    const logOptions = {
       contexts: {
         oauth: {
           clientId: oauthReqInfo.clientId,
@@ -103,17 +125,24 @@ export default new Hono<{ Bindings: Env }>().get("/", async (c) => {
         queryKeys: Array.from(new URL(c.req.url).searchParams.keys()),
       },
       loggerScope: ["cloudflare", "oauth", "callback"],
-    });
+    } as const;
+    let eventId: string | undefined;
+    if (failure.shouldLogIssue) {
+      eventId = logIssue(logMessage, logOptions);
+    } else {
+      logWarn(logMessage, logOptions);
+    }
 
     return createOAuthFailureResponse({
-      message: createOAuthErrorMessage(oauthError),
-      status: 400,
+      message: failure.message,
+      status: failure.status,
       oauthError,
+      eventId,
     });
   }
 
   if (!c.req.query("code")) {
-    logError("[oauth] Callback reached without code or upstream error", {
+    logWarn("[oauth] Callback reached without code or upstream error", {
       contexts: {
         oauth: {
           clientId: oauthReqInfo.clientId,
@@ -145,10 +174,12 @@ export default new Hono<{ Bindings: Env }>().get("/", async (c) => {
   }
 
   // Validate redirectUri is registered for this client
+  let registeredClientName: string | undefined;
   try {
     const client = await c.env.OAUTH_PROVIDER.lookupClient(
       oauthReqInfo.clientId,
     );
+    registeredClientName = client?.clientName;
     const uriIsAllowed =
       Array.isArray(client?.redirectUris) &&
       client.redirectUris.includes(oauthReqInfo.redirectUri);
@@ -158,25 +189,31 @@ export default new Hono<{ Bindings: Env }>().get("/", async (c) => {
         extra: {
           clientId: oauthReqInfo.clientId,
           redirectUri: oauthReqInfo.redirectUri,
+          registeredUris: client?.redirectUris,
+          clientName: registeredClientName,
         },
       });
       return c.text("Authorization failed: Invalid redirect URL", 400);
     }
   } catch (lookupErr) {
-    logError("Failed to validate client redirect URI on callback", {
-      contexts: {
-        oauth: {
-          clientId: oauthReqInfo.clientId,
-          redirectUri: oauthReqInfo.redirectUri,
+    const eventId = logIssue(
+      "Failed to validate client redirect URI on callback",
+      {
+        contexts: {
+          oauth: {
+            clientId: oauthReqInfo.clientId,
+            redirectUri: oauthReqInfo.redirectUri,
+          },
         },
+        extra: { error: String(lookupErr) },
+        loggerScope: ["cloudflare", "oauth", "callback"],
       },
-      extra: { error: String(lookupErr) },
-      loggerScope: ["cloudflare", "oauth", "callback"],
-    });
+    );
     return createOAuthFailureResponse({
       message:
         "There was an internal error validating the callback redirect URL.",
       status: 500,
+      eventId,
     });
   }
 
@@ -233,14 +270,31 @@ export default new Hono<{ Bindings: Env }>().get("/", async (c) => {
   // Convert valid skills Set to array for OAuth props
   const grantedSkills = Array.from(validSkills);
 
+  const resource = (oauthReqInfo as AuthRequestWithSkills).resource;
+  const resourceScope = parseResourceMcpConstraints(
+    typeof resource === "string" ? resource : undefined,
+  );
+  const constraintOrganizationSlug = resourceScope?.organizationSlug ?? null;
+  const constraintProjectSlug = resourceScope?.projectSlug ?? null;
+
   // Return back to the MCP client a new token
+  const accessTokenExpiresAt = getUpstreamTokenExpiryTimestamp(payload);
+  const userLabel = getUpstreamUserLabel(payload);
+
   const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
     request: oauthReqInfo as AuthRequest,
     userId: payload.user.id,
     metadata: {
-      label: payload.user.name,
+      label: userLabel,
     },
     scope: oauthReqInfo.scope,
+    // Default revokes every existing grant for (userId, clientId), which
+    // cascades a sign-out to every other concurrent session of the same
+    // user — common when Claude Code processes share DCR credentials
+    // across project folders. Our props don't drift between re-auths in a
+    // way that would require server-forced single-grant semantics, so
+    // allow concurrent grants instead. See issue #924.
+    revokeExistingGrants: false,
     // Props are available via ExecutionContext.props in the MCP handler
     props: {
       // OAuth standard fields
@@ -251,7 +305,7 @@ export default new Hono<{ Bindings: Env }>().get("/", async (c) => {
       refreshToken: payload.refresh_token,
       // Cache upstream expiry so future refresh grants can avoid
       // unnecessary upstream refresh calls when still valid
-      accessTokenExpiresAt: Date.now() + payload.expires_in * 1000,
+      accessTokenExpiresAt,
       clientId: oauthReqInfo.clientId,
       scope: oauthReqInfo.scope.join(" "),
       // Scopes derived from skills - for backward compatibility with old MCP clients
@@ -259,9 +313,21 @@ export default new Hono<{ Bindings: Env }>().get("/", async (c) => {
       grantedScopes: Array.from(grantedScopes),
       grantedSkills, // Primary authorization method
 
-      // Note: constraints are NOT included here - they're extracted per-request from URL
+      constraintOrganizationSlug,
+      constraintProjectSlug,
+
       // Note: sentryHost and mcpUrl come from env, not OAuth props
     } as WorkerProps,
+  });
+
+  setSentryUserFromRequest(c.req.raw, payload.user.id);
+  // /oauth/callback is browser-navigated, so the User-Agent is the user's
+  // browser, not the MCP client. Derive client family from the DCR-registered
+  // client_name (resolved above).
+  Sentry.metrics.count("app.oauth.callback_completed", 1, {
+    attributes: {
+      "app.client.family": resolveClientFamilyFromName(registeredClientName),
+    },
   });
 
   // Use manual redirect instead of Response.redirect() to allow middleware to add headers
