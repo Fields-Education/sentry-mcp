@@ -47,6 +47,7 @@ sentry-mcp/
 - docs/pr-management.md — Commit/PR guidelines
 - docs/security.md — Authentication patterns
 - docs/stdio-auth.md — Device code flow, token caching, client ID architecture
+- docs/oauth-signout-playbook.md — Remote OAuth failure modes, telemetry, diagnostic runbook
 - docs/embedded-agents.md — LLM provider configuration for AI-powered tools
 - docs/releases/stdio.md — npm package release
 - docs/releases/cloudflare.md — Cloudflare deployment
@@ -81,9 +82,10 @@ Use `/dex` skill to coordinate complex work. Create tasks with full context, bre
 ## Workflow
 
 1. Check neighboring files for existing patterns before writing new code.
-2. Update relevant docs when changing functionality.
-3. Follow docs/error-handling.md for error types.
-4. Follow docs/pr-management.md for commits and PRs.
+2. When adding or modifying Sentry API endpoint usage, ALWAYS validate the endpoint behavior against the Sentry source code in `~/src/sentry` instead of assuming docs or client parameters are authoritative.
+3. Update relevant docs when changing functionality.
+4. Follow docs/error-handling.md for error types.
+5. Follow docs/pr-management.md for commits and PRs.
 
 ## Commit Attribution
 

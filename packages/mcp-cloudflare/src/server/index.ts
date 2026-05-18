@@ -2,7 +2,14 @@ import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import * as Sentry from "@sentry/cloudflare";
 import { SCOPES } from "../constants";
 import app from "./app";
+import { resolveClientFamily } from "./lib/client-family";
 import sentryMcpHandler from "./lib/mcp-handler";
+import {
+  type RateLimitScope,
+  extractResponseMetricOptions,
+  recordResponseMetric,
+  stripResponseMetricHeaders,
+} from "./metrics";
 import { tokenExchangeCallback } from "./oauth";
 import getSentryConfig from "./sentry.config";
 import type { Env } from "./types";
@@ -13,20 +20,44 @@ import {
   stripCorsHeaders,
 } from "./utils/cors";
 import {
-  checkRateLimit,
   MCP_RATE_LIMIT_EXCEEDED_MESSAGE,
+  checkRateLimit,
 } from "./utils/rate-limiter";
-import {
-  extractResponseMetricOptions,
-  recordResponseMetric,
-  stripResponseMetricHeaders,
-  type RateLimitScope,
-} from "./metrics";
+import { setSentryUserFromRequest } from "./utils/sentry-user";
+
+const AUTH_PARAM_SEPARATOR = /,\s*(?=[A-Za-z_][A-Za-z0-9_-]*\s*=)/;
+const AUTH_CHALLENGE = /^(\S+)(?:\s+(.+))?$/;
+const RESOURCE_METADATA_PARAM = /^resource_metadata\s*=/i;
+
+function replaceResourceMetadataParam(
+  headerValue: string,
+  resourceMetadataUrl: string,
+): string {
+  const match = headerValue.match(AUTH_CHALLENGE);
+  if (!match) {
+    return headerValue;
+  }
+
+  const [, scheme, params = ""] = match;
+  const filteredParams = params
+    .split(AUTH_PARAM_SEPARATOR)
+    .map((param) => param.trim())
+    .filter((param) => param && !RESOURCE_METADATA_PARAM.test(param));
+
+  filteredParams.push(`resource_metadata="${resourceMetadataUrl}"`);
+  return `${scheme} ${filteredParams.join(", ")}`;
+}
 
 /**
  * RFC 9728 §3.1: Patch 401 responses on MCP routes to include a
  * `resource_metadata` parameter in the WWW-Authenticate header so
  * clients can discover the protected-resource metadata endpoint.
+ *
+ * The underlying OAuth library may already set its own `resource_metadata`
+ * pointing at the (path-less) origin metadata URL, which 404s on this
+ * deployment. We strip any pre-existing `resource_metadata` parameter and
+ * replace it with our path-specific one so the challenge contains exactly
+ * one such param, as required by RFC 9110 §11.2.
  */
 function patchWwwAuthenticate(response: Response, url: URL): Response {
   if (response.status !== 401 || !url.pathname.startsWith("/mcp")) {
@@ -38,11 +69,10 @@ function patchWwwAuthenticate(response: Response, url: URL): Response {
   }
   const prmUrl = `${url.protocol}//${url.host}/.well-known/oauth-protected-resource${url.pathname}${url.search}`;
   const newResponse = new Response(response.body, response);
-  // RFC 7235: first param is space-separated from scheme, subsequent params are comma-separated
-  const separator = existing.includes(" ") ? "," : "";
+
   newResponse.headers.set(
     "WWW-Authenticate",
-    `${existing}${separator} resource_metadata="${prmUrl}"`,
+    replaceResourceMetadataParam(existing, prmUrl),
   );
   return newResponse;
 }
@@ -81,6 +111,7 @@ function finalizeResponse(
 const wrappedOAuthProvider = {
   fetch: async (request: Request, env: Env, ctx: ExecutionContext) => {
     const url = new URL(request.url);
+    setSentryUserFromRequest(request);
 
     // --- Phase 1: Intercept preflight before the library can respond ---
     // Public metadata gets restrictive CORS; everything else gets a bare 204
@@ -138,6 +169,8 @@ const wrappedOAuthProvider = {
       }
     }
 
+    const clientFamily = resolveClientFamily(request.headers.get("user-agent"));
+
     // --- Phase 2: Let the OAuth library handle the request ---
     // We normalize any CORS headers it returns in the response handling below.
     const oAuthProvider = new OAuthProvider({
@@ -149,7 +182,8 @@ const wrappedOAuthProvider = {
       authorizeEndpoint: "/oauth/authorize",
       tokenEndpoint: "/oauth/token",
       clientRegistrationEndpoint: "/oauth/register",
-      tokenExchangeCallback: (options) => tokenExchangeCallback(options, env),
+      tokenExchangeCallback: (options) =>
+        tokenExchangeCallback(options, env, request, clientFamily),
       scopesSupported: Object.keys(SCOPES),
       // Expire grants after 30 days to prevent unbounded KV accumulation.
       // Sentry access tokens also have a 30-day lifetime, so re-auth is
@@ -158,6 +192,16 @@ const wrappedOAuthProvider = {
     });
 
     const response = await oAuthProvider.fetch(request, env, ctx);
+
+    if (
+      request.method === "POST" &&
+      url.pathname === "/oauth/register" &&
+      response.ok
+    ) {
+      Sentry.metrics.count("app.oauth.register", 1, {
+        attributes: { "app.client.family": clientFamily },
+      });
+    }
 
     // --- Phase 3: Patch headers, then apply our CORS policy ---
     const patched = patchWwwAuthenticate(response, url);

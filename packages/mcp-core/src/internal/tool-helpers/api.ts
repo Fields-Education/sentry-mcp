@@ -1,5 +1,6 @@
 import {
   SentryApiService,
+  ApiAuthenticationError,
   ApiClientError,
   ApiNotFoundError,
 } from "../../api-client/index";
@@ -11,7 +12,7 @@ import { validateRegionUrl } from "./validate-region-url";
  * Create a Sentry API service from server context with optional region override
  * @param context - Server context containing host and access token
  * @param opts - Options object containing optional regionUrl override
- * @returns Configured SentryApiService instance (always uses HTTPS)
+ * @returns Configured SentryApiService instance using the context's configured protocol
  * @throws {UserInputError} When regionUrl is provided but invalid
  */
 export function apiServiceFromContext(
@@ -29,6 +30,7 @@ export function apiServiceFromContext(
 
   return new SentryApiService({
     host,
+    protocol: context.sentryProtocol,
     accessToken: context.accessToken,
   });
 }
@@ -45,6 +47,12 @@ export function handleApiError(
   error: unknown,
   params?: Record<string, unknown>,
 ): never {
+  // 401 isn't a user-input problem — propagate unwrapped so the server-level
+  // catch can route it through ServerContext.onUpstreamUnauthorized.
+  if (error instanceof ApiAuthenticationError) {
+    throw error;
+  }
+
   // Use the new error hierarchy - all 4xx errors extend ApiClientError
   if (error instanceof ApiClientError) {
     let message = `API error (${error.status}): ${error.message}`;
