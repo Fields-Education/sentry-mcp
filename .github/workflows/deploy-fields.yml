@@ -6,10 +6,7 @@ permissions:
   checks: write
 
 on:
-  workflow_run:
-    workflows: ["Test"]
-    types:
-      - completed
+  push:
     branches: [main]
   workflow_dispatch:
 
@@ -17,7 +14,7 @@ jobs:
   deploy:
     name: Deploy Fields MCP
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+
 
     steps:
       - uses: actions/checkout@v6
