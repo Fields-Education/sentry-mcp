@@ -27,6 +27,9 @@ import { setupServer } from "msw/node";
 import autofixStateFixture from "./fixtures/autofix-state.json" with {
   type: "json",
 };
+import autofixStateExplorerFixture from "./fixtures/autofix-state-explorer.json" with {
+  type: "json",
+};
 import clientKeyFixture from "./fixtures/client-key.json" with { type: "json" };
 import eventAttachmentsFixture from "./fixtures/event-attachments.json" with {
   type: "json",
@@ -38,6 +41,15 @@ import eventsErrorsEmptyFixture from "./fixtures/events-errors-empty.json" with 
 import eventsErrorsFixture from "./fixtures/events-errors.json" with {
   type: "json",
 };
+import eventsTraceMetricsAggregateFixture from "./fixtures/events-tracemetrics-aggregate.json" with {
+  type: "json",
+};
+import eventsTraceMetricsEmptyFixture from "./fixtures/events-tracemetrics-empty.json" with {
+  type: "json",
+};
+import eventsTraceMetricsFixture from "./fixtures/events-tracemetrics.json" with {
+  type: "json",
+};
 import eventsSpansEmptyFixture from "./fixtures/events-spans-empty.json" with {
   type: "json",
 };
@@ -47,6 +59,12 @@ import eventsSpansFixture from "./fixtures/events-spans.json" with {
 import flamegraphFixture from "./fixtures/flamegraph.json" with {
   type: "json",
 };
+import transactionProfileV1Fixture from "./fixtures/transaction-profile-v1.json" with {
+  type: "json",
+};
+import transactionProfileV1MissingFunctionFixture from "./fixtures/transaction-profile-v1-missing-function.json" with {
+  type: "json",
+};
 import profileChunkFixture from "./fixtures/profile-chunk.json" with {
   type: "json",
 };
@@ -54,6 +72,9 @@ import issueTagValuesFixture from "./fixtures/issue-tag-values.json" with {
   type: "json",
 };
 import issueFixture from "./fixtures/issue.json" with { type: "json" };
+import issueNullCulpritFixture from "./fixtures/issue-null-culprit.json" with {
+  type: "json",
+};
 import organizationFixture from "./fixtures/organization.json" with {
   type: "json",
 };
@@ -83,6 +104,12 @@ import traceItemsAttributesSpansNumberFixture from "./fixtures/trace-items-attri
   type: "json",
 };
 import traceItemsAttributesSpansStringFixture from "./fixtures/trace-items-attributes-spans-string.json" with {
+  type: "json",
+};
+import traceItemsAttributesTraceMetricsNumberFixture from "./fixtures/trace-items-attributes-tracemetrics-number.json" with {
+  type: "json",
+};
+import traceItemsAttributesTraceMetricsStringFixture from "./fixtures/trace-items-attributes-tracemetrics-string.json" with {
   type: "json",
 };
 import traceItemsAttributesFixture from "./fixtures/trace-items-attributes.json" with {
@@ -155,6 +182,86 @@ function buildHandlers(
   }
 
   return result;
+}
+
+type IssueUpdateBody = {
+  assignedTo?: unknown;
+  ignoreCount?: number;
+  ignoreDuration?: number;
+  ignoreUserCount?: number;
+  ignoreUserWindow?: number;
+  ignoreWindow?: number;
+  status?: string;
+  substatus?: string;
+};
+
+function buildMockIgnoredStatusDetails(
+  body: IssueUpdateBody,
+  substatus: string | null | undefined,
+) {
+  if (substatus === "archived_until_escalating") {
+    return { ignoreUntilEscalating: true };
+  }
+
+  if (substatus === "archived_until_condition_met") {
+    return {
+      ...(body.ignoreDuration !== undefined
+        ? { ignoreDuration: body.ignoreDuration }
+        : {}),
+      ...(body.ignoreCount !== undefined
+        ? { ignoreCount: body.ignoreCount }
+        : {}),
+      ...(body.ignoreWindow !== undefined
+        ? { ignoreWindow: body.ignoreWindow }
+        : {}),
+      ...(body.ignoreUserCount !== undefined
+        ? { ignoreUserCount: body.ignoreUserCount }
+        : {}),
+      ...(body.ignoreUserWindow !== undefined
+        ? { ignoreUserWindow: body.ignoreUserWindow }
+        : {}),
+    };
+  }
+
+  return {};
+}
+
+function buildUpdatedIssueResponse(
+  baseIssue: typeof issueFixture,
+  body: IssueUpdateBody,
+) {
+  const hasIgnoreConditions =
+    body.ignoreDuration !== undefined ||
+    body.ignoreCount !== undefined ||
+    body.ignoreUserCount !== undefined;
+  const requestedStatus = body.status ?? baseIssue.status;
+  const status =
+    requestedStatus === "resolvedInNextRelease" ? "resolved" : requestedStatus;
+  const substatus =
+    status === "ignored"
+      ? (body.substatus ??
+        (hasIgnoreConditions
+          ? "archived_until_condition_met"
+          : "archived_until_escalating"))
+      : baseIssue.substatus;
+
+  let statusDetails = baseIssue.statusDetails;
+
+  if (requestedStatus === "resolvedInNextRelease") {
+    statusDetails = { inNextRelease: true };
+  } else if (status === "ignored") {
+    statusDetails = buildMockIgnoredStatusDetails(body, substatus);
+  } else if (body.status !== undefined) {
+    statusDetails = {};
+  }
+
+  return {
+    ...baseIssue,
+    status,
+    substatus,
+    statusDetails,
+    assignedTo: body.assignedTo ?? baseIssue.assignedTo,
+  };
 }
 
 /**
@@ -292,6 +399,27 @@ export const restHandlers = buildHandlers([
     },
   },
   {
+    method: "get",
+    path: "/api/0/projects/:organizationSlug/:projectSlugOrId/",
+    fetch: ({ params }) => {
+      const projectSlugOrId = String(params.projectSlugOrId);
+      const numericProjectId = Number(projectSlugOrId);
+
+      return HttpResponse.json({
+        ...projectFixture,
+        id: Number.isNaN(numericProjectId)
+          ? projectFixture.id
+          : numericProjectId,
+        slug: Number.isNaN(numericProjectId)
+          ? projectSlugOrId
+          : projectFixture.slug,
+        name: Number.isNaN(numericProjectId)
+          ? projectSlugOrId
+          : projectFixture.name,
+      });
+    },
+  },
+  {
     method: "put",
     path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/",
     fetch: async ({ request }) => {
@@ -389,6 +517,40 @@ export const restHandlers = buildHandlers([
         }
 
         return HttpResponse.json(eventsErrorsFixture);
+      }
+
+      if (dataset === "tracemetrics") {
+        const sort = url.searchParams.get("sort");
+        const isAggregateQuery = fields.some(
+          (field) => field.includes("(") && field.includes(")"),
+        );
+
+        if (!sort) {
+          return HttpResponse.json("Missing sort", { status: 400 });
+        }
+
+        if (isAggregateQuery) {
+          if (!sort.includes("(")) {
+            return HttpResponse.json("Invalid tracemetrics sort", {
+              status: 400,
+            });
+          }
+
+          return HttpResponse.json(eventsTraceMetricsAggregateFixture);
+        }
+
+        const sortedQuery = query ? query?.split(" ").sort().join(" ") : null;
+        if (
+          ![
+            null,
+            "",
+            "metric.name:http.request.duration metric.type:distribution",
+          ].includes(sortedQuery)
+        ) {
+          return HttpResponse.json(eventsTraceMetricsEmptyFixture);
+        }
+
+        return HttpResponse.json(eventsTraceMetricsFixture);
       }
 
       return HttpResponse.json("Invalid dataset", { status: 400 });
@@ -538,6 +700,27 @@ export const restHandlers = buildHandlers([
   },
   {
     method: "get",
+    path: "/api/0/organizations/sentry-mcp-evals/replays/",
+    fetch: () =>
+      HttpResponse.json({
+        data: [
+          replayDetailsFixture,
+          {
+            ...replayDetailsFixture,
+            id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            count_errors: 0,
+            count_rage_clicks: 2,
+            count_dead_clicks: 1,
+            started_at: "2025-01-10T10:00:00Z",
+            duration: 120,
+            urls: ["/settings"],
+            releases: ["frontend@2.0.0"],
+          },
+        ],
+      }),
+  },
+  {
+    method: "get",
     path: `/api/0/organizations/sentry-mcp-evals/replays/${replayDetailsFixture.id}/`,
     fetch: () => HttpResponse.json({ data: replayDetailsFixture }),
   },
@@ -642,6 +825,39 @@ export const restHandlers = buildHandlers([
     fetch: () => HttpResponse.json(tagsFixture),
   },
   {
+    method: "post",
+    path: "/api/0/organizations/sentry-mcp-evals/trace-items/attributes/validate/",
+    fetch: async ({ request }) => {
+      const body = (await request.json().catch(() => null)) as unknown;
+      const attributesValue =
+        typeof body === "object" && body !== null && "attributes" in body
+          ? body.attributes
+          : undefined;
+      const attributes = Array.isArray(attributesValue)
+        ? attributesValue.filter(
+            (attribute): attribute is string => typeof attribute === "string",
+          )
+        : [];
+
+      return HttpResponse.json({
+        attributes: Object.fromEntries(
+          attributes.map((attribute) => [
+            attribute,
+            {
+              valid: true,
+              type:
+                attribute.includes("sequence") ||
+                attribute.includes("count") ||
+                attribute.includes("duration")
+                  ? "number"
+                  : "string",
+            },
+          ]),
+        ),
+      });
+    },
+  },
+  {
     method: "get",
     path: "/api/0/organizations/sentry-mcp-evals/trace-items/attributes/",
     fetch: ({ request }) => {
@@ -666,10 +882,10 @@ export const restHandlers = buildHandlers([
 
       // Validate itemType values (API accepts both singular and plural forms)
       const normalizedItemType = itemType === "spans" ? "span" : itemType;
-      if (!["span", "logs"].includes(normalizedItemType)) {
+      if (!["span", "logs", "tracemetrics"].includes(normalizedItemType)) {
         return HttpResponse.json(
           {
-            detail: `Invalid itemType '${itemType}'. Must be 'span' or 'logs'`,
+            detail: `Invalid itemType '${itemType}'. Must be 'span', 'logs', or 'tracemetrics'`,
           },
           { status: 400 },
         );
@@ -697,6 +913,14 @@ export const restHandlers = buildHandlers([
           return HttpResponse.json(traceItemsAttributesLogsStringFixture);
         }
         return HttpResponse.json(traceItemsAttributesLogsNumberFixture);
+      }
+      if (normalizedItemType === "tracemetrics") {
+        if (attributeType === "string") {
+          return HttpResponse.json(
+            traceItemsAttributesTraceMetricsStringFixture,
+          );
+        }
+        return HttpResponse.json(traceItemsAttributesTraceMetricsNumberFixture);
       }
 
       // Fallback (should not reach here with valid inputs)
@@ -825,52 +1049,32 @@ export const restHandlers = buildHandlers([
     method: "put",
     path: "/api/0/organizations/sentry-mcp-evals/issues/CLOUDFLARE-MCP-41/",
     fetch: async ({ request }) => {
-      const body = (await request.json()) as any;
-      const updatedIssue = {
-        ...issueFixture,
-        status: body?.status || issueFixture.status,
-        assignedTo: body?.assignedTo || issueFixture.assignedTo,
-      };
-      return HttpResponse.json(updatedIssue);
+      const body = (await request.json()) as IssueUpdateBody;
+      return HttpResponse.json(buildUpdatedIssueResponse(issueFixture, body));
     },
   },
   {
     method: "put",
     path: "/api/0/organizations/sentry-mcp-evals/issues/6507376925/",
     fetch: async ({ request }) => {
-      const body = (await request.json()) as any;
-      const updatedIssue = {
-        ...issueFixture,
-        status: body?.status || issueFixture.status,
-        assignedTo: body?.assignedTo || issueFixture.assignedTo,
-      };
-      return HttpResponse.json(updatedIssue);
+      const body = (await request.json()) as IssueUpdateBody;
+      return HttpResponse.json(buildUpdatedIssueResponse(issueFixture, body));
     },
   },
   {
     method: "put",
     path: "/api/0/organizations/sentry-mcp-evals/issues/CLOUDFLARE-MCP-42/",
     fetch: async ({ request }) => {
-      const body = (await request.json()) as any;
-      const updatedIssue = {
-        ...issueFixture2,
-        status: body?.status || issueFixture2.status,
-        assignedTo: body?.assignedTo || issueFixture2.assignedTo,
-      };
-      return HttpResponse.json(updatedIssue);
+      const body = (await request.json()) as IssueUpdateBody;
+      return HttpResponse.json(buildUpdatedIssueResponse(issueFixture2, body));
     },
   },
   {
     method: "put",
     path: "/api/0/organizations/sentry-mcp-evals/issues/6507376926/",
     fetch: async ({ request }) => {
-      const body = (await request.json()) as any;
-      const updatedIssue = {
-        ...issueFixture2,
-        status: body?.status || issueFixture2.status,
-        assignedTo: body?.assignedTo || issueFixture2.assignedTo,
-      };
-      return HttpResponse.json(updatedIssue);
+      const body = (await request.json()) as IssueUpdateBody;
+      return HttpResponse.json(buildUpdatedIssueResponse(issueFixture2, body));
     },
   },
   // Profiling endpoints
@@ -909,6 +1113,25 @@ export const restHandlers = buildHandlers([
     path: "/api/0/organizations/sentry-mcp-evals/profiling/chunks/",
     fetch: () => {
       return HttpResponse.json(profileChunkFixture);
+    },
+  },
+  {
+    method: "get",
+    path: "/api/0/organizations/:organizationSlug/profiling/chunks/",
+    fetch: () => {
+      return HttpResponse.json(profileChunkFixture);
+    },
+  },
+  {
+    method: "get",
+    path: "/api/0/projects/:organizationSlug/:projectSlugOrId/profiling/profiles/:profileId/",
+    fetch: ({ params }) => {
+      const profileId = String(params.profileId);
+      return HttpResponse.json({
+        ...transactionProfileV1Fixture,
+        event_id: profileId,
+        profile_id: profileId,
+      });
     },
   },
   // Event attachment endpoints
@@ -1220,6 +1443,7 @@ export const mswServer = setupServer(
 // Export fixtures for use in tests
 export {
   autofixStateFixture,
+  autofixStateExplorerFixture,
   eventsFixture as eventFixture,
   replayDetailsFixture,
   replayRecordingSegmentsFixture,
@@ -1230,6 +1454,8 @@ export {
   traceMixedFixture,
   traceEventFixture,
   flamegraphFixture,
+  transactionProfileV1Fixture,
+  transactionProfileV1MissingFunctionFixture,
   organizationFixture,
   releaseFixture,
   clientKeyFixture,
@@ -1239,6 +1465,7 @@ export {
   eventsSpansFixture,
   eventsSpansEmptyFixture,
   issueFixture,
+  issueNullCulpritFixture,
   eventsFixture,
   projectFixture,
   teamFixture,

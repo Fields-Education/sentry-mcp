@@ -2,23 +2,23 @@
 
 ## Overview
 
-The `search_events` tool provides a unified interface for searching Sentry events across different datasets (errors, logs, spans). This document covers the API patterns, query structures, and best practices for both individual event queries and aggregate queries.
+The `search_events` tool provides a unified interface for searching Sentry events across different datasets (`errors`, `logs`, `spans`, and `metrics`). This document covers the API patterns, query structures, and best practices for both individual event queries and aggregate queries.
 
 ## API Architecture
 
-### Legacy Discover API vs Modern EAP API
+### Discover-Style API vs Modern EAP API
 
-Sentry uses two different API architectures depending on the dataset:
+Sentry uses two different query-building patterns depending on the dataset, even though they share the same `/events/` endpoint:
 
-1. **Legacy Discover API** (errors dataset)
-   - Uses the original Discover query format
-   - Simpler aggregate field handling
-   - Returns data in a different format
+1. **Discover-style events queries** (`errors`, `metrics`)
+   - Use repeated `field` parameters
+   - Use raw aggregate expressions in both `field` and `sort`
+   - Generate Discover-style URLs for `errors` and Metrics page URLs for `metrics`
 
-2. **Modern EAP (Event Analytics Platform) API** (spans, logs datasets)
-   - Uses structured aggregate parameters
-   - More sophisticated query capabilities
-   - Different URL generation patterns
+2. **Modern EAP (Event Analytics Platform) queries** (`spans`, `logs`)
+   - Use the same `/events/` endpoint with EAP-oriented field conventions
+   - Support richer span/log search semantics
+   - Generate Explore URLs for traces and logs
 
 ### API Endpoint
 
@@ -29,10 +29,11 @@ All queries use the same base endpoint:
 
 ### Dataset Mapping
 
-The tool handles dataset name mapping internally:
-- User specifies `errors` → API uses `errors` (Legacy Discover)
-- User specifies `spans` → API uses `spans` (EAP)
-- User specifies `logs` → API uses `ourlogs` (EAP) ⚠️ Note the transformation!
+The tool forwards the dataset name directly to the API:
+- User specifies `errors` → API uses `errors`
+- User specifies `spans` → API uses `spans`
+- User specifies `logs` → API uses `logs`
+- User specifies `metrics` → API uses `tracemetrics`
 
 ## Query Modes
 
@@ -56,6 +57,7 @@ https://us.sentry.io/api/0/organizations/sentry/events/?dataset=spans&field=id&f
 - **Spans**: `id`, `span.op`, `span.description`, `span.duration`, `transaction`, `timestamp`, `project`, `trace`
 - **Errors**: `issue`, `title`, `project`, `timestamp`, `level`, `message`, `error.type`, `culprit`
 - **Logs**: `timestamp`, `project`, `message`, `severity`, `trace`
+- **Tracemetrics**: `id`, `timestamp`, `project`, `trace`, `metric.name`, `metric.type`, `metric.unit`, `value`
 
 ### 2. Aggregate Queries (Statistics)
 
@@ -85,7 +87,7 @@ https://us.sentry.io/api/0/organizations/sentry/events/?dataset=spans&field=ai.m
 
 | Parameter | Description | Example |
 |-----------|-------------|---------|
-| `dataset` | Which dataset to query | `spans`, `errors`, `logs` (API uses `ourlogs`) |
+| `dataset` | Which dataset to query | `spans`, `errors`, `logs`, `metrics` |
 | `field` | Fields to return (repeated for each field) | `field=span.op&field=count()` |
 | `query` | Sentry query syntax filter | `has:db.statement AND span.duration:>1000` |
 | `sort` | Sort order (prefix with `-` for descending) | `-timestamp`, `-count()` |
@@ -112,7 +114,13 @@ https://us.sentry.io/api/0/organizations/sentry/events/?dataset=spans&field=ai.m
 - Does NOT support timestamp filters in query (use `statsPeriod` instead)
 - Severity levels: fatal, error, warning, info, debug, trace
 - Common aggregate functions: `count()`, `epm()`
-- Uses `ourlogs` as the actual API dataset value (not `logs`)
+
+#### Metrics Dataset
+- Represents newer span metrics, including counters, gauges, and distributions
+- Uses the same `/events/` endpoint with `dataset=tracemetrics`
+- Attribute discovery uses `/trace-items/attributes/?itemType=tracemetrics`
+- Aggregate fields must encode the target metric directly: `fn(value,metric.name,metric.type,metric.unit)`
+- Sort fields for aggregate results must stay raw, for example `-p95(value,http.request.duration,distribution,millisecond)`
 
 ## Query Syntax
 
@@ -128,7 +136,8 @@ https://us.sentry.io/api/0/organizations/sentry/events/?dataset=spans&field=ai.m
 Instead of using `span.op` patterns, use `has:` queries for more flexible attribute-based filtering:
 - HTTP requests: `has:request.url` instead of `span.op:http*`
 - Database queries: `has:db.statement` or `has:db.system` instead of `span.op:db*`
-- AI/LLM calls: `has:ai.model.id` or `has:mcp.tool.name`
+- AI/LLM calls: `has:ai.model.id`
+- MCP tool calls: `has:gen_ai.tool.name`
 
 ### Aggregate Functions
 
@@ -143,6 +152,12 @@ Instead of using `span.op` patterns, use `has:` queries for more flexible attrib
 - `min(field)` - Minimum value
 - `max(field)` - Maximum value
 - `p50(field)`, `p75(field)`, `p90(field)`, `p95(field)`, `p99(field)` - Percentiles
+
+#### Tracemetrics Aggregate Functions
+- Use the metric-aware form `fn(value,metric.name,metric.type,metric.unit)`
+- Counter examples: `sum(value,http.server.request.count,counter,-)`, `per_minute(value,http.server.request.count,counter,-)`
+- Gauge examples: `avg(value,cpu.usage,gauge,percent)`, `max(value,cpu.usage,gauge,percent)`
+- Distribution examples: `p75(value,http.request.duration,distribution,millisecond)`, `p95(value,http.request.duration,distribution,millisecond)`
 
 #### Errors-Specific Functions
 - `count_if(field,equals,value)` - Conditional count
@@ -183,10 +198,18 @@ Sort: -count()
 Dataset: logs
 ```
 
+### Request Duration Percentiles by Route (Trace Metrics Aggregate)
+```
+Query: metric.name:http.request.duration AND metric.type:distribution
+Fields: ["transaction", "p75(value,http.request.duration,distribution,millisecond)", "p95(value,http.request.duration,distribution,millisecond)", "count(value,http.request.duration,distribution,millisecond)"]
+Sort: -p95(value,http.request.duration,distribution,millisecond)
+Dataset: metrics
+```
+
 ### Tool Calls by Model (Aggregate)
 ```
-Query: has:mcp.tool.name
-Fields: ["ai.model.id", "mcp.tool.name", "count()"]
+Query: has:gen_ai.tool.name
+Fields: ["ai.model.id", "gen_ai.tool.name", "count()"]
 Sort: -count()
 Dataset: spans
 ```
@@ -205,7 +228,7 @@ Dataset: spans
 2. **Wrong sort field**: The field you sort by must be included in the fields array
 3. **Timestamp filters on logs**: Use `statsPeriod` parameter instead of query filters
 4. **Using project slugs**: API requires numeric project IDs, not slugs
-5. **Dataset naming**: Use `logs` in the tool, but API expects `ourlogs`
+5. **Tracemetrics sort mangling**: Do not rewrite `-p95(value,...)` into Discover-style aliases; the raw aggregate expression must be preserved
 
 ## Web UI URL Generation
 
@@ -214,10 +237,12 @@ The tool automatically generates shareable Sentry web UI URLs after making API c
 - **Errors dataset**: `/organizations/{org}/discover/results/`
 - **Spans dataset**: `/organizations/{org}/explore/traces/`
 - **Logs dataset**: `/organizations/{org}/explore/logs/`
+- **Tracemetrics dataset**: `/organizations/{org}/explore/metrics/`
 
 Note: The web UI URLs use different parameter formats than the API:
 - Legacy Discover uses simple field parameters
-- Modern Explore uses `aggregateField` with JSON-encoded values
+- Modern Explore uses dataset-specific parameter formats
+- The Metrics page uses one or more JSON-encoded `metric=` parameters
 - The tool handles this transformation automatically in `buildDiscoverUrl()` and `buildEapUrl()`
 
 ### Web URL Generation Parameters

@@ -6,7 +6,7 @@ import { sentryBeforeSend } from "@sentry/mcp-core/telem/sentry";
 type SentryConfig = ReturnType<Parameters<typeof Sentry.withSentry>[0]>;
 
 export default function getSentryConfig(env: Env): SentryConfig {
-  const { id: versionId } = env.CF_VERSION_METADATA;
+  const versionId = env.CF_VERSION_METADATA?.id;
 
   return {
     dsn: env.SENTRY_DSN,
@@ -15,11 +15,11 @@ export default function getSentryConfig(env: Env): SentryConfig {
     beforeSend: sentryBeforeSend,
     initialScope: {
       tags: {
-        "mcp.server_version": LIB_VERSION,
-        "sentry.host": env.SENTRY_HOST,
+        "app.server.version": LIB_VERSION,
+        "app.upstream.host": env.SENTRY_HOST,
       },
     },
-    release: versionId,
+    ...(versionId ? { release: versionId } : {}),
     environment:
       env.SENTRY_ENVIRONMENT ??
       (process.env.NODE_ENV !== "production" ? "development" : "production"),

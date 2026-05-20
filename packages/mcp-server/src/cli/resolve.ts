@@ -1,5 +1,6 @@
 import { ALL_SKILLS, parseSkills, type Skill } from "@sentry/mcp-core/skills";
 import {
+  isSentryHost,
   validateAndParseSentryUrlThrows,
   validateOpenAiBaseUrlThrows,
   validateSentryHostThrows,
@@ -32,7 +33,21 @@ export function resolveHost(url?: string, host?: string): string {
 }
 
 export function finalize(input: MergedArgs): PartiallyResolvedConfig {
+  if (input.insecureHttp && input.url) {
+    throw new Error(
+      "Error: --insecure-http cannot be used with --url or SENTRY_URL. Use --host for insecure self-hosted instances.",
+    );
+  }
+
   const sentryHost = resolveHost(input.url, input.host);
+
+  if (input.insecureHttp && isSentryHost(sentryHost)) {
+    throw new Error(
+      "Error: --insecure-http is only supported for self-hosted Sentry hosts.",
+    );
+  }
+
+  const sentryProtocol = input.insecureHttp ? "http" : "https";
 
   // Skills resolution
   //
@@ -95,12 +110,17 @@ export function finalize(input: MergedArgs): PartiallyResolvedConfig {
     : undefined;
 
   // Validate agent provider if explicitly set
-  let agentProvider: "openai" | "anthropic" | undefined = undefined;
+  let agentProvider: "openai" | "azure-openai" | "anthropic" | undefined =
+    undefined;
   if (input.agentProvider) {
     const provider = input.agentProvider.toLowerCase();
-    if (provider !== "openai" && provider !== "anthropic") {
+    if (
+      provider !== "openai" &&
+      provider !== "azure-openai" &&
+      provider !== "anthropic"
+    ) {
       throw new Error(
-        `Error: Invalid agent provider "${input.agentProvider}". Must be "openai" or "anthropic".`,
+        `Error: Invalid agent provider "${input.agentProvider}". Must be "openai", "azure-openai", or "anthropic".`,
       );
     }
     agentProvider = provider;
@@ -110,6 +130,7 @@ export function finalize(input: MergedArgs): PartiallyResolvedConfig {
     accessToken: input.accessToken,
     clientId: input.clientId || DEFAULT_SENTRY_CLIENT_ID,
     sentryHost,
+    sentryProtocol,
     mcpUrl: input.mcpUrl,
     sentryDsn: input.sentryDsn,
     openaiBaseUrl: resolvedOpenAiBaseUrl,

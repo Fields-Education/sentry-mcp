@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { http, HttpResponse } from "msw";
 import { mswServer } from "@sentry/mcp-server-mocks";
-import { fetchCustomAttributes, formatEventValue } from "./utils";
+import {
+  fetchCustomAttributes,
+  formatEventValue,
+  formatKnownUserValue,
+  looksLikeSentrySearchSyntax,
+} from "./utils";
 import { SentryApiService } from "../../api-client";
 import * as logging from "../../telem/logging";
 
@@ -91,6 +96,45 @@ describe("formatEventValue", () => {
       expect(result).toContain("ip_address=10.0.0.1");
     });
 
+    it("should include geo summaries for known user objects", () => {
+      const user = {
+        id: "3c7631c0121d40e79e2f992ff5cf7671",
+        geo: {
+          country_code: "US",
+          region: "United States",
+        },
+      };
+
+      expect(formatKnownUserValue(user, { includeGeo: true })).toContain(
+        "geo=US, United States",
+      );
+    });
+
+    it("should omit geo summaries for known user objects when requested", () => {
+      const user = {
+        id: "3c7631c0121d40e79e2f992ff5cf7671",
+        geo: {
+          country_code: "US",
+          region: "United States",
+        },
+      };
+
+      expect(formatKnownUserValue(user, { includeGeo: false })).toBe(
+        "id=3c7631c0121d40e79e2f992ff5cf7671",
+      );
+    });
+
+    it("should omit summary text for geo-only known users", () => {
+      const user = {
+        geo: {
+          country_code: "US",
+          region: "United States",
+        },
+      };
+
+      expect(formatKnownUserValue(user, { includeGeo: false })).toBeNull();
+    });
+
     it("should NOT apply user formatting to objects with only id", () => {
       const obj = { id: "abc", type: "transaction", description: "GET /api" };
       const result = formatEventValue(obj);
@@ -98,6 +142,21 @@ describe("formatEventValue", () => {
       expect(result).toContain("type");
       expect(result).toContain("transaction");
       expect(result).toContain("description");
+    });
+
+    it("should NOT apply user formatting to non-user objects with geo", () => {
+      const obj = {
+        method: "GET",
+        path: "/api/0/issues/",
+        geo: {
+          country_code: "US",
+        },
+      };
+
+      const result = formatEventValue(obj);
+      expect(result).toContain('"method":"GET"');
+      expect(result).toContain('"path":"/api/0/issues/"');
+      expect(result).toContain('"country_code":"US"');
     });
 
     it("should format tag-pair objects", () => {
@@ -134,6 +193,32 @@ describe("formatEventValue", () => {
       const result = formatEventValue("abcdef", { maxLength: 3 });
       expect(result).toBe("abc");
     });
+  });
+});
+
+describe("search query helpers", () => {
+  it("should detect structured Sentry search syntax", () => {
+    expect(looksLikeSentrySearchSyntax("vpn connections from China")).toBe(
+      false,
+    );
+    expect(
+      looksLikeSentrySearchSyntax(
+        'transaction:"VPN connections" tags[type]:Unified tags[country]:CN',
+      ),
+    ).toBe(true);
+    expect(looksLikeSentrySearchSyntax("span.op:http.client")).toBe(true);
+    expect(looksLikeSentrySearchSyntax("http.status_code:500")).toBe(true);
+    expect(looksLikeSentrySearchSyntax("customer:acme")).toBe(true);
+    expect(looksLikeSentrySearchSyntax('!transaction:"healthcheck"')).toBe(
+      true,
+    );
+  });
+
+  it("should ignore common natural language colon patterns", () => {
+    expect(looksLikeSentrySearchSyntax("open http://example.com")).toBe(false);
+    expect(looksLikeSentrySearchSyntax("started at 10:30")).toBe(false);
+    expect(looksLikeSentrySearchSyntax("Note: show slow spans")).toBe(false);
+    expect(looksLikeSentrySearchSyntax("ERROR: service is down")).toBe(false);
   });
 });
 
@@ -357,6 +442,136 @@ describe("fetchCustomAttributes", () => {
           environment: "Environment",
         },
         fieldTypes: {},
+      });
+    });
+
+    it("should return attributes for metrics dataset", async () => {
+      mswServer.use(
+        http.get(
+          "https://sentry.io/api/0/organizations/test-org/trace-items/attributes/",
+          ({ request }) => {
+            const url = new URL(request.url);
+            const attributeType = url.searchParams.get("attributeType");
+            const itemType = url.searchParams.get("itemType");
+
+            expect(itemType).toBe("tracemetrics");
+
+            if (attributeType === "string") {
+              return HttpResponse.json([
+                { key: "metric.name", name: "Metric Name" },
+                { key: "metric.type", name: "Metric Type" },
+              ]);
+            }
+
+            if (attributeType === "number") {
+              return HttpResponse.json([
+                { key: "value", name: "Metric Value" },
+              ]);
+            }
+
+            return HttpResponse.json([]);
+          },
+        ),
+      );
+
+      const result = await fetchCustomAttributes(
+        apiService,
+        "test-org",
+        "metrics",
+      );
+
+      expect(result).toEqual({
+        attributes: {
+          "metric.name": "Metric Name",
+          "metric.type": "Metric Type",
+          value: "Metric Value",
+        },
+        fieldTypes: {
+          "metric.name": "string",
+          "metric.type": "string",
+          value: "number",
+        },
+      });
+    });
+
+    it("should pass targeted trace item attribute filters through to Sentry", async () => {
+      const requests: URLSearchParams[] = [];
+
+      mswServer.use(
+        http.get(
+          "https://sentry.io/api/0/organizations/test-org/trace-items/attributes/",
+          ({ request }) => {
+            const url = new URL(request.url);
+            requests.push(url.searchParams);
+
+            const attributeType = url.searchParams.get("attributeType");
+            if (attributeType === "string") {
+              return HttpResponse.json([
+                {
+                  key: "tags[type]",
+                  name: "type",
+                  attributeType: "string",
+                },
+              ]);
+            }
+            if (attributeType === "number") {
+              return HttpResponse.json([
+                {
+                  key: "tags[sequence,number]",
+                  name: "sequence",
+                  attributeType: "number",
+                },
+              ]);
+            }
+            if (attributeType === "boolean") {
+              return HttpResponse.json([
+                {
+                  key: "tags[enabled,boolean]",
+                  name: "enabled",
+                  attributeType: "boolean",
+                },
+              ]);
+            }
+            return HttpResponse.json([]);
+          },
+        ),
+      );
+
+      const result = await fetchCustomAttributes(
+        apiService,
+        "test-org",
+        "spans",
+        "123",
+        { statsPeriod: "7d" },
+        {
+          attributeTypes: ["string", "number", "boolean"],
+          substringMatch: "tags[",
+          query: 'transaction:"VPN connections"',
+        },
+      );
+
+      expect(requests).toHaveLength(3);
+      expect(
+        requests.map((params) => params.get("attributeType")).sort(),
+      ).toEqual(["boolean", "number", "string"]);
+      for (const params of requests) {
+        expect(params.get("itemType")).toBe("spans");
+        expect(params.get("project")).toBe("123");
+        expect(params.get("statsPeriod")).toBe("7d");
+        expect(params.get("substringMatch")).toBe("tags[");
+        expect(params.get("query")).toBe('transaction:"VPN connections"');
+      }
+      expect(result).toEqual({
+        attributes: {
+          "tags[type]": "type",
+          "tags[sequence,number]": "sequence",
+          "tags[enabled,boolean]": "enabled",
+        },
+        fieldTypes: {
+          "tags[type]": "string",
+          "tags[sequence,number]": "number",
+          "tags[enabled,boolean]": "boolean",
+        },
       });
     });
   });

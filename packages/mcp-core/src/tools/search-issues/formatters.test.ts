@@ -152,7 +152,7 @@ describe("formatIssueResults", () => {
       const result = formatIssueResults({
         ...baseParams,
         issues: [],
-        naturalLanguageQuery: "user feedback",
+        inputQuery: "user feedback",
       });
 
       expect(result).toContain("No issues found matching your search criteria");
@@ -238,7 +238,7 @@ describe("formatIssueResults", () => {
       const result = formatIssueResults({
         ...baseParams,
         issues: [feedbackIssue],
-        naturalLanguageQuery: "show me user feedback",
+        inputQuery: "show me user feedback",
       });
 
       expect(result).toMatchInlineSnapshot(`
@@ -272,6 +272,29 @@ describe("formatIssueResults", () => {
         - View feedback details: Use get_sentry_resource to see full feedback content and linked error events
         "
       `);
+    });
+
+    it("uses the configured self-hosted host and protocol when regionUrl is absent", () => {
+      const feedbackIssue = createFeedbackIssue({
+        shortId: "PROJ-FB-2",
+        title: "User Feedback: Internal Sentry",
+        issueCategory: "feedback",
+      });
+
+      const result = formatIssueResults({
+        organizationSlug: "test-org",
+        host: "sentry.internal:9000",
+        protocol: "http",
+        issues: [feedbackIssue],
+        inputQuery: "show me user feedback",
+      });
+
+      expect(result).toContain(
+        "http://sentry.internal:9000/organizations/test-org/issues/",
+      );
+      expect(result).toContain(
+        "## 1. [PROJ-FB-2](http://sentry.internal:9000/organizations/test-org/issues/PROJ-FB-2)",
+      );
     });
   });
 });

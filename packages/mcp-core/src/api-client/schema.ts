@@ -123,6 +123,24 @@ export const ProjectSchema = z
 
 export const ProjectListSchema = z.array(ProjectSchema);
 
+const ReplayTagsSchema = z.preprocess(
+  (value) => {
+    if (value === undefined || value === null || Array.isArray(value)) {
+      return {};
+    }
+    return value;
+  },
+  z.record(z.string(), z.array(z.string())),
+);
+
+/**
+ * Replay responses are normalized in getsentry/sentry before they hit this API.
+ *
+ * Upstream source of truth in getsentry/sentry:
+ * - `src/sentry/replays/post_process.py` (`ReplayDetailsResponse`)
+ * - `src/sentry/replays/endpoints/organization_replay_index.py`
+ * - `src/sentry/replays/endpoints/organization_replay_details.py`
+ */
 export const ReplayDetailsSchema = z
   .object({
     activity: z.number().nullable().optional(),
@@ -178,9 +196,9 @@ export const ReplayDetailsSchema = z
       .nullish()
       .default({}),
     started_at: z.string().nullable().optional(),
-    tags: z.record(z.string(), z.array(z.string())).optional().default({}),
+    tags: ReplayTagsSchema,
     trace_ids: z.array(z.string()).optional().default([]),
-    urls: z.array(z.string()).optional().default([]),
+    urls: z.preprocess((value) => value ?? [], z.array(z.string())),
     user: z
       .object({
         display_name: z.string().nullable().optional(),
@@ -188,7 +206,7 @@ export const ReplayDetailsSchema = z
         id: z.string().nullable().optional(),
         ip: z.string().nullable().optional(),
         username: z.string().nullable().optional(),
-        geo: z.record(z.string(), z.string()).optional(),
+        geo: z.record(z.string(), z.union([z.string(), z.null()])).optional(),
       })
       .nullish()
       .default({}),
@@ -197,6 +215,10 @@ export const ReplayDetailsSchema = z
   .passthrough();
 
 export const ReplayRecordingSegmentsSchema = z.array(z.array(z.unknown()));
+
+export const ReplayListResponseSchema = z.object({
+  data: z.array(ReplayDetailsSchema),
+});
 
 export const ReplayIdsByResourceSchema = z.record(
   z.string(),
@@ -211,12 +233,37 @@ export const ClientKeySchema = z
       public: z.string(),
     }),
     isActive: z.boolean(),
-    dateCreated: z.string().datetime(),
+    dateCreated: z.string().datetime().nullable(),
   })
   .passthrough();
 
 export const ClientKeyListSchema = z.array(ClientKeySchema);
 
+const ReleaseProjectSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]),
+    slug: z.string().nullable(),
+    name: z.string(),
+    platform: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+const ReleaseCommitAuthorSchema = z
+  .object({
+    name: z.string().nullable().optional(),
+    email: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+/**
+ * Local subset of both organization-wide and project-scoped release payloads.
+ *
+ * Upstream source of truth in getsentry/sentry:
+ * - `src/sentry/api/endpoints/organization_releases.py`
+ * - `src/sentry/releases/endpoints/project_releases.py`
+ * - `src/sentry/api/serializers/models/release.py`
+ * - `src/sentry/api/serializers/rest_framework/release.py`
+ */
 export const ReleaseSchema = z.object({
   id: z.union([z.string(), z.number()]),
   version: z.string(),
@@ -229,32 +276,47 @@ export const ReleaseSchema = z.object({
   lastCommit: z
     .object({
       id: z.union([z.string(), z.number()]),
-      message: z.string(),
+      message: z.string().nullable(),
       dateCreated: z.string().datetime(),
-      author: z.object({
-        name: z.string(),
-        email: z.string(),
-      }),
+      author: ReleaseCommitAuthorSchema.optional(),
     })
+    .passthrough()
     .nullable(),
   lastDeploy: z
     .object({
       id: z.union([z.string(), z.number()]),
-      environment: z.string(),
+      environment: z.string().nullable(),
       dateStarted: z.string().datetime().nullable(),
       dateFinished: z.string().datetime().nullable(),
     })
+    .passthrough()
     .nullable(),
-  projects: z.array(ProjectSchema),
+  projects: z.array(ReleaseProjectSchema),
 });
 
 export const ReleaseListSchema = z.array(ReleaseSchema);
 
-export const TagSchema = z.object({
-  key: z.string(),
-  name: z.string(),
-  totalValues: z.number(),
-});
+/**
+ * Organization tag lists are backed by `TagKeySerializerResponse`, which only
+ * guarantees `key` and `name`. Count fields are backend-dependent and may come
+ * back as `uniqueValues`, `totalValues`, or neither.
+ *
+ * Upstream source of truth in getsentry/sentry:
+ * - `src/sentry/tagstore/types.py` (`TagKeySerializerResponse`)
+ * - `src/sentry/api/endpoints/organization_tags.py`
+ */
+export const TagSchema = z
+  .object({
+    key: z.string(),
+    name: z.string(),
+    totalValues: z.number().nullable().optional(),
+    uniqueValues: z.number().nullable().optional(),
+  })
+  .transform((tag) => ({
+    key: tag.key,
+    name: tag.name,
+    totalValues: tag.totalValues ?? tag.uniqueValues ?? 0,
+  }));
 
 export const TagListSchema = z.array(TagSchema);
 
@@ -272,13 +334,23 @@ export const AssignedToSchema = z.union([
     .passthrough(), // Allow additional fields we might not know about
 ]);
 
+/**
+ * Local subset shared by issue list and issue details payloads.
+ *
+ * Upstream source of truth in getsentry/sentry:
+ * - `src/sentry/api/serializers/models/group.py` (`BaseGroupSerializerResponse`)
+ * - `src/sentry/api/serializers/models/group_stream.py` (`StreamGroupSerializerResponse`)
+ * - `src/sentry/issues/endpoints/group_details.py`
+ *
+ * In particular, `culprit` is nullable upstream.
+ */
 export const IssueSchema = z
   .object({
     id: z.union([z.string(), z.number()]),
     shortId: z.string(),
     title: z.string(),
-    firstSeen: z.string().datetime(),
-    lastSeen: z.string().datetime(),
+    firstSeen: z.string().datetime().nullable(),
+    lastSeen: z.string().datetime().nullable(),
     count: z.union([z.string(), z.number()]),
     userCount: z.union([z.string(), z.number()]),
     permalink: z.string().url(),
@@ -286,7 +358,7 @@ export const IssueSchema = z
     platform: z.string().nullable().optional(),
     status: z.string(),
     substatus: z.string().nullable().optional(),
-    culprit: z.string(),
+    culprit: z.string().nullable(),
     type: z.union([
       z.literal("error"),
       z.literal("transaction"),
@@ -491,6 +563,23 @@ const BaseEventSchema = z.object({
   // This is different from "contexts" (plural) which are structured contexts
   context: z.record(z.string(), z.unknown()).optional(),
   tags: EventTagsSchema.optional(),
+  user: z
+    .object({
+      display_name: z.string().nullable().optional(),
+      email: z.string().nullable().optional(),
+      id: z.string().nullable().optional(),
+      ip: z.string().nullable().optional(),
+      ip_address: z.string().nullable().optional(),
+      name: z.string().nullable().optional(),
+      username: z.string().nullable().optional(),
+      geo: z
+        .record(z.string(), z.union([z.string(), z.null()]))
+        .nullable()
+        .optional(),
+    })
+    .passthrough()
+    .nullable()
+    .optional(),
   // The _meta field contains metadata about fields in the response
   // It's safer to type as unknown since its structure varies
   _meta: z.unknown().optional(),
@@ -645,9 +734,16 @@ export const SpansSearchResponseSchema = EventsResponseSchema.extend({
   ),
 });
 
+/**
+ * The Seer autofix POST endpoint currently returns a simple numeric `run_id`.
+ *
+ * Upstream source of truth in getsentry/sentry:
+ * - `src/sentry/seer/endpoints/group_ai_autofix.py`
+ * - `src/sentry/seer/autofix/types.py` (`AutofixPostResponse`)
+ */
 export const AutofixRunSchema = z
   .object({
-    run_id: z.union([z.string(), z.number()]),
+    run_id: z.number(),
   })
   .passthrough();
 
@@ -744,14 +840,35 @@ export const AutofixRunStepSchema = z.union([
   AutofixRunStepBaseSchema.passthrough(),
 ]);
 
+/**
+ * The Seer autofix GET endpoint is explicitly experimental and currently has
+ * two materially different payload shapes:
+ * - legacy `get_autofix_state(...).dict()` responses with `request` and `steps`
+ * - explorer responses with `blocks`, `pending_user_input`, and coding-agent
+ *   metadata but no `steps`
+ *
+ * We normalize missing `steps` to `[]` so existing formatting code keeps
+ * working even if the server returns the explorer shape.
+ *
+ * Upstream source of truth in getsentry/sentry:
+ * - `src/sentry/seer/endpoints/group_ai_autofix.py`
+ * - `src/sentry/seer/autofix/types.py` (`AutofixStateResponse`)
+ */
 export const AutofixRunStateSchema = z.object({
   autofix: z
     .object({
       run_id: z.number(),
-      request: z.unknown(),
-      updated_at: z.string(),
+      request: z.unknown().optional(),
+      updated_at: z.string().nullable().optional(),
       status: AutofixStatusSchema,
-      steps: z.array(AutofixRunStepSchema),
+      steps: z.preprocess(
+        (value) => value ?? [],
+        z.array(AutofixRunStepSchema),
+      ),
+      blocks: z.array(z.unknown()).optional(),
+      pending_user_input: z.unknown().nullable().optional(),
+      repo_pr_states: z.record(z.string(), z.unknown()).optional(),
+      coding_agents: z.record(z.string(), z.unknown()).optional(),
     })
     .passthrough()
     .nullable(),
@@ -779,7 +896,10 @@ export const IssueTagValueSchema = z.object({
   key: z.string().nullable().optional(),
   name: z.string().nullable().optional(),
   value: z.string().nullable(),
-  count: z.number(),
+  count: z
+    .number()
+    .nullable()
+    .transform((value) => value ?? 0),
   lastSeen: z.string().datetime().nullable().optional(),
   firstSeen: z.string().datetime().nullable().optional(),
 });
@@ -789,13 +909,26 @@ export const IssueTagValueSchema = z.object({
  *
  * Contains aggregate counts of unique tag values for an issue,
  * useful for understanding the distribution of tags like URL, browser, etc.
+ *
+ * Upstream source of truth in getsentry/sentry:
+ * - `src/sentry/tagstore/types.py` (`TagKeySerializerResponse`,
+ *   `TagValueSerializerResponse`)
+ * - `src/sentry/issues/endpoints/group_tagkey_details.py`
  */
-export const IssueTagValuesSchema = z.object({
-  key: z.string(),
-  name: z.string(),
-  totalValues: z.number(),
-  topValues: z.array(IssueTagValueSchema),
-});
+export const IssueTagValuesSchema = z
+  .object({
+    key: z.string(),
+    name: z.string(),
+    totalValues: z.number().nullable().optional(),
+    uniqueValues: z.number().nullable().optional(),
+    topValues: z.array(IssueTagValueSchema).nullable().optional(),
+  })
+  .transform((tagValues) => ({
+    key: tagValues.key,
+    name: tagValues.name,
+    totalValues: tagValues.totalValues ?? tagValues.uniqueValues ?? 0,
+    topValues: tagValues.topValues ?? [],
+  }));
 
 /**
  * Schema for external issue link (e.g., Jira, GitHub Issues).
@@ -818,6 +951,9 @@ export const ExternalIssueListSchema = z.array(ExternalIssueSchema);
  *
  * Contains high-level statistics about a trace including span counts,
  * transaction breakdown, and operation type distribution.
+ *
+ * Upstream source of truth in getsentry/sentry:
+ * - `src/sentry/api/endpoints/organization_trace_meta.py`
  */
 export const TraceMetaSchema = z.object({
   logs: z.number(),
@@ -845,24 +981,35 @@ export const TraceSpanSchema: z.ZodType<any> = z.lazy(() =>
     errors: z.array(z.any()),
     occurrences: z.array(z.any()),
     event_id: z.string(),
+    span_id: z.string().optional(),
     transaction_id: z.string(),
     project_id: z.union([z.string(), z.number()]),
     project_slug: z.string(),
-    profile_id: z.string(),
-    profiler_id: z.string(),
+    profile_id: z.string().nullable().optional(),
+    profiler_id: z.string().nullable().optional(),
     parent_span_id: z.string().nullable(),
     start_timestamp: z.number(),
     end_timestamp: z.number(),
     measurements: z.record(z.string(), z.number()).optional(),
     duration: z.number(),
-    transaction: z.string(),
-    is_transaction: z.boolean(),
-    description: z.string(),
-    sdk_name: z.string(),
-    op: z.string(),
-    name: z.string(),
-    event_type: z.string(),
-    additional_attributes: z.record(z.string(), z.any()),
+    trace: z.string().optional(),
+    transaction: z.string().nullable().optional(),
+    is_transaction: z.boolean().optional(),
+    description: z.string().nullable().optional(),
+    sdk_name: z.string().nullable().optional(),
+    op: z.string().nullable().optional(),
+    name: z.string().nullable().optional(),
+    event_type: z.string().nullable().optional(),
+    additional_attributes: z.record(z.string(), z.unknown()).optional(),
+    hash: z.string().nullable().optional(),
+    exclusive_time: z.number().optional(),
+    status: z.string().nullable().optional(),
+    is_segment: z.boolean().optional(),
+    same_process_as_parent: z.boolean().optional(),
+    organization: z.unknown().nullable().optional(),
+    tags: z.record(z.string(), z.unknown()).optional(),
+    timestamp: z.union([z.string(), z.number()]).optional(),
+    data: z.record(z.string(), z.unknown()).optional(),
   }),
 );
 
@@ -893,6 +1040,10 @@ export const TraceIssueSchema = z
  * and standalone issue objects. The Sentry API's query_trace_data
  * function returns a mixed list of SerializedSpan and SerializedIssue
  * objects when there are errors not directly associated with spans.
+ *
+ * Upstream source of truth in getsentry/sentry:
+ * - `src/sentry/api/endpoints/organization_trace.py`
+ * - `src/sentry/snuba/trace.py` (`SerializedSpan`, `SerializedIssue`)
  */
 export const TraceSchema = z.array(
   z.union([TraceSpanSchema, TraceIssueSchema]),
@@ -965,8 +1116,11 @@ export const FlamegraphProfileSchema = z
     type: z.string(),
     unit: z.string(),
     weights: z.array(z.number()),
-    sample_durations_ns: z.array(z.number()),
-    sample_counts: z.array(z.number()),
+    sample_durations_ns: z.preprocess(
+      (value) => value ?? [],
+      z.array(z.number()),
+    ),
+    sample_counts: z.preprocess((value) => value ?? [], z.array(z.number())),
   })
   .passthrough();
 
@@ -983,15 +1137,21 @@ export const FlamegraphProfileSchema = z
  */
 export const FlamegraphSchema = z
   .object({
-    activeProfileIndex: z.number(),
+    activeProfileIndex: z.preprocess((value) => value ?? 0, z.number()),
     metadata: z.record(z.unknown()).optional(),
     platform: z.string(),
     profiles: z.array(FlamegraphProfileSchema),
     projectID: z.number(),
     shared: z.object({
       frames: z.array(FlamegraphFrameSchema),
-      frame_infos: z.array(FlamegraphFrameInfoSchema),
-      profiles: z.array(FlamegraphProfileMetadataSchema),
+      frame_infos: z.preprocess(
+        (value) => value ?? [],
+        z.array(FlamegraphFrameInfoSchema),
+      ),
+      profiles: z.preprocess(
+        (value) => value ?? [],
+        z.array(FlamegraphProfileMetadataSchema),
+      ),
     }),
     transactionName: z.string().optional(),
     metrics: z.unknown().optional(),
@@ -1004,11 +1164,20 @@ export const FlamegraphSchema = z
  * Similar to FlamegraphFrameSchema but uses different field names
  * (function instead of name, in_app instead of is_application).
  * Many fields are optional as the API may not include them for all frames.
+ *
+ * Upstream source of truth in getsentry/sentry:
+ * - `static/app/types/profiling.d.ts` (`SentrySampledProfileFrame`)
+ * - `static/app/utils/profiling/profile/utils.tsx`
+ * - `src/sentry/profiles/task.py`
+ *
+ * In particular, `function` must remain optional here. Sentry's frontend
+ * import path already falls back with `frame.function ?? "unknown"`, and the
+ * profile processing pipeline uses `frame.get("function", "")`.
  */
 export const ProfileFrameSchema = z
   .object({
     filename: z.string().nullable().optional(),
-    function: z.string(),
+    function: z.string().nullable().optional(),
     in_app: z.boolean(),
     lineno: z.number().nullable().optional(),
     colno: z.number().nullable().optional(),
@@ -1024,13 +1193,27 @@ export const ProfileFrameSchema = z
   })
   .passthrough();
 
+const ProfileThreadMetadataSchema = z.record(
+  z
+    .object({
+      name: z.string().nullable(),
+      priority: z.number().nullable().optional(),
+    })
+    .passthrough(),
+);
+
 /**
- * Schema for individual samples in raw profile chunk data.
+ * Schema for a single V2 continuous profile chunk sample.
  *
- * Each sample represents a point-in-time snapshot of the call stack,
- * with a reference to the stack_id and thread_id.
+ * V2 chunks are produced by the continuous profiler and span multiple
+ * transactions. Each sample carries an absolute (or relative-to-chunk) wall
+ * clock `timestamp` in seconds and a string `thread_id` matching
+ * `thread_metadata` keys.
+ *
+ * Upstream type reference in getsentry/sentry:
+ * - `static/app/types/profiling.d.ts` (`SentrySampledProfileChunkSample`)
  */
-export const ProfileSampleSchema = z
+export const ProfileChunkSampleSchema = z
   .object({
     stack_id: z.number(),
     thread_id: z.string(),
@@ -1040,7 +1223,31 @@ export const ProfileSampleSchema = z
   .passthrough();
 
 /**
- * Schema for raw profile chunk data.
+ * Schema for a single V1 transaction profile sample.
+ *
+ * V1 samples are produced per-transaction by Sentry's profiling service
+ * (vroom). They differ from V2 chunk samples in two important ways:
+ * - `thread_id` is serialized as a Go `uint64` (a number on the wire). It is
+ *   normalized to a string here so downstream code can compare against the
+ *   string keys in `thread_metadata`.
+ * - Time is carried as `elapsed_since_start_ns` (uint64 nanoseconds since the
+ *   start of the profile). V1 samples never carry an absolute `timestamp`.
+ *
+ * Upstream references in getsentry/sentry:
+ * - `static/app/types/profiling.d.ts` (`SentrySampledProfileSample`)
+ * - `src/sentry/api/endpoints/project_profiling_profile.py`
+ */
+export const TransactionProfileSampleSchema = z
+  .object({
+    stack_id: z.number(),
+    thread_id: z.union([z.string(), z.number()]).transform(String),
+    elapsed_since_start_ns: z.number(),
+    queue_address: z.string().optional(),
+  })
+  .passthrough();
+
+/**
+ * Schema for raw V2 continuous-profile chunk data.
  *
  * Contains the raw sampling data including:
  * - frames: All unique stack frames
@@ -1061,16 +1268,9 @@ export const ProfileChunkSchema = z
     version: z.string(),
     profile: z.object({
       frames: z.array(ProfileFrameSchema),
-      samples: z.array(ProfileSampleSchema),
+      samples: z.array(ProfileChunkSampleSchema),
       stacks: z.array(z.array(z.number())),
-      thread_metadata: z.record(
-        z
-          .object({
-            name: z.string().nullable(),
-            priority: z.number().nullable().optional(),
-          })
-          .passthrough(),
-      ),
+      thread_metadata: ProfileThreadMetadataSchema,
     }),
   })
   .passthrough();
@@ -1083,5 +1283,99 @@ export const ProfileChunkSchema = z
 export const ProfileChunkResponseSchema = z
   .object({
     chunks: z.array(ProfileChunkSchema),
+  })
+  .passthrough();
+
+const ProfileReleaseSchema = z
+  .union([
+    z.string(),
+    z
+      .object({
+        version: z.string(),
+      })
+      .passthrough(),
+    z.null(),
+  ])
+  .optional();
+
+/**
+ * Schema for a V1 transaction profile response.
+ *
+ * Unlike V2 continuous profile chunks, transaction profiles are scoped to a
+ * single transaction and always include a `transaction` object. vroom emits
+ * both `Sample.thread_id` and `Transaction.active_thread_id` as `uint64`, so
+ * both are accepted as number or string here and normalized to strings.
+ *
+ * Upstream source of truth in getsentry/sentry:
+ * - `src/sentry/api/endpoints/project_profiling_profile.py`
+ * - `static/app/types/profiling.d.ts` (`SentrySampledProfile`)
+ *
+ * The project profiling endpoint largely proxies the profiling-service payload
+ * and only normalizes release metadata, so this schema should track the wire
+ * payload Sentry consumes rather than introducing stricter local requirements.
+ */
+export const TransactionProfileSchema = z
+  .object({
+    event_id: z.string().optional(),
+    profile_id: z.string().optional(),
+    profiler_id: z.string().optional(),
+    environment: z.string().nullable().optional(),
+    platform: z.string(),
+    release: ProfileReleaseSchema,
+    version: z.union([z.string(), z.number()]).transform(String).optional(),
+    profile: z.object({
+      frames: z.array(ProfileFrameSchema),
+      samples: z.array(TransactionProfileSampleSchema),
+      stacks: z.array(z.array(z.number())),
+      thread_metadata: ProfileThreadMetadataSchema,
+    }),
+    transaction: z
+      .object({
+        name: z.string().optional(),
+        trace_id: z.string().optional(),
+        id: z.string().optional(),
+        active_thread_id: z
+          .union([z.string(), z.number()])
+          .transform(String)
+          .optional(),
+        relative_start_ns: z
+          .union([z.string(), z.number()])
+          .transform((value) => Number(value))
+          .optional(),
+        relative_end_ns: z
+          .union([z.string(), z.number()])
+          .transform((value) => Number(value))
+          .optional(),
+      })
+      .passthrough()
+      .optional(),
+    device: z
+      .object({
+        classification: z.string().nullable().optional(),
+        manufacturer: z.string().nullable().optional(),
+        locale: z.string().nullable().optional(),
+        model: z.string().nullable().optional(),
+        arch: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+    os: z
+      .object({
+        name: z.string().nullable().optional(),
+        version: z.string().nullable().optional(),
+        build_number: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+    client_sdk: z
+      .object({
+        name: z.string().nullable().optional(),
+        version: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
   })
   .passthrough();

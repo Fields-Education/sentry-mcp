@@ -14,6 +14,7 @@ import {
 import { SCOPES } from "../../../constants";
 import { signState, type OAuthState } from "../state";
 import { logWarn } from "@sentry/mcp-core/telem/logging";
+import { parseResourceMcpConstraints } from "../resource-scope";
 
 /**
  * Extended AuthRequest that includes skills and resource parameter
@@ -63,9 +64,30 @@ export default new Hono<{ Bindings: Env }>()
       // Log invalid redirect URI errors without sending them to Sentry
       const errorMessage = err instanceof Error ? err.message : String(err);
       if (errorMessage.includes("Invalid redirect URI")) {
+        // parseAuthRequest threw before producing a request, so read the
+        // attempted values directly from the query string.
+        const authUrl = new URL(c.req.url);
+        const attemptedClientId = authUrl.searchParams.get("client_id");
+        const attemptedRedirectUri = authUrl.searchParams.get("redirect_uri");
+        let registeredUris: string[] | undefined;
+        let clientName: string | undefined;
+        if (attemptedClientId) {
+          try {
+            const client =
+              await c.env.OAUTH_PROVIDER.lookupClient(attemptedClientId);
+            registeredUris = client?.redirectUris;
+            clientName = client?.clientName;
+          } catch {}
+        }
         logWarn(`OAuth authorization failed: ${errorMessage}`, {
           loggerScope: ["cloudflare", "oauth", "authorize"],
-          extra: { error: errorMessage },
+          extra: {
+            error: errorMessage,
+            clientId: attemptedClientId,
+            redirectUri: attemptedRedirectUri,
+            registeredUris,
+            clientName,
+          },
         });
         return c.text("Invalid redirect URI", 400);
       }
@@ -118,6 +140,7 @@ export default new Hono<{ Bindings: Env }>()
       ...oauthReqInfoWithoutResource,
       ...(resourceParam ? { resource: resourceParam } : {}),
     };
+    const approvalScope = parseResourceMcpConstraints(resourceParam);
 
     // XXX(dcramer): we want to confirm permissions on each time
     // so you can always choose new ones
@@ -141,6 +164,8 @@ export default new Hono<{ Bindings: Env }>()
       server: {
         name: "Sentry MCP",
       },
+      scope: approvalScope,
+      redirectUri: oauthReqInfoWithResource.redirectUri,
       state: { oauthReqInfo: oauthReqInfoWithResource },
       cookieSecret: c.env.COOKIE_SECRET,
     });
@@ -191,6 +216,8 @@ export default new Hono<{ Bindings: Env }>()
           extra: {
             clientId: oauthReqWithSkills.clientId,
             redirectUri: oauthReqWithSkills.redirectUri,
+            registeredUris: client?.redirectUris,
+            clientName: client?.clientName,
           },
         });
         return c.text("Invalid redirect URI", 400);

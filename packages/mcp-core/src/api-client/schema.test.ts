@@ -1,5 +1,29 @@
+import {
+  autofixStateExplorerFixture,
+  issueNullCulpritFixture,
+  profileChunkFixture,
+  tagsFixture,
+  transactionProfileV1MissingFunctionFixture,
+  transactionProfileV1Fixture,
+} from "@sentry/mcp-server-mocks";
 import { describe, expect, it } from "vitest";
-import { IssueSchema, EventSchema } from "./schema";
+import {
+  AutofixRunSchema,
+  AutofixRunStateSchema,
+  ClientKeySchema,
+  EventSchema,
+  FlamegraphSchema,
+  IssueSchema,
+  IssueTagValuesSchema,
+  ProfileChunkSampleSchema,
+  ProfileChunkSchema,
+  ProfileFrameSchema,
+  ReleaseSchema,
+  ReplayDetailsSchema,
+  TagSchema,
+  TransactionProfileSampleSchema,
+  TransactionProfileSchema,
+} from "./schema";
 
 describe("IssueSchema", () => {
   it("should parse a standard error issue", () => {
@@ -203,6 +227,39 @@ describe("IssueSchema", () => {
       name: "Backend Team",
     });
   });
+
+  it("should handle issues with null firstSeen and lastSeen", () => {
+    // Sentry's API can return null for firstSeen/lastSeen in some cases
+    // (e.g. issues with no events). Regression test for MCP-SERVER-EWN.
+    const issue = {
+      id: "777",
+      shortId: "TEST-77",
+      title: "Test Issue",
+      firstSeen: null,
+      lastSeen: null,
+      count: 1,
+      userCount: 1,
+      permalink: "https://sentry.io/issues/777/",
+      project: {
+        id: "5",
+        name: "test",
+        slug: "test",
+        platform: "node",
+      },
+      status: "unresolved",
+      culprit: "test.js",
+      type: "error",
+    };
+
+    const result = IssueSchema.parse(issue);
+    expect(result.firstSeen).toBeNull();
+    expect(result.lastSeen).toBeNull();
+  });
+
+  it("should handle issues with null culprit", () => {
+    const result = IssueSchema.parse(issueNullCulpritFixture);
+    expect(result.culprit).toBeNull();
+  });
 });
 
 describe("EventSchema", () => {
@@ -240,6 +297,47 @@ describe("EventSchema", () => {
 
     const result = EventSchema.parse(errorEvent);
     expect(result.type).toBe("error");
+  });
+
+  it("should allow partially populated user geo payloads", () => {
+    const errorEvent = {
+      id: "geo123",
+      title: "Geo Event",
+      message: "geo payload includes nulls",
+      platform: "javascript",
+      type: "error",
+      entries: [
+        {
+          type: "exception",
+          data: {
+            values: [
+              {
+                type: "Error",
+                value: "geo payload includes nulls",
+              },
+            ],
+          },
+        },
+      ],
+      culprit: "app/geo.ts",
+      dateCreated: "2025-01-01T00:00:00Z",
+      tags: [],
+      user: {
+        ip_address: "127.0.0.1",
+        geo: {
+          country_code: "US",
+          city: null,
+          region: "United States",
+        },
+      },
+    };
+
+    const result = EventSchema.parse(errorEvent);
+    expect(result.user?.geo).toEqual({
+      country_code: "US",
+      city: null,
+      region: "United States",
+    });
   });
 
   it("should parse a regressed performance event (generic type)", () => {
@@ -391,5 +489,390 @@ describe("EventSchema", () => {
 
     const result = EventSchema.parse(eventWithMalformedTag);
     expect(result.tags).toEqual([{ key: "level", value: "error" }]);
+  });
+});
+
+describe("ReplayDetailsSchema", () => {
+  it("normalizes archived replay payloads that use empty-list tags and null URLs", () => {
+    const replay = ReplayDetailsSchema.parse({
+      id: "7aa244144fa44d26813dbe157af9de13",
+      project_id: "1",
+      trace_ids: [],
+      error_ids: [],
+      info_ids: [],
+      warning_ids: [],
+      environment: null,
+      tags: [],
+      user: {
+        id: "Archived Replay",
+        display_name: "Archived Replay",
+        username: null,
+        email: null,
+        ip: null,
+        geo: {
+          city: null,
+          country_code: null,
+          region: null,
+          subdivision: null,
+        },
+      },
+      sdk: { name: null, version: null },
+      os: { name: null, version: null },
+      browser: { name: null, version: null },
+      device: { name: null, brand: null, model: null, family: null },
+      urls: null,
+      is_archived: true,
+      releases: [],
+      replay_type: "session",
+      has_viewed: false,
+    });
+
+    expect(replay.tags).toEqual({});
+    expect(replay.urls).toEqual([]);
+    expect(replay.user?.geo).toEqual({
+      city: null,
+      country_code: null,
+      region: null,
+      subdivision: null,
+    });
+  });
+});
+
+describe("ClientKeySchema", () => {
+  it("accepts null dateCreated from upstream project keys", () => {
+    const clientKey = ClientKeySchema.parse({
+      id: "public-key",
+      name: "Default",
+      isActive: true,
+      dateCreated: null,
+      dsn: {
+        public: "https://public@example.ingest.sentry.io/1",
+      },
+    });
+
+    expect(clientKey.dateCreated).toBeNull();
+  });
+});
+
+describe("ReleaseSchema", () => {
+  it("accepts nullable commit, deploy, and project fields from upstream releases", () => {
+    const release = ReleaseSchema.parse({
+      id: "1",
+      version: "1.2.3",
+      shortVersion: "1.2.3",
+      dateCreated: "2026-04-13T12:00:00.000Z",
+      dateReleased: null,
+      firstEvent: null,
+      lastEvent: null,
+      newGroups: 0,
+      lastCommit: {
+        id: "abc123",
+        message: null,
+        dateCreated: "2026-04-13T12:00:00.000Z",
+        author: {},
+      },
+      lastDeploy: {
+        id: "99",
+        environment: null,
+        dateStarted: null,
+        dateFinished: null,
+      },
+      projects: [
+        {
+          id: "1",
+          slug: null,
+          name: "project-one",
+          platform: "javascript",
+        },
+      ],
+    });
+
+    expect(release.lastCommit?.message).toBeNull();
+    expect(release.lastCommit?.author).toEqual({});
+    expect(release.lastDeploy?.environment).toBeNull();
+    expect(release.projects[0]?.slug).toBeNull();
+  });
+});
+
+describe("TagSchema", () => {
+  it("normalizes upstream tag counts when only uniqueValues is present", () => {
+    const tag = TagSchema.parse(tagsFixture[0]);
+
+    expect(tag).toEqual({
+      key: "transaction",
+      name: "Transaction",
+      totalValues: 1080,
+    });
+  });
+});
+
+describe("AutofixRunSchema", () => {
+  it("accepts the numeric run_id returned by the autofix POST endpoint", () => {
+    const run = AutofixRunSchema.parse({ run_id: 123 });
+
+    expect(run.run_id).toBe(123);
+  });
+});
+
+describe("AutofixRunStateSchema", () => {
+  it("accepts explorer-style autofix state without legacy steps", () => {
+    const state = AutofixRunStateSchema.parse(autofixStateExplorerFixture);
+
+    expect(state.autofix?.steps).toEqual([]);
+    expect(state.autofix?.blocks).toEqual([
+      {
+        type: "root_cause",
+        title: "Investigate failing request",
+        status: "COMPLETED",
+      },
+      {
+        type: "solution",
+        title: "Draft fix plan",
+        status: "IN_PROGRESS",
+      },
+    ]);
+  });
+});
+
+describe("IssueTagValuesSchema", () => {
+  it("normalizes aggregate counts and missing topValues from upstream tag details", () => {
+    const tagValues = IssueTagValuesSchema.parse({
+      key: "release",
+      name: "Release",
+      uniqueValues: 3,
+    });
+
+    expect(tagValues).toEqual({
+      key: "release",
+      name: "Release",
+      totalValues: 3,
+      topValues: [],
+    });
+  });
+
+  it("normalizes nullable tag value counts to zero", () => {
+    const tagValues = IssueTagValuesSchema.parse({
+      key: "user",
+      name: "User",
+      totalValues: 1,
+      topValues: [
+        {
+          key: "user",
+          name: null,
+          value: null,
+          count: null,
+          firstSeen: null,
+          lastSeen: null,
+        },
+      ],
+    });
+
+    expect(tagValues.topValues[0]?.count).toBe(0);
+  });
+});
+
+describe("FlamegraphSchema", () => {
+  it("fills optional profiling fields that Sentry omits or returns as null", () => {
+    const flamegraph = FlamegraphSchema.parse({
+      metadata: {
+        profileID: "profile-1",
+      },
+      platform: "python",
+      profiles: [
+        {
+          endValue: 0,
+          isMainThread: true,
+          name: "Main Thread",
+          samples: [],
+          startValue: 0,
+          threadID: 1,
+          type: "sampled",
+          unit: "count",
+          weights: [],
+          sample_durations_ns: null,
+        },
+      ],
+      projectID: 1,
+      shared: {
+        frames: [],
+      },
+      transactionName: "POST /oauth/token",
+    });
+
+    expect(flamegraph.activeProfileIndex).toBe(0);
+    expect(flamegraph.shared.frame_infos).toEqual([]);
+    expect(flamegraph.shared.profiles).toEqual([]);
+    expect(flamegraph.profiles[0]?.sample_durations_ns).toEqual([]);
+    expect(flamegraph.profiles[0]?.sample_counts).toEqual([]);
+  });
+});
+
+describe("ProfileChunkSampleSchema", () => {
+  it("parses V2 continuous profile chunk samples with string thread_id and timestamp", () => {
+    const sample = ProfileChunkSampleSchema.parse({
+      stack_id: 0,
+      thread_id: "1",
+      timestamp: 1710958503.629,
+    });
+
+    expect(sample.thread_id).toBe("1");
+    expect(sample.timestamp).toBe(1710958503.629);
+  });
+
+  it("rejects V1-only fields and shapes that don't match the V2 wire format", () => {
+    // V2 samples must have a string thread_id (not uint64) and a required
+    // timestamp. Keeping this strict prevents V1 payloads from silently
+    // parsing as V2 and vice-versa.
+    expect(() =>
+      ProfileChunkSampleSchema.parse({
+        stack_id: 0,
+        thread_id: 1,
+        timestamp: 1710958503.629,
+      }),
+    ).toThrow();
+    expect(() =>
+      ProfileChunkSampleSchema.parse({
+        stack_id: 0,
+        thread_id: "1",
+        elapsed_since_start_ns: 50000000,
+      }),
+    ).toThrow();
+  });
+});
+
+describe("TransactionProfileSampleSchema", () => {
+  it("parses V1 transaction profile samples with numeric thread_id and elapsed_since_start_ns", () => {
+    // Regression test for getsentry/sentry-mcp issue MCP-SERVER-FRN: vroom
+    // serializes V1 Sample.ThreadID as uint64 and uses elapsed_since_start_ns
+    // rather than timestamp.
+    const sample = TransactionProfileSampleSchema.parse({
+      stack_id: 0,
+      thread_id: 1,
+      elapsed_since_start_ns: 50000000,
+    });
+
+    expect(sample.thread_id).toBe("1");
+    expect(sample.elapsed_since_start_ns).toBe(50000000);
+  });
+
+  it("still normalizes V1 payloads that already carry a string thread_id", () => {
+    const sample = TransactionProfileSampleSchema.parse({
+      stack_id: 0,
+      thread_id: "1",
+      elapsed_since_start_ns: 1_000_000,
+    });
+
+    expect(sample.thread_id).toBe("1");
+    expect(sample.elapsed_since_start_ns).toBe(1_000_000);
+  });
+
+  it("rejects V1 samples that are missing the required elapsed_since_start_ns", () => {
+    // vroom always emits Sample.ElapsedSinceStartNS for V1 transaction
+    // profiles, so make that a hard requirement rather than silently accepting
+    // a V2-shaped payload on the V1 path.
+    expect(() =>
+      TransactionProfileSampleSchema.parse({
+        stack_id: 0,
+        thread_id: "1",
+        timestamp: 1710958503.629,
+      }),
+    ).toThrow();
+  });
+});
+
+describe("ProfileFrameSchema", () => {
+  it("accepts sampled profile frames without a function name", () => {
+    // Sentry's sampled profile frame contract treats function as optional:
+    // static/app/types/profiling.d.ts defines `function?: string`, and the
+    // profile processing pipeline falls back when it is missing.
+    const frame = ProfileFrameSchema.parse({
+      filename: "main.py",
+      in_app: true,
+      lineno: 42,
+    });
+
+    expect(frame.function).toBeUndefined();
+    expect(frame.in_app).toBe(true);
+  });
+});
+
+describe("profile fixtures", () => {
+  it("parses the V1 transaction profile fixture through TransactionProfileSchema", () => {
+    // transaction-profile-v1.json mirrors what vroom emits for legacy/V1
+    // transaction profiles: numeric uint64 thread_id, elapsed_since_start_ns
+    // timing, and a required transaction block with active_thread_id.
+    const profile = TransactionProfileSchema.parse(
+      structuredClone(transactionProfileV1Fixture),
+    );
+
+    expect(profile.transaction?.active_thread_id).toBeTypeOf("string");
+    expect(
+      profile.profile.samples.every(
+        (sample) => typeof sample.thread_id === "string",
+      ),
+    ).toBe(true);
+    expect(
+      profile.profile.samples.some(
+        (sample) => typeof sample.elapsed_since_start_ns === "number",
+      ),
+    ).toBe(true);
+  });
+
+  it("parses the V2 continuous profile chunk fixture through ProfileChunkSchema", () => {
+    // profile-chunk.json mirrors the continuous profiler output: string
+    // thread_id, absolute timestamp per sample, no transaction block.
+    const chunk = ProfileChunkSchema.parse(
+      structuredClone(profileChunkFixture.chunks[0]),
+    );
+
+    expect(
+      chunk.profile.samples.every(
+        (sample) => typeof sample.thread_id === "string",
+      ),
+    ).toBe(true);
+    expect(
+      chunk.profile.samples.every(
+        (sample) => typeof sample.timestamp === "number",
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("TransactionProfileSchema", () => {
+  it("parses V1 transaction profiles with numeric active_thread_id and uint64 sample thread ids", () => {
+    // Regression test for getsentry/sentry-mcp issue MCP-SERVER-FRN.
+    const profile = TransactionProfileSchema.parse({
+      event_id: "cfe78a5c892d4a64a962d837673398d2",
+      profile_id: "cfe78a5c892d4a64a962d837673398d2",
+      platform: "python",
+      version: "2",
+      profile: {
+        frames: [{ function: "handle_request", in_app: true }],
+        samples: [
+          { stack_id: 0, thread_id: 1, elapsed_since_start_ns: 0 },
+          { stack_id: 0, thread_id: 1, elapsed_since_start_ns: 50000000 },
+        ],
+        stacks: [[0]],
+        thread_metadata: { "1": { name: "MainThread" } },
+      },
+      transaction: {
+        name: "/api/users",
+        trace_id: "a4d1aae7216b47ff8117cf4e09ce9d0a",
+        id: "7ca573c0f4814912aaa9bdc77d1a7d51",
+        active_thread_id: 1,
+      },
+    });
+
+    expect(profile.transaction?.active_thread_id).toBe("1");
+    expect(profile.profile.samples[0]?.thread_id).toBe("1");
+    expect(profile.profile.samples[0]?.elapsed_since_start_ns).toBe(0);
+  });
+
+  it("accepts V1 transaction profiles when some frames omit function", () => {
+    const parsed = TransactionProfileSchema.parse(
+      structuredClone(transactionProfileV1MissingFunctionFixture),
+    );
+
+    expect(parsed.profile.frames[0]?.function).toBeUndefined();
   });
 });
