@@ -1,12 +1,58 @@
 import { z } from "zod";
-import type { SentryApiService } from "../../api-client";
+import type {
+  SentryApiService,
+  TraceItemAttributeType,
+  TraceItemAttributeValidationResult,
+  TraceItemType,
+} from "../../api-client";
 import { agentTool } from "../../internal/agents/tools/utils";
+import {
+  formatUserGeoSummary,
+  isPlainObject,
+} from "../../internal/user-formatting";
+import {
+  normalizeEventsDataset,
+  PUBLIC_EVENTS_DATASETS,
+  type EventsDataset,
+} from "../../utils/events-datasets";
 
 // Type for flexible event data that can contain any fields
 export type FlexibleEventData = Record<string, unknown>;
 
 const DEFAULT_MAX_VALUE_LENGTH = 200;
 const DEFAULT_MAX_ARRAY_ITEMS = 20;
+const SENTRY_SEARCH_TOKEN_PATTERN =
+  /(^|\s)!?([A-Za-z_][A-Za-z0-9_.[\],-]*):(?=\S)(?!\/\/)/g;
+const KNOWN_SENTRY_SEARCH_KEYS = new Set([
+  "browser",
+  "device",
+  "duration",
+  "environment",
+  "error.type",
+  "http.status_code",
+  "issue",
+  "level",
+  "message",
+  "os",
+  "project",
+  "release",
+  "severity",
+  "span.action",
+  "span.description",
+  "span.module",
+  "span.op",
+  "span.status",
+  "timestamp",
+  "trace",
+  "transaction",
+  "transaction.duration",
+  "transaction.op",
+  "url",
+  "user",
+  "user.email",
+  "user.id",
+  "user.username",
+]);
 
 // Helper to safely get a string value from event data
 export function getStringValue(
@@ -32,8 +78,36 @@ export function isAggregateQuery(fields: string[]): boolean {
   return fields.some((field) => field.includes("(") && field.includes(")"));
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+export function looksLikeSentrySearchSyntax(query?: string): boolean {
+  const trimmedQuery = query?.trim();
+  if (!trimmedQuery) {
+    return false;
+  }
+
+  for (const match of trimmedQuery.matchAll(SENTRY_SEARCH_TOKEN_PATTERN)) {
+    const key = match[2];
+    if (!key) {
+      continue;
+    }
+
+    if (/^tags\[[^\]]+\]$/.test(key)) {
+      return true;
+    }
+
+    if (key !== key.toLowerCase()) {
+      continue;
+    }
+
+    if (KNOWN_SENTRY_SEARCH_KEYS.has(key) || /[.[\],]/.test(key)) {
+      return true;
+    }
+
+    if (/^[a-z_][a-z0-9_-]*$/.test(key)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function isPrimitive(
@@ -53,28 +127,72 @@ function isTagPair(value: unknown): value is { key: string; value: unknown } {
   );
 }
 
-const USER_FIELDS = ["id", "email", "username", "ip_address", "name"] as const;
+const USER_FIELDS = [
+  "id",
+  "email",
+  "username",
+  "ip_address",
+  "name",
+  "display_name",
+] as const;
 const USER_IDENTITY_FIELDS = new Set([
   "email",
   "username",
   "ip_address",
   "name",
+  "display_name",
 ]);
 
-function formatUserSummary(value: Record<string, unknown>): string | null {
-  // Require at least one identity field to avoid matching arbitrary objects that just have "id"
-  const hasIdentityField = USER_FIELDS.some(
+function hasUserIdentityFields(value: Record<string, unknown>): boolean {
+  return USER_FIELDS.some(
     (f) => USER_IDENTITY_FIELDS.has(f) && value[f] != null,
   );
-  if (!hasIdentityField) {
+}
+
+function hasUserSummaryFields(
+  value: Record<string, unknown>,
+  options: { allowId?: boolean } = {},
+): boolean {
+  return (
+    hasUserIdentityFields(value) ||
+    (options.allowId === true && value.id != null)
+  );
+}
+
+function formatUserSummary(
+  value: Record<string, unknown>,
+  options: {
+    includeGeo?: boolean;
+    allowIdOnly?: boolean;
+  } = {},
+): string | null {
+  const includeGeo = options.includeGeo ?? true;
+  const allowIdOnly = options.allowIdOnly ?? false;
+  // Require at least one identity field to avoid matching arbitrary objects that just have "id"
+  const hasSummaryField = hasUserSummaryFields(value, { allowId: allowIdOnly });
+  if (!hasSummaryField) {
     return null;
   }
 
   const parts = USER_FIELDS.filter((f) => value[f] != null).map(
     (f) => `${f}=${formatSimpleValue(value[f])}`,
   );
+  const geoSummary = formatUserGeoSummary(value.geo);
+  if (includeGeo && geoSummary) {
+    parts.push(`geo=${geoSummary}`);
+  }
 
   return parts.length > 0 ? parts.join(", ") : null;
+}
+
+export function formatKnownUserValue(
+  value: Record<string, unknown>,
+  options: { includeGeo?: boolean } = {},
+): string | null {
+  return formatUserSummary(value, {
+    includeGeo: options.includeGeo,
+    allowIdOnly: true,
+  });
 }
 
 function sanitizeWhitespace(value: string): string {
@@ -183,7 +301,9 @@ function formatObjectValue(
 
 export function formatEventValue(
   value: unknown,
-  options: { maxLength?: number } = {},
+  options: {
+    maxLength?: number;
+  } = {},
 ): string {
   const maxLength = options.maxLength ?? DEFAULT_MAX_VALUE_LENGTH;
 
@@ -213,24 +333,33 @@ export function formatEventValue(
 export async function fetchCustomAttributes(
   apiService: SentryApiService,
   organizationSlug: string,
-  dataset: "errors" | "logs" | "spans",
+  dataset: EventsDataset,
   projectId?: string,
   timeParams?: { statsPeriod?: string; start?: string; end?: string },
+  options: {
+    attributeTypes?: TraceItemAttributeType[];
+    substringMatch?: string;
+    query?: string;
+  } = {},
 ): Promise<{
   attributes: Record<string, string>;
-  fieldTypes: Record<string, "string" | "number">;
+  fieldTypes: Record<string, TraceItemAttributeType>;
 }> {
   const customAttributes: Record<string, string> = {};
-  const fieldTypes: Record<string, "string" | "number"> = {};
+  const fieldTypes: Record<string, TraceItemAttributeType> = {};
+  const normalizedDataset = normalizeEventsDataset(dataset);
+  const attributeTimeParams = timeParams ?? { statsPeriod: "14d" };
 
-  if (dataset === "errors") {
+  if (normalizedDataset === "errors") {
     // TODO: For errors dataset, we currently need to use the old listTags API
     // This will be updated in the future to use the new trace-items attributes API
     const tagsResponse = await apiService.listTags({
       organizationSlug,
       dataset: "events",
       project: projectId,
-      statsPeriod: "14d",
+      statsPeriod: attributeTimeParams.statsPeriod,
+      start: attributeTimeParams.start,
+      end: attributeTimeParams.end,
       useCache: true,
       useFlagsBackend: true,
     });
@@ -240,21 +369,34 @@ export async function fetchCustomAttributes(
         customAttributes[tag.key] = tag.name || tag.key;
       }
     }
+  } else if (normalizedDataset === "profiles") {
+    // Profiles currently use a stable, product-defined field set rather than
+    // the trace-item attributes endpoint.
+    return { attributes: customAttributes, fieldTypes };
   } else {
-    // For logs and spans datasets, use the trace-items attributes endpoint
-    const itemType = dataset === "logs" ? "logs" : "spans";
+    // For logs, spans, and trace metrics datasets, use the trace-items attributes endpoint
+    const itemType = getTraceItemType(normalizedDataset);
+    if (!itemType) {
+      return { attributes: customAttributes, fieldTypes };
+    }
+
     const attributesResponse = await apiService.listTraceItemAttributes({
       organizationSlug,
       itemType,
       project: projectId,
-      statsPeriod: "14d",
+      statsPeriod: attributeTimeParams.statsPeriod,
+      start: attributeTimeParams.start,
+      end: attributeTimeParams.end,
+      attributeTypes: options.attributeTypes,
+      substringMatch: options.substringMatch,
+      query: options.query,
     });
 
     for (const attr of attributesResponse) {
       if (attr.key && !attr.key.startsWith("sentry:")) {
         customAttributes[attr.key] = attr.name || attr.key;
         // Track field type from the attribute response with validation
-        if (attr.type && (attr.type === "string" || attr.type === "number")) {
+        if (attr.type) {
           fieldTypes[attr.key] = attr.type;
         }
       }
@@ -262,6 +404,40 @@ export async function fetchCustomAttributes(
   }
 
   return { attributes: customAttributes, fieldTypes };
+}
+
+function getTraceItemType(dataset: EventsDataset): TraceItemType | null {
+  const normalizedDataset = normalizeEventsDataset(dataset);
+  if (normalizedDataset === "logs") {
+    return "logs";
+  }
+  if (normalizedDataset === "tracemetrics") {
+    return "tracemetrics";
+  }
+  if (normalizedDataset === "spans") {
+    return "spans";
+  }
+  return null;
+}
+
+function formatValidationResults(
+  validationResults: Record<string, TraceItemAttributeValidationResult>,
+): string {
+  const entries = Object.entries(validationResults);
+  if (entries.length === 0) {
+    return "";
+  }
+
+  return `Validated Attributes:
+${entries
+  .map(([attribute, result]) => {
+    if (result.valid) {
+      return `- ${attribute}: valid${result.type ? ` (${result.type})` : ""}`;
+    }
+    return `- ${attribute}: invalid${result.error ? ` (${result.error})` : ""}`;
+  })
+  .join("\n")}
+`;
 }
 
 /**
@@ -274,15 +450,51 @@ export function createDatasetAttributesTool(options: {
   projectId?: string;
 }) {
   const { apiService, organizationSlug, projectId } = options;
+  const traceItemAttributeTypeSchema = z.enum(["string", "number", "boolean"]);
+
   return agentTool({
     description:
-      "Query available attributes and fields for a specific Sentry dataset to understand what data is available",
+      "Query, filter, and validate available attributes and fields for a specific Sentry dataset to understand what data is available",
     parameters: z.object({
       dataset: z
-        .enum(["spans", "errors", "logs"])
+        .enum(PUBLIC_EVENTS_DATASETS)
         .describe("The dataset to query attributes for"),
+      substringMatch: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe("Optional substring to find matching attribute names"),
+      query: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe(
+          "Optional Sentry search query to list attributes available for that filtered result set",
+        ),
+      attributeTypes: z
+        .array(traceItemAttributeTypeSchema)
+        .min(1)
+        .optional()
+        .describe(
+          "Optional attribute types to list. Use ['string','number','boolean'] when unsure.",
+        ),
+      attributes: z
+        .array(z.string().trim().min(1))
+        .min(1)
+        .optional()
+        .describe(
+          "Optional exact attribute keys to validate, such as ['tags[type]', 'span.duration']",
+        ),
     }),
-    execute: async ({ dataset }) => {
+    execute: async ({
+      dataset,
+      substringMatch,
+      query,
+      attributeTypes,
+      attributes,
+    }) => {
       const {
         BASE_COMMON_FIELDS,
         DATASET_FIELDS,
@@ -295,31 +507,54 @@ export function createDatasetAttributesTool(options: {
       // IMPORTANT: Let ALL errors bubble up to wrapAgentToolExecute
       // UserInputError will be converted to error string for the AI agent
       // Other errors will bubble up to be captured by Sentry
+      const normalizedDataset = normalizeEventsDataset(dataset);
+      const traceItemType = getTraceItemType(normalizedDataset);
+      const attributeTimeParams = { statsPeriod: "14d" };
+      const validationResults =
+        traceItemType && attributes?.length
+          ? await apiService.validateTraceItemAttributes({
+              organizationSlug,
+              itemType: traceItemType,
+              attributes,
+              project: projectId,
+              ...attributeTimeParams,
+            })
+          : {};
       const { attributes: customAttributes, fieldTypes } =
         await fetchCustomAttributes(
           apiService,
           organizationSlug,
           dataset,
           projectId,
+          attributeTimeParams,
+          {
+            attributeTypes,
+            substringMatch,
+            query,
+          },
         );
 
       // Combine all available fields
       const allFields = {
         ...BASE_COMMON_FIELDS,
-        ...DATASET_FIELDS[dataset],
+        ...DATASET_FIELDS[normalizedDataset],
         ...customAttributes,
       };
 
-      const recommendedFields = RECOMMENDED_FIELDS[dataset];
+      const recommendedFields = RECOMMENDED_FIELDS[normalizedDataset];
 
       // Combine field types from both static config and dynamic API
-      const allFieldTypes = { ...fieldTypes };
-      const staticNumericFields = NUMERIC_FIELDS[dataset] || new Set();
+      const allFieldTypes: Record<string, TraceItemAttributeType> = {
+        ...fieldTypes,
+      };
+      const staticNumericFields =
+        NUMERIC_FIELDS[normalizedDataset] || new Set();
       for (const field of staticNumericFields) {
         allFieldTypes[field] = "number";
       }
 
       return `Dataset: ${dataset}
+${formatValidationResults(validationResults)}
 
 Available Fields (${Object.keys(allFields).length} total):
 ${Object.entries(allFields)
@@ -341,7 +576,7 @@ ${Object.keys(allFieldTypes).length > 30 ? `\n... and ${Object.keys(allFieldType
 IMPORTANT: Only use numeric aggregate functions (avg, sum, min, max, percentiles) with numeric fields. Use count() or count_unique() for non-numeric fields.
 
 EXAMPLE QUERIES FOR ${dataset.toUpperCase()}:
-${DATASET_EXAMPLES[dataset]
+${DATASET_EXAMPLES[normalizedDataset]
   .map((ex) => `- "${ex.description}" →\n  ${JSON.stringify(ex.output)}`)
   .join("\n\n")}
 

@@ -15,10 +15,12 @@ export type SentryResourceType =
   | "issue"
   | "trace"
   | "profile"
+  | "ai_conversation"
   | "event"
   | "replay"
   | "monitor"
   | "release"
+  | "snapshot"
   | "unknown";
 
 /**
@@ -34,12 +36,16 @@ export interface ParsedSentryUrl {
   issueId?: string;
   /** Trace ID (for trace URLs) */
   traceId?: string;
+  /** AI conversation ID (for Explore conversation URLs) */
+  conversationId?: string;
   /** Span ID (for trace URLs with span focus, from query param) */
   spanId?: string;
   /** Event ID (for event URLs) */
   eventId?: string;
-  /** Project slug (for profile, monitor URLs) */
-  projectSlug?: string;
+  /** Project slug or numeric ID (for profile, monitor, and AI conversation URLs) */
+  projectSlugOrId?: string;
+  /** Transaction profile ID from profile flamegraph URLs */
+  profileId?: string;
   /** Profiler ID (for profile URLs, from query param) */
   profilerId?: string;
   /** Start timestamp (for profile URLs, from query param) */
@@ -54,6 +60,10 @@ export interface ParsedSentryUrl {
   releaseVersion?: string;
   /** Transaction name (from query param in performance URLs) */
   transaction?: string;
+  /** Snapshot ID (for preprod snapshot URLs) */
+  snapshotId?: string;
+  /** Selected snapshot image name (from ?selectedSnapshot= query param) */
+  selectedSnapshot?: string;
 }
 
 /**
@@ -63,8 +73,10 @@ export interface ParsedSentryUrl {
  * - Issue: `/issues/{issueId}` or `/organizations/{org}/issues/{issueId}`
  * - Event: `/issues/{issueId}/events/{eventId}`
  * - Trace: `/explore/traces/trace/{traceId}` or `/performance/trace/{traceId}`
- * - Profile: `/explore/profiling/profile/{project}/flamegraph/` with query params
- * - Replay: `/replays/{replayId}/`
+ * - Profile: `/explore/profiling/profile/{project}/{profileId}/flamegraph/`
+ * - Continuous profile: `/explore/profiling/profile/{project}/flamegraph/` with query params
+ * - AI conversation: `/explore/conversations/{conversationId}/`
+ * - Replay: `/explore/replays/{replayId}/` or `/replays/{replayId}/`
  * - Monitor: `/crons/{monitorSlug}/` or `/monitors/{monitorSlug}/`
  * - Release: `/releases/{version}/`
  *
@@ -83,7 +95,7 @@ export interface ParsedSentryUrl {
  *
  * @example
  * // Replay URL
- * parseSentryUrl("https://my-org.sentry.io/replays/abc123def456/")
+ * parseSentryUrl("https://my-org.sentry.io/explore/replays/abc123def456/")
  * // { type: "replay", organizationSlug: "my-org", replayId: "abc123def456" }
  *
  * @example
@@ -155,8 +167,13 @@ function extractOrganizationSlug(parsedUrl: URL, pathParts: string[]): string {
     "dashboards",
     "discover",
     "insights",
+    "preprod",
   ];
-  if (pathParts.length > 1 && knownSegments.includes(pathParts[1])) {
+  if (
+    pathParts.length > 1 &&
+    !knownSegments.includes(pathParts[0]) &&
+    knownSegments.includes(pathParts[1])
+  ) {
     return pathParts[0];
   }
 
@@ -176,6 +193,28 @@ function extractOrganizationSlug(parsedUrl: URL, pathParts: string[]): string {
   );
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function extractPathGroup(
+  pathParts: string[],
+  patterns: RegExp[],
+  groupName: string,
+): string | undefined {
+  const path = pathParts.join("/");
+
+  for (const pattern of patterns) {
+    const match = pattern.exec(path);
+    const value = match?.groups?.[groupName];
+    if (value) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
 /**
  * Identifies the resource type and extracts relevant identifiers.
  */
@@ -184,12 +223,16 @@ function identifyResource(
   pathParts: string[],
   organizationSlug: string,
 ): ParsedSentryUrl {
-  // Profile URL: /explore/profiling/profile/{project}/flamegraph/
+  // Profile URL: /explore/profiling/profile/{project}/{profileId}/flamegraph/
+  // Continuous profile URL: /explore/profiling/profile/{project}/flamegraph/
   // or /profiling/profile/{project}/flamegraph/
   // Check this FIRST to avoid false positives when project names match keywords like "replays"
   const profilingIndex = pathParts.indexOf("profiling");
   if (profilingIndex !== -1 && pathParts[profilingIndex + 1] === "profile") {
     const projectSlug = pathParts[profilingIndex + 2];
+    const nextPart = pathParts[profilingIndex + 3];
+    const profileId =
+      nextPart && nextPart !== "flamegraph" ? nextPart : undefined;
     const profilerId = parsedUrl.searchParams.get("profilerId") || undefined;
     const start = parsedUrl.searchParams.get("start") || undefined;
     const end = parsedUrl.searchParams.get("end") || undefined;
@@ -197,14 +240,44 @@ function identifyResource(
     return {
       type: "profile",
       organizationSlug,
-      projectSlug,
+      projectSlugOrId: projectSlug,
+      profileId,
       profilerId,
       start,
       end,
     };
   }
 
-  // Replay URL: /replays/{replayId}/
+  // AI conversation URL: /explore/conversations/{conversationId}/
+  const conversationId = extractPathGroup(
+    pathParts,
+    [
+      /^explore\/conversations\/(?<conversationId>[^/]+)$/,
+      /^organizations\/[^/]+\/explore\/conversations\/(?<conversationId>[^/]+)$/,
+      new RegExp(
+        `^${escapeRegex(organizationSlug)}\\/explore\\/conversations\\/(?<conversationId>[^/]+)$`,
+      ),
+    ],
+    "conversationId",
+  );
+  if (conversationId) {
+    const project = parsedUrl.searchParams.get("project") || undefined;
+    const spanId = parsedUrl.searchParams.get("spanId") || undefined;
+    const start = parsedUrl.searchParams.get("start") || undefined;
+    const end = parsedUrl.searchParams.get("end") || undefined;
+
+    return {
+      type: "ai_conversation",
+      organizationSlug,
+      conversationId: decodeURIComponent(conversationId),
+      projectSlugOrId: project,
+      spanId,
+      start,
+      end,
+    };
+  }
+
+  // Replay URL: /explore/replays/{replayId}/ or /replays/{replayId}/
   const replaysIndex = pathParts.indexOf("replays");
   if (replaysIndex !== -1) {
     const replayId = pathParts[replaysIndex + 1];
@@ -233,7 +306,7 @@ function identifyResource(
         return {
           type: "monitor",
           organizationSlug,
-          projectSlug: nextPart,
+          projectSlugOrId: nextPart,
           monitorSlug: afterNext,
         };
       }
@@ -325,11 +398,73 @@ function identifyResource(
     }
   }
 
+  // Snapshot URL: /preprod/snapshots/{snapshotId}/
+  const preprodIndex = pathParts.indexOf("preprod");
+  if (preprodIndex !== -1 && pathParts[preprodIndex + 1] === "snapshots") {
+    const snapshotId = pathParts[preprodIndex + 2];
+    if (snapshotId) {
+      const selectedSnapshot =
+        parsedUrl.searchParams.get("selectedSnapshot") || undefined;
+      return {
+        type: "snapshot",
+        organizationSlug,
+        snapshotId,
+        selectedSnapshot,
+      };
+    }
+  }
+
   // Could not identify resource type
   return {
     type: "unknown",
     organizationSlug,
   };
+}
+
+export function parseSnapshotUrl(url: string): {
+  organizationSlug: string;
+  snapshotId: string;
+} | null {
+  try {
+    const parsed = parseSentryUrl(url);
+    if (parsed.type === "snapshot" && parsed.snapshotId) {
+      return {
+        organizationSlug: parsed.organizationSlug,
+        snapshotId: parsed.snapshotId,
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function resolveSnapshotParams(params: {
+  snapshotUrl: string | null;
+  organizationSlug: string | null;
+  snapshotId: string | null;
+}): { organizationSlug: string; snapshotId: string } {
+  let organizationSlug = params.organizationSlug;
+  let snapshotId = params.snapshotId;
+
+  if (params.snapshotUrl) {
+    const parsed = parseSnapshotUrl(params.snapshotUrl);
+    if (!parsed) {
+      throw new UserInputError(
+        `Could not parse snapshot URL: ${params.snapshotUrl}. Expected format: https://{org}.sentry.io/preprod/snapshots/{id}/`,
+      );
+    }
+    organizationSlug = organizationSlug || parsed.organizationSlug;
+    snapshotId = snapshotId || parsed.snapshotId;
+  }
+
+  if (!organizationSlug || !snapshotId) {
+    throw new UserInputError(
+      "Provide either snapshotUrl or both organizationSlug and snapshotId.",
+    );
+  }
+
+  return { organizationSlug, snapshotId };
 }
 
 /**

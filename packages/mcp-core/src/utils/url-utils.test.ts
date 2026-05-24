@@ -5,8 +5,11 @@ import {
   validateOpenAiBaseUrlThrows,
   getIssueUrl,
   getIssuesSearchUrl,
+  getReplaysSearchUrl,
+  getReplayUrl,
   getTraceUrl,
   getEventsExplorerUrl,
+  getTraceMetricsExploreUrl,
 } from "./url-utils";
 
 describe("url-utils", () => {
@@ -145,6 +148,18 @@ describe("url-utils", () => {
         "https://sentry.example.com/organizations/myorg/issues/PROJ-123",
       );
     });
+
+    it("should support HTTP for self-hosted issue URLs when requested", () => {
+      const result = getIssueUrl(
+        "sentry.internal:9000",
+        "myorg",
+        "PROJ-123",
+        "http",
+      );
+      expect(result).toBe(
+        "http://sentry.internal:9000/organizations/myorg/issues/PROJ-123",
+      );
+    });
   });
 
   describe("getIssuesSearchUrl", () => {
@@ -178,6 +193,19 @@ describe("url-utils", () => {
         "https://sentry.example.com/organizations/myorg/issues/?project=proj1&query=is%3Aunresolved",
       );
     });
+
+    it("should support HTTP for self-hosted issue search URLs when requested", () => {
+      const result = getIssuesSearchUrl(
+        "sentry.internal:9000",
+        "myorg",
+        "is:unresolved",
+        "proj1",
+        "http",
+      );
+      expect(result).toBe(
+        "http://sentry.internal:9000/organizations/myorg/issues/?project=proj1&query=is%3Aunresolved",
+      );
+    });
   });
 
   describe("getTraceUrl", () => {
@@ -199,6 +227,46 @@ describe("url-utils", () => {
       const result = getTraceUrl("sentry.example.com", "myorg", "abc123");
       expect(result).toBe(
         "https://sentry.example.com/organizations/myorg/explore/traces/trace/abc123",
+      );
+    });
+  });
+
+  describe("getReplaysSearchUrl", () => {
+    it("should handle regional URLs correctly for SaaS", () => {
+      const result = getReplaysSearchUrl("us.sentry.io", "myorg", {
+        query: "count_errors:>0",
+        projectSlugOrId: "123",
+        environment: ["production", "staging"],
+        sort: "-count_errors",
+        statsPeriod: "24h",
+      });
+      expect(result).toBe(
+        "https://myorg.sentry.io/explore/replays/?project=123&query=count_errors%3A%3E0&environment=production&environment=staging&sort=-count_errors&statsPeriod=24h",
+      );
+    });
+
+    it("should handle self-hosted correctly", () => {
+      const result = getReplaysSearchUrl("sentry.example.com", "myorg", {
+        query: "url:*checkout*",
+        start: "2025-01-01T00:00:00Z",
+        end: "2025-01-02T00:00:00Z",
+      });
+      expect(result).toBe(
+        "https://sentry.example.com/organizations/myorg/explore/replays/?query=url%3A*checkout*&start=2025-01-01T00%3A00%3A00Z&end=2025-01-02T00%3A00%3A00Z",
+      );
+    });
+  });
+
+  describe("getReplayUrl", () => {
+    it("should return the canonical replay details path for SaaS", () => {
+      const result = getReplayUrl("us.sentry.io", "myorg", "abc123");
+      expect(result).toBe("https://myorg.sentry.io/explore/replays/abc123/");
+    });
+
+    it("should handle self-hosted correctly", () => {
+      const result = getReplayUrl("sentry.example.com", "myorg", "abc123");
+      expect(result).toBe(
+        "https://sentry.example.com/organizations/myorg/explore/replays/abc123/",
       );
     });
   });
@@ -240,6 +308,109 @@ describe("url-utils", () => {
       expect(result).toBe(
         "https://sentry.example.com/organizations/myorg/explore/?query=level%3Aerror&dataset=logs&layout=table&project=proj1",
       );
+    });
+
+    it("should build metrics aggregate URLs from the public helper fields", () => {
+      const result = getEventsExplorerUrl(
+        "us.sentry.io",
+        "myorg",
+        "",
+        "metrics",
+        "123456",
+        [
+          "transaction",
+          "p95(value,http.request.duration,distribution,millisecond)",
+          "count(value,http.request.duration,distribution,millisecond)",
+        ],
+      );
+
+      expect(result).toContain("https://myorg.sentry.io/explore/metrics/");
+      expect(result).toContain("project=123456");
+      expect(result).toContain(`%22mode%22%3A%22aggregate%22`);
+      expect(result).toContain(`%22groupBy%22%3A%22transaction%22`);
+    });
+
+    it("should keep derived metrics aggregate fields when options omit explicit overrides", () => {
+      const result = getEventsExplorerUrl(
+        "us.sentry.io",
+        "myorg",
+        "",
+        "metrics",
+        "123456",
+        [
+          "transaction",
+          "p95(value,http.request.duration,distribution,millisecond)",
+        ],
+        {
+          sort: "-p95(value,http.request.duration,distribution,millisecond)",
+          aggregateFunctions: undefined,
+          groupByFields: undefined,
+        },
+      );
+
+      expect(result).toContain(`%22mode%22%3A%22aggregate%22`);
+      expect(result).toContain(`%22groupBy%22%3A%22transaction%22`);
+    });
+
+    it("should preserve grouped profile fields for profiling explorer URLs", () => {
+      const result = getEventsExplorerUrl(
+        "us.sentry.io",
+        "myorg",
+        "",
+        "profiles",
+        "123456",
+        ["release", "count()"],
+        {
+          sort: "-count()",
+          statsPeriod: "7d",
+          aggregateFunctions: undefined,
+          groupByFields: undefined,
+        },
+      );
+
+      const url = new URL(result);
+
+      expect(url.pathname).toBe("/explore/profiling/");
+      expect(url.searchParams.get("project")).toBe("123456");
+      expect(url.searchParams.get("statsPeriod")).toBe("7d");
+      expect(url.searchParams.get("sort")).toBe("-count()");
+      expect(url.searchParams.getAll("field")).toEqual(["release", "count()"]);
+    });
+  });
+
+  describe("getTraceMetricsExploreUrl", () => {
+    it("should build sample metric URLs with concrete metric state", () => {
+      const result = getTraceMetricsExploreUrl("sentry.io", "myorg", {
+        query: "",
+        projectId: "123456",
+        statsPeriod: "14d",
+        traceMetrics: [
+          {
+            name: "http.request.duration",
+            type: "distribution",
+            unit: "millisecond",
+          },
+        ],
+      });
+
+      const url = new URL(result);
+      const metricQueries = url.searchParams
+        .getAll("metric")
+        .map((value) => JSON.parse(value));
+
+      expect(metricQueries).toEqual([
+        {
+          metric: {
+            name: "http.request.duration",
+            type: "distribution",
+            unit: "millisecond",
+          },
+          query: "",
+          aggregateFields: [{ yAxes: ["sum(value)"] }],
+          aggregateSortBys: [{ field: "sum(value)", kind: "desc" }],
+          mode: "samples",
+        },
+      ]);
     });
   });
 });
