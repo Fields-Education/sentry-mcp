@@ -39,13 +39,18 @@ export const CONSTRAINT_PARAMETER_KEYS = new Set<string>([
 ]);
 
 export type TransportType = "stdio" | "http";
+export type SentryProtocol = "http" | "https";
 
 export type ServerContext = {
   sentryHost?: string;
+  sentryProtocol?: SentryProtocol;
   mcpUrl?: string;
   accessToken: string;
+  /** DCR-registered client name (freeform, as provided during Dynamic Client Registration) */
+  clientName?: string | null;
   openaiBaseUrl?: string;
   userId?: string | null;
+  userIpAddress?: string | null;
   clientId?: string;
   /** Primary authorization method - granted skills for tool access control */
   grantedSkills?: Set<Skill> | ReadonlySet<Skill>;
@@ -57,4 +62,11 @@ export type ServerContext = {
   experimentalMode?: boolean;
   /** Transport type - affects error message formatting */
   transport?: TransportType;
+  /**
+   * Invoked when a tool call surfaces an upstream 401. Transports wire this
+   * to revoke the MCP grant so the session doesn't keep getting wrapper
+   * tokens backed by an upstream token Sentry has already rejected. Callback
+   * errors are swallowed.
+   */
+  onUpstreamUnauthorized?: () => void | Promise<void>;
 };

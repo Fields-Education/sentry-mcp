@@ -2,7 +2,10 @@ import { z } from "zod";
 import { setTag } from "@sentry/core";
 import { defineTool } from "../internal/tool-helpers/define";
 import { apiServiceFromContext } from "../internal/tool-helpers/api";
-import { parseIssueParams } from "../internal/tool-helpers/issue";
+import {
+  ensureIssueWithinProjectConstraint,
+  parseIssueParams,
+} from "../internal/tool-helpers/issue";
 import {
   getStatusDisplayName,
   isTerminalStatus,
@@ -96,6 +99,13 @@ export default defineTool({
 
     setTag("organization.slug", orgSlug);
 
+    await ensureIssueWithinProjectConstraint({
+      apiService,
+      organizationSlug: orgSlug,
+      issueId: parsedIssueId!,
+      projectSlug: context.constraints.projectSlug,
+    });
+
     let output = `# Seer Analysis for Issue ${parsedIssueId}\n\n`;
 
     // Step 1: Check if analysis already exists
@@ -158,7 +168,9 @@ export default defineTool({
         output += `## Analysis ${getStatusDisplayName(existingStatus)}\n\n`;
 
         for (const step of autofixState.autofix.steps) {
-          output += getOutputForAutofixStep(step);
+          output += getOutputForAutofixStep(step, {
+            runId: autofixState.autofix.run_id,
+          });
           output += "\n";
         }
 
@@ -196,7 +208,9 @@ export default defineTool({
 
         // Add all step outputs
         for (const step of autofixState.autofix.steps) {
-          output += getOutputForAutofixStep(step);
+          output += getOutputForAutofixStep(step, {
+            runId: autofixState.autofix.run_id,
+          });
           output += "\n";
         }
 
@@ -271,7 +285,9 @@ export default defineTool({
     if (autofixState.autofix) {
       output += `**Current Status**: ${getStatusDisplayName(autofixState.autofix.status)}\n\n`;
       for (const step of autofixState.autofix.steps) {
-        output += getOutputForAutofixStep(step);
+        output += getOutputForAutofixStep(step, {
+          runId: autofixState.autofix.run_id,
+        });
         output += "\n";
       }
     }

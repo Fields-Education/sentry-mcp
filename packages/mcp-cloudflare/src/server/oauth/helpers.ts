@@ -2,16 +2,18 @@ import type {
   TokenExchangeCallbackOptions,
   TokenExchangeCallbackResult,
 } from "@cloudflare/workers-oauth-provider";
-import type { z } from "zod";
+import * as Sentry from "@sentry/cloudflare";
 import {
   ApiClientError,
   ApiRateLimitError,
+  ApiServerError,
   SentryApiService,
 } from "@sentry/mcp-core/api-client";
-import { logError, logIssue } from "@sentry/mcp-core/telem/logging";
-import { TokenResponseSchema } from "./constants";
+import { logIssue, logWarn } from "@sentry/mcp-core/telem/logging";
+import type { z } from "zod";
 import type { WorkerProps } from "../types";
-import * as Sentry from "@sentry/cloudflare";
+import { setSentryUserFromRequest } from "../utils/sentry-user";
+import { TokenResponseSchema } from "./constants";
 
 function escapeHtml(value: string): string {
   return value
@@ -22,18 +24,143 @@ function escapeHtml(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
-export function createOAuthErrorMessage(oauthError?: string): string {
+type OAuthFailureDetails = {
+  message: string;
+  status: number;
+  shouldLogIssue: boolean;
+};
+
+const userFailure = (message: string, status = 400): OAuthFailureDetails => ({
+  message,
+  status,
+  shouldLogIssue: false,
+});
+
+const systemFailure = (message: string, status = 502): OAuthFailureDetails => ({
+  message,
+  status,
+  shouldLogIssue: true,
+});
+
+function isRetryableInvalidGrant(errorDescription?: string): boolean {
+  if (!errorDescription) {
+    return false;
+  }
+
+  const normalized = errorDescription.toLowerCase();
+  const userRetryablePatterns = [
+    "expired",
+    "already used",
+    "already been used",
+    "invalid or expired",
+    "authorization code expired",
+  ];
+  const systemMismatchPatterns = [
+    "redirect_uri",
+    "client_id",
+    "pkce",
+    "code verifier",
+    "code_verifier",
+    "mismatch",
+  ];
+
+  return (
+    userRetryablePatterns.some((pattern) => normalized.includes(pattern)) &&
+    !systemMismatchPatterns.some((pattern) => normalized.includes(pattern))
+  );
+}
+
+export function getOAuthCallbackFailureDetails({
+  oauthError,
+}: {
+  oauthError?: string;
+}): OAuthFailureDetails {
   switch (oauthError) {
     case "access_denied":
-      return "Authorization was denied. Please try again if you want to continue connecting your account.";
-    case "temporarily_unavailable":
-      return "Sentry OAuth is temporarily unavailable. Please try again shortly.";
-    case "server_error":
-      return "Sentry OAuth encountered an internal error. Please try again.";
+      return userFailure(
+        "Authorization was denied. Please try again if you want to continue connecting your account.",
+      );
     case "invalid_request":
-      return "The authorization request was rejected. Please try again.";
+      return userFailure(
+        "The authorization request was rejected. Please try again.",
+      );
+    case "temporarily_unavailable":
+      return systemFailure(
+        "Sentry OAuth is temporarily unavailable. Please try again shortly.",
+        503,
+      );
+    case "server_error":
+      return systemFailure(
+        "Sentry OAuth encountered an internal error. Please try again.",
+      );
+    case "invalid_scope":
+      return systemFailure(
+        "The requested permissions were invalid. Please try again.",
+      );
+    case "invalid_client":
+    case "unauthorized_client":
+    case "unsupported_response_type":
+      return systemFailure(
+        "There was an internal configuration issue completing authentication. Please try again later.",
+        500,
+      );
     default:
-      return "There was an issue authenticating your account. Please try again.";
+      return systemFailure(
+        "There was an internal error authenticating your account. Please try again shortly.",
+      );
+  }
+}
+
+export function getTokenExchangeFailureDetails({
+  oauthError,
+  errorDescription,
+}: {
+  oauthError?: string;
+  errorDescription?: string;
+}): OAuthFailureDetails {
+  switch (oauthError) {
+    case "access_denied":
+      return userFailure(
+        "Authorization was denied. Please try again if you want to continue connecting your account.",
+      );
+    case "temporarily_unavailable":
+      return systemFailure(
+        "Sentry OAuth is temporarily unavailable. Please try again shortly.",
+        503,
+      );
+    case "server_error":
+      return systemFailure(
+        "Sentry OAuth encountered an internal error. Please try again.",
+      );
+    case "invalid_request":
+      return systemFailure(
+        "The authorization request was rejected. Please try again.",
+      );
+    case "invalid_grant":
+      if (isRetryableInvalidGrant(errorDescription)) {
+        return userFailure(
+          "The authorization code was invalid or expired. Please try connecting your account again.",
+        );
+      }
+
+      return systemFailure(
+        "The authorization code could not be validated. Please try again.",
+      );
+    case "invalid_scope":
+      return systemFailure(
+        "The requested permissions were invalid. Please try again.",
+      );
+    case "invalid_client":
+    case "unauthorized_client":
+    case "unsupported_grant_type":
+      return systemFailure(
+        "There was an internal configuration issue completing authentication. Please try again later.",
+        500,
+      );
+    default:
+      return systemFailure(
+        "There was an internal error authenticating your account. Please try again shortly.",
+      );
   }
 }
 
@@ -42,15 +169,22 @@ export function createOAuthFailureResponse({
   message,
   status,
   oauthError,
+  eventId,
 }: {
   title?: string;
   message: string;
   status: number;
   oauthError?: string;
+  eventId?: string;
 }): Response {
-  const details = oauthError
-    ? `<p><strong>OAuth Error:</strong> ${escapeHtml(oauthError)}</p>`
-    : "";
+  const details = [
+    oauthError
+      ? `<p><strong>OAuth Error:</strong> ${escapeHtml(oauthError)}</p>`
+      : "",
+    eventId
+      ? `<p><strong>Event ID:</strong> <code>${escapeHtml(eventId)}</code></p>`
+      : "",
+  ].join("");
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -80,6 +214,10 @@ export function createOAuthFailureResponse({
       }
       p {
         line-height: 1.6;
+      }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 0.95em;
       }
       .details {
         margin-top: 24px;
@@ -181,7 +319,7 @@ export async function exchangeCodeForAccessToken({
   redirect_uri?: string;
 }): Promise<[z.infer<typeof TokenResponseSchema>, null] | [null, Response]> {
   if (!code) {
-    logError("[oauth] Missing code in token exchange", {
+    logWarn("[oauth] Missing code in token exchange", {
       contexts: {
         oauth: {
           client_id,
@@ -219,7 +357,11 @@ export async function exchangeCodeForAccessToken({
     const responseText = await resp.text();
     const contentType = resp.headers.get("Content-Type");
     const upstreamError = parseUpstreamOAuthError(responseText, contentType);
-    logError("[oauth] Failed to exchange code for access token", {
+    const failure = getTokenExchangeFailureDetails({
+      oauthError: upstreamError.error,
+      errorDescription: upstreamError.errorDescription,
+    });
+    const logOptions = {
       contexts: {
         oauth: {
           client_id,
@@ -236,13 +378,23 @@ export async function exchangeCodeForAccessToken({
         responseBodyPreview: responseText.slice(0, 1000),
       },
       loggerScope: ["cloudflare", "oauth", "callback"],
-    });
+    } as const;
+    let eventId: string | undefined;
+    if (failure.shouldLogIssue) {
+      eventId = logIssue(
+        "[oauth] Failed to exchange code for access token",
+        logOptions,
+      );
+    } else {
+      logWarn("[oauth] Failed to exchange code for access token", logOptions);
+    }
     return [
       null,
       createOAuthFailureResponse({
-        message: createOAuthErrorMessage(upstreamError.error),
-        status: 400,
+        message: failure.message,
+        status: failure.status,
         oauthError: upstreamError.error,
+        eventId,
       }),
     ] as const;
   }
@@ -252,7 +404,7 @@ export async function exchangeCodeForAccessToken({
     const output = TokenResponseSchema.parse(body);
     return [output, null];
   } catch (e) {
-    logError(
+    const eventId = logIssue(
       new Error("Failed to parse token response", {
         cause: e,
       }),
@@ -269,8 +421,9 @@ export async function exchangeCodeForAccessToken({
       null,
       createOAuthFailureResponse({
         message:
-          "There was an issue authenticating your account and retrieving an access token. Please try again.",
+          "There was an internal error authenticating your account and retrieving an access token. Please try again.",
         status: 500,
+        eventId,
       }),
     ] as const;
   }
@@ -280,10 +433,12 @@ export type TokenExchangeEnv = {
   SENTRY_HOST?: string;
 };
 
+// Values avoid the substring "token" so Sentry's default PII scrubber
+// doesn't replace them with "[Filtered]" on ingest.
 export type TokenExchangeOutcome =
-  | "cached_token_still_valid_local"
-  | "cached_token_still_valid_probed"
-  | "upstream_token_invalid"
+  | "cached_valid_local"
+  | "cached_valid_probed"
+  | "upstream_rejected"
   | "verification_indeterminate";
 
 const SAFE_WINDOW_MS = 2 * 60 * 1000; // 2 minutes
@@ -293,9 +448,9 @@ function recordTokenExchangeOutcome(
   outcome: TokenExchangeOutcome,
   attributes?: Record<string, string>,
 ): void {
-  Sentry.metrics.count("mcp.oauth.token_exchange", 1, {
+  Sentry.metrics.count("app.oauth.token_exchange", 1, {
     attributes: {
-      outcome,
+      "app.oauth.token_exchange.outcome": outcome,
       ...attributes,
     },
   });
@@ -324,37 +479,64 @@ function buildInvalidGrantTokenExchangeResult(
   };
 }
 
+type ProbeResult = {
+  outcome: TokenExchangeOutcome;
+  status?: number;
+  reason?: "rate_limit" | "server_error" | "unknown";
+};
+
 async function probeUpstreamAccessToken(
   props: WorkerProps,
   env: TokenExchangeEnv,
-): Promise<TokenExchangeOutcome> {
+): Promise<ProbeResult> {
   try {
     const api = new SentryApiService({
       accessToken: props.accessToken,
       host: env.SENTRY_HOST || "sentry.io",
     });
     await api.getAuthenticatedUser();
-    return "cached_token_still_valid_probed";
+    return { outcome: "cached_valid_probed", status: 200 };
   } catch (error) {
     if (error instanceof ApiRateLimitError) {
-      return "verification_indeterminate";
+      return {
+        outcome: "verification_indeterminate",
+        status: error.status,
+        reason: "rate_limit",
+      };
+    }
+
+    if (error instanceof ApiServerError) {
+      return {
+        outcome: "verification_indeterminate",
+        status: error.status,
+        reason: "server_error",
+      };
     }
 
     if (error instanceof ApiClientError) {
-      return "upstream_token_invalid";
+      return { outcome: "upstream_rejected", status: error.status };
     }
 
     if (typeof error === "object" && error !== null) {
       const status = "status" in error ? error.status : undefined;
-      if (typeof status === "number" && status >= 400 && status < 500) {
-        return "upstream_token_invalid";
+      if (typeof status === "number") {
+        if (status >= 400 && status < 500) {
+          return { outcome: "upstream_rejected", status };
+        }
+        if (status >= 500) {
+          return {
+            outcome: "verification_indeterminate",
+            status,
+            reason: "server_error",
+          };
+        }
       }
     }
 
     logIssue(error, {
       loggerScope: ["cloudflare", "oauth", "refresh"],
     });
-    return "verification_indeterminate";
+    return { outcome: "verification_indeterminate", reason: "unknown" };
   }
 }
 
@@ -369,6 +551,8 @@ async function probeUpstreamAccessToken(
 export async function tokenExchangeCallback(
   options: TokenExchangeCallbackOptions,
   env: TokenExchangeEnv,
+  request: Request,
+  clientFamily: string,
 ): Promise<TokenExchangeCallbackResult | undefined> {
   if (options.grantType !== "refresh_token") {
     return undefined;
@@ -376,7 +560,7 @@ export async function tokenExchangeCallback(
 
   const rawProps = options.props as StoredGrantProps;
 
-  Sentry.setUser({ id: rawProps.id });
+  setSentryUserFromRequest(request, rawProps.id);
 
   if (!rawProps.refreshToken) {
     // Stale grant from before refreshToken was stored in props.
@@ -403,8 +587,9 @@ export async function tokenExchangeCallback(
   if (expiresAt && Number.isFinite(expiresAt)) {
     const remainingMs = expiresAt - Date.now();
     if (remainingMs > SAFE_WINDOW_MS) {
-      recordTokenExchangeOutcome("cached_token_still_valid_local", {
-        grant_shape: "refreshable",
+      recordTokenExchangeOutcome("cached_valid_local", {
+        "app.oauth.grant.shape": "refreshable",
+        "app.client.family": clientFamily,
       });
       return buildSuccessfulTokenExchangeResult(
         props,
@@ -417,25 +602,44 @@ export async function tokenExchangeCallback(
   // report invalid/expired bearer tokens here as 400 or 401, so treat any 4xx
   // as an expected probe failure and fall back to re-auth without creating an
   // issue.
-  const outcome = await probeUpstreamAccessToken(props, env);
+  const { outcome, status, reason } = await probeUpstreamAccessToken(
+    props,
+    env,
+  );
+  // Metric attribute (not span attribute): Sentry.getActiveSpan() is
+  // undefined inside tokenExchangeCallback.
+  const outcomeAttributes: Record<string, string> = {
+    "app.oauth.grant.shape": "refreshable",
+    "app.client.family": clientFamily,
+  };
+  if (typeof status === "number") {
+    outcomeAttributes["app.oauth.probe.status_code"] = String(status);
+  }
+  if (reason) {
+    outcomeAttributes["app.oauth.probe.reason"] = reason;
+  }
   switch (outcome) {
-    case "cached_token_still_valid_probed":
-      recordTokenExchangeOutcome(outcome, {
-        grant_shape: "refreshable",
-      });
+    case "cached_valid_probed": {
+      recordTokenExchangeOutcome(outcome, outcomeAttributes);
+      // Extend the cached expiry by twice the wrapper TTL so the next
+      // refresh can take the local fast path instead of re-probing upstream.
+      // Any Sentry-side revocation still surfaces on real MCP tool calls,
+      // which hit the upstream API directly with the user's access token.
+      const nextProps = {
+        ...props,
+        accessTokenExpiresAt:
+          Date.now() + PROBED_ACCESS_TOKEN_TTL_SECONDS * 2 * 1000,
+      } satisfies WorkerProps & Record<string, unknown>;
       return buildSuccessfulTokenExchangeResult(
-        props,
+        nextProps,
         PROBED_ACCESS_TOKEN_TTL_SECONDS,
       );
-    case "upstream_token_invalid":
-      recordTokenExchangeOutcome(outcome, {
-        grant_shape: "refreshable",
-      });
+    }
+    case "upstream_rejected":
+      recordTokenExchangeOutcome(outcome, outcomeAttributes);
       return buildInvalidGrantTokenExchangeResult(props);
     case "verification_indeterminate":
-      recordTokenExchangeOutcome(outcome, {
-        grant_shape: "refreshable",
-      });
+      recordTokenExchangeOutcome(outcome, outcomeAttributes);
       return undefined;
     default:
       return undefined;

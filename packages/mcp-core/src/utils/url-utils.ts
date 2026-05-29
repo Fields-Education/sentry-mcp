@@ -1,3 +1,10 @@
+import {
+  isMetricsDataset,
+  isProfilesDataset,
+  type EventsDataset,
+} from "./events-datasets";
+import type { SentryProtocol } from "../types";
+
 /**
  * Determines if a Sentry instance is SaaS or self-hosted based on the host.
  * @param host The Sentry host (e.g., "sentry.io" or "sentry.company.com")
@@ -5,6 +12,314 @@
  */
 export function isSentryHost(host: string): boolean {
   return host === "sentry.io" || host.endsWith(".sentry.io");
+}
+
+export interface TraceMetricIdentifier {
+  name: string;
+  type: string;
+  unit?: string;
+}
+
+export interface TraceMetricsExplorerUrlOptions {
+  query: string;
+  projectId?: string;
+  statsPeriod?: string;
+  start?: string;
+  end?: string;
+  sort?: string;
+  aggregateFunctions?: string[];
+  groupByFields?: string[];
+  traceMetrics?: TraceMetricIdentifier[];
+}
+
+export interface ProfilesExplorerUrlOptions {
+  query: string;
+  projectId?: string;
+  statsPeriod?: string;
+  start?: string;
+  end?: string;
+  sort?: string;
+  fields?: string[];
+  aggregateFunctions?: string[];
+  groupByFields?: string[];
+}
+
+function deriveSelectedFields(
+  fields?: string[],
+  aggregateFunctions?: string[],
+  groupByFields?: string[],
+): string[] {
+  if (fields && fields.length > 0) {
+    return fields;
+  }
+
+  return Array.from(
+    new Set([...(groupByFields ?? []), ...(aggregateFunctions ?? [])]),
+  );
+}
+
+function getSentryWebBaseUrl(
+  host: string,
+  organizationSlug: string,
+  path: string,
+  protocol: SentryProtocol = "https",
+): string {
+  const isSaas = isSentryHost(host);
+  const webHost = isSaas ? "sentry.io" : host;
+  return isSaas
+    ? `${protocol}://${organizationSlug}.${webHost}${path}`
+    : `${protocol}://${host}/organizations/${organizationSlug}${path}`;
+}
+
+function normalizeTraceMetric(
+  metric: TraceMetricIdentifier | null | undefined,
+): TraceMetricIdentifier | null {
+  if (!metric?.name || !metric.type) {
+    return null;
+  }
+
+  return {
+    name: metric.name,
+    type: metric.type,
+    unit: metric.unit && metric.unit !== "-" ? metric.unit : undefined,
+  };
+}
+
+function extractTraceMetricFromAggregate(
+  field: string,
+): TraceMetricIdentifier | null {
+  const match = field.match(/^[^(]+\((.*)\)$/);
+  if (!match) {
+    return null;
+  }
+
+  const args = match[1]
+    .split(",")
+    .map((arg) => arg.trim())
+    .filter((arg) => arg.length > 0);
+
+  if (args.length < 4) {
+    return null;
+  }
+
+  return normalizeTraceMetric({
+    name: args[1]!,
+    type: args[2]!,
+    unit: args[3],
+  });
+}
+
+function extractTraceMetricFromQuery(
+  query: string,
+): TraceMetricIdentifier | null {
+  const extractValue = (field: string): string | null => {
+    const quotedMatch = query.match(new RegExp(`${field}:"([^"]+)"`, "i"));
+    if (quotedMatch?.[1]) {
+      return quotedMatch[1];
+    }
+
+    const unquotedMatch = query.match(new RegExp(`${field}:([^\\s]+)`, "i"));
+    return unquotedMatch?.[1] ?? null;
+  };
+
+  return normalizeTraceMetric({
+    name: extractValue("metric\\.name") ?? "",
+    type: extractValue("metric\\.type") ?? "",
+    unit: extractValue("metric\\.unit") ?? undefined,
+  });
+}
+
+function dedupeTraceMetrics(
+  metrics: Array<TraceMetricIdentifier | null | undefined>,
+): TraceMetricIdentifier[] {
+  const deduped = new Map<string, TraceMetricIdentifier>();
+
+  for (const metric of metrics) {
+    const normalizedMetric = normalizeTraceMetric(metric);
+    if (!normalizedMetric) {
+      continue;
+    }
+
+    const key = `${normalizedMetric.name}|${normalizedMetric.type}|${normalizedMetric.unit ?? ""}`;
+    deduped.set(key, normalizedMetric);
+  }
+
+  return [...deduped.values()];
+}
+
+function buildMetricQueryState(params: {
+  metric: TraceMetricIdentifier;
+  query: string;
+  mode: "aggregate" | "samples";
+  yAxes: string[];
+  groupByFields?: string[];
+  aggregateSortBys?: Array<{ field: string; kind: "asc" | "desc" }>;
+}): string {
+  return JSON.stringify({
+    metric: params.metric,
+    query: params.query,
+    aggregateFields: [
+      ...params.yAxes.map((yAxis) => ({ yAxes: [yAxis] })),
+      ...(params.groupByFields ?? []).map((field) => ({ groupBy: field })),
+    ],
+    aggregateSortBys: params.aggregateSortBys ?? [],
+    mode: params.mode,
+  });
+}
+
+export function getTraceMetricsExploreUrl(
+  host: string,
+  organizationSlug: string,
+  options: TraceMetricsExplorerUrlOptions,
+  protocol: SentryProtocol = "https",
+): string {
+  const {
+    query,
+    projectId,
+    statsPeriod,
+    start,
+    end,
+    sort,
+    aggregateFunctions,
+    groupByFields,
+    traceMetrics,
+  } = options;
+
+  const urlParams = new URLSearchParams();
+
+  if (projectId) {
+    urlParams.set("project", projectId);
+  }
+
+  if (start && end) {
+    urlParams.set("start", start);
+    urlParams.set("end", end);
+  } else {
+    urlParams.set("statsPeriod", statsPeriod || "24h");
+  }
+
+  const aggregateFields = aggregateFunctions ?? [];
+  const aggregateGroupByFields = groupByFields ?? [];
+  const isAggregateQuery = aggregateFields.length > 0;
+
+  const sortField = sort?.startsWith("-") ? sort.slice(1) : sort;
+  const sortKind = sort?.startsWith("-") ? ("desc" as const) : ("asc" as const);
+
+  if (isAggregateQuery) {
+    const metricQueries = new Map<
+      string,
+      {
+        metric: TraceMetricIdentifier;
+        yAxes: string[];
+      }
+    >();
+
+    for (const aggregateField of aggregateFields) {
+      const metric = extractTraceMetricFromAggregate(aggregateField);
+      if (!metric) {
+        continue;
+      }
+
+      const key = `${metric.name}|${metric.type}|${metric.unit ?? ""}`;
+      const existing = metricQueries.get(key);
+      if (existing) {
+        existing.yAxes.push(aggregateField);
+      } else {
+        metricQueries.set(key, {
+          metric,
+          yAxes: [aggregateField],
+        });
+      }
+    }
+
+    for (const { metric, yAxes } of metricQueries.values()) {
+      const aggregateSortBys =
+        sortField &&
+        (yAxes.includes(sortField) ||
+          aggregateGroupByFields.includes(sortField))
+          ? [{ field: sortField, kind: sortKind }]
+          : [];
+
+      urlParams.append(
+        "metric",
+        buildMetricQueryState({
+          metric,
+          query,
+          mode: "aggregate",
+          yAxes,
+          groupByFields: aggregateGroupByFields,
+          aggregateSortBys,
+        }),
+      );
+    }
+  } else {
+    const sampleMetrics = dedupeTraceMetrics([
+      ...(traceMetrics ?? []),
+      extractTraceMetricFromQuery(query),
+    ]);
+
+    for (const metric of sampleMetrics) {
+      urlParams.append(
+        "metric",
+        buildMetricQueryState({
+          metric,
+          query,
+          mode: "samples",
+          yAxes: ["sum(value)"],
+          aggregateSortBys: [{ field: "sum(value)", kind: "desc" }],
+        }),
+      );
+    }
+  }
+
+  return `${getSentryWebBaseUrl(host, organizationSlug, "/explore/metrics/", protocol)}?${urlParams.toString()}`;
+}
+
+export function getProfilingExplorerUrl(
+  host: string,
+  organizationSlug: string,
+  options: ProfilesExplorerUrlOptions,
+  protocol: SentryProtocol = "https",
+): string {
+  const {
+    query,
+    projectId,
+    statsPeriod,
+    start,
+    end,
+    sort,
+    fields,
+    aggregateFunctions,
+    groupByFields,
+  } = options;
+  const urlParams = new URLSearchParams();
+
+  if (query) {
+    urlParams.set("query", query);
+  }
+  if (projectId) {
+    urlParams.set("project", projectId);
+  }
+  if (sort) {
+    urlParams.set("sort", sort);
+  }
+
+  for (const field of deriveSelectedFields(
+    fields,
+    aggregateFunctions,
+    groupByFields,
+  )) {
+    urlParams.append("field", field);
+  }
+
+  if (start && end) {
+    urlParams.set("start", start);
+    urlParams.set("end", end);
+  } else {
+    urlParams.set("statsPeriod", statsPeriod || "24h");
+  }
+
+  return `${getSentryWebBaseUrl(host, organizationSlug, "/explore/profiling/", protocol)}?${urlParams.toString()}`;
 }
 
 /**
@@ -18,14 +333,56 @@ export function getIssueUrl(
   host: string,
   organizationSlug: string,
   issueId: string,
+  protocol: SentryProtocol = "https",
 ): string {
-  const isSaas = isSentryHost(host);
-  // For SaaS instances, always use sentry.io for web UI URLs regardless of region
-  // Regional subdomains (e.g., us.sentry.io) are only for API endpoints
-  const webHost = isSaas ? "sentry.io" : host;
-  return isSaas
-    ? `https://${organizationSlug}.${webHost}/issues/${issueId}`
-    : `https://${host}/organizations/${organizationSlug}/issues/${issueId}`;
+  return getSentryWebBaseUrl(
+    host,
+    organizationSlug,
+    `/issues/${issueId}`,
+    protocol,
+  );
+}
+
+/**
+ * Generates a Sentry cron monitor URL.
+ * @param host The Sentry host (may include regional subdomain for API access)
+ * @param organizationSlug Organization identifier
+ * @param monitorSlug Monitor slug, optionally prefixed with project slug (e.g. "my-project/my-monitor")
+ * @returns The complete monitor URL
+ */
+export function getMonitorUrl(
+  host: string,
+  organizationSlug: string,
+  monitorSlug: string,
+  protocol: SentryProtocol = "https",
+): string {
+  return getSentryWebBaseUrl(
+    host,
+    organizationSlug,
+    `/crons/${monitorSlug}/`,
+    protocol,
+  );
+}
+
+/**
+ * Generates a Sentry release URL.
+ * @param host The Sentry host (may include regional subdomain for API access)
+ * @param organizationSlug Organization identifier
+ * @param releaseVersion Release version identifier
+ * @returns The complete release URL
+ */
+export function getReleaseUrl(
+  host: string,
+  organizationSlug: string,
+  releaseVersion: string,
+  protocol: SentryProtocol = "https",
+): string {
+  return getSentryWebBaseUrl(
+    host,
+    organizationSlug,
+    `/releases/${releaseVersion}/`,
+    protocol,
+  );
 }
 
 /**
@@ -41,14 +398,9 @@ export function getIssuesSearchUrl(
   organizationSlug: string,
   query?: string | null,
   projectSlugOrId?: string,
+  protocol: SentryProtocol = "https",
 ): string {
-  const isSaas = isSentryHost(host);
-  // For SaaS instances, always use sentry.io for web UI URLs regardless of region
-  // Regional subdomains (e.g., us.sentry.io) are only for API endpoints
-  const webHost = isSaas ? "sentry.io" : host;
-  let url = isSaas
-    ? `https://${organizationSlug}.${webHost}/issues/`
-    : `https://${host}/organizations/${organizationSlug}/issues/`;
+  let url = getSentryWebBaseUrl(host, organizationSlug, "/issues/", protocol);
 
   const params = new URLSearchParams();
   if (projectSlugOrId) {
@@ -56,6 +408,70 @@ export function getIssuesSearchUrl(
   }
   if (query) {
     params.append("query", query);
+  }
+
+  const queryString = params.toString();
+  if (queryString) {
+    url += `?${queryString}`;
+  }
+
+  return url;
+}
+
+/**
+ * Generates a Sentry replay search URL.
+ * @param host The Sentry host (may include regional subdomain for API access)
+ * @param organizationSlug Organization identifier
+ * @param options Replay search options
+ * @returns The complete replay search URL
+ */
+export function getReplaysSearchUrl(
+  host: string,
+  organizationSlug: string,
+  options: {
+    query?: string | null;
+    projectSlugOrId?: string;
+    environment?: string | string[] | null;
+    sort?: string | null;
+    statsPeriod?: string | null;
+    start?: string | null;
+    end?: string | null;
+  } = {},
+  protocol: SentryProtocol = "https",
+): string {
+  const { query, projectSlugOrId, environment, sort, statsPeriod, start, end } =
+    options;
+
+  let url = getSentryWebBaseUrl(
+    host,
+    organizationSlug,
+    "/explore/replays/",
+    protocol,
+  );
+  const params = new URLSearchParams();
+
+  if (projectSlugOrId) {
+    params.append("project", projectSlugOrId);
+  }
+  if (query) {
+    params.append("query", query);
+  }
+  if (environment) {
+    const environments = Array.isArray(environment)
+      ? environment
+      : [environment];
+    for (const value of environments) {
+      params.append("environment", value);
+    }
+  }
+  if (sort) {
+    params.append("sort", sort);
+  }
+  if (start && end) {
+    params.append("start", start);
+    params.append("end", end);
+  } else if (statsPeriod) {
+    params.append("statsPeriod", statsPeriod);
   }
 
   const queryString = params.toString();
@@ -77,14 +493,14 @@ export function getTraceUrl(
   host: string,
   organizationSlug: string,
   traceId: string,
+  protocol: SentryProtocol = "https",
 ): string {
-  const isSaas = isSentryHost(host);
-  // For SaaS instances, always use sentry.io for web UI URLs regardless of region
-  // Regional subdomains (e.g., us.sentry.io) are only for API endpoints
-  const webHost = isSaas ? "sentry.io" : host;
-  return isSaas
-    ? `https://${organizationSlug}.${webHost}/explore/traces/trace/${traceId}`
-    : `https://${host}/organizations/${organizationSlug}/explore/traces/trace/${traceId}`;
+  return getSentryWebBaseUrl(
+    host,
+    organizationSlug,
+    `/explore/traces/trace/${traceId}`,
+    protocol,
+  );
 }
 
 /**
@@ -98,12 +514,75 @@ export function getReplayUrl(
   host: string,
   organizationSlug: string,
   replayId: string,
+  protocol: SentryProtocol = "https",
 ): string {
-  const isSaas = isSentryHost(host);
-  const webHost = isSaas ? "sentry.io" : host;
-  return isSaas
-    ? `https://${organizationSlug}.${webHost}/replays/${replayId}/`
-    : `https://${host}/organizations/${organizationSlug}/replays/${replayId}/`;
+  return getSentryWebBaseUrl(
+    host,
+    organizationSlug,
+    `/explore/replays/${replayId}/`,
+    protocol,
+  );
+}
+
+/**
+ * Generates a Sentry AI conversation URL.
+ * @param host The Sentry host
+ * @param organizationSlug Organization identifier
+ * @param conversationId AI conversation identifier
+ * @returns The complete AI conversation URL
+ */
+export function getAIConversationUrl(
+  host: string,
+  organizationSlug: string,
+  conversationId: string,
+  protocol: SentryProtocol = "https",
+): string {
+  return getSentryWebBaseUrl(
+    host,
+    organizationSlug,
+    `/explore/conversations/${conversationId}/`,
+    protocol,
+  );
+}
+
+export function getProfileUrl(
+  host: string,
+  organizationSlug: string,
+  projectSlug: string,
+  profileId: string,
+  protocol: SentryProtocol = "https",
+): string {
+  return getSentryWebBaseUrl(
+    host,
+    organizationSlug,
+    `/explore/profiling/profile/${projectSlug}/${profileId}/flamegraph/`,
+    protocol,
+  );
+}
+
+export function getContinuousProfileUrl(
+  host: string,
+  organizationSlug: string,
+  projectSlug: string,
+  options: {
+    profilerId: string;
+    start: string;
+    end: string;
+  },
+  protocol: SentryProtocol = "https",
+): string {
+  const url = new URL(
+    getSentryWebBaseUrl(
+      host,
+      organizationSlug,
+      `/explore/profiling/profile/${projectSlug}/flamegraph/`,
+      protocol,
+    ),
+  );
+  url.searchParams.set("profilerId", options.profilerId);
+  url.searchParams.set("start", options.start);
+  url.searchParams.set("end", options.end);
+  return url.toString();
 }
 
 /**
@@ -120,25 +599,69 @@ export function getEventsExplorerUrl(
   host: string,
   organizationSlug: string,
   query: string,
-  dataset: "spans" | "errors" | "logs" = "spans",
-  projectSlug?: string,
+  dataset: EventsDataset = "spans",
+  projectSlugOrId?: string,
   fields?: string[],
+  explorerOptions?: Omit<TraceMetricsExplorerUrlOptions, "query" | "projectId">,
+  protocol: SentryProtocol = "https",
 ): string {
-  const isSaas = isSentryHost(host);
-  // For SaaS instances, always use sentry.io for web UI URLs regardless of region
-  // Regional subdomains (e.g., us.sentry.io) are only for API endpoints
-  const webHost = isSaas ? "sentry.io" : host;
-  let url = isSaas
-    ? `https://${organizationSlug}.${webHost}/explore/`
-    : `https://${host}/organizations/${organizationSlug}/explore/`;
+  if (isMetricsDataset(dataset)) {
+    const derivedAggregateFunctions =
+      explorerOptions?.aggregateFunctions ??
+      fields?.filter((field) => field.includes("(") && field.includes(")"));
+    const derivedGroupByFields =
+      explorerOptions?.groupByFields ??
+      fields?.filter((field) => !field.includes("(") && !field.includes(")"));
+
+    return getTraceMetricsExploreUrl(
+      host,
+      organizationSlug,
+      {
+        ...explorerOptions,
+        query,
+        projectId: projectSlugOrId,
+        aggregateFunctions: derivedAggregateFunctions,
+        groupByFields: derivedGroupByFields,
+      },
+      protocol,
+    );
+  }
+
+  if (isProfilesDataset(dataset)) {
+    const derivedAggregateFunctions =
+      explorerOptions?.aggregateFunctions ??
+      fields?.filter((field) => field.includes("(") && field.includes(")"));
+    const derivedGroupByFields =
+      explorerOptions?.groupByFields ??
+      fields?.filter((field) => !field.includes("(") && !field.includes(")"));
+
+    return getProfilingExplorerUrl(
+      host,
+      organizationSlug,
+      {
+        query,
+        projectId: projectSlugOrId,
+        fields,
+        sort: explorerOptions?.sort,
+        statsPeriod: explorerOptions?.statsPeriod,
+        start: explorerOptions?.start,
+        end: explorerOptions?.end,
+        aggregateFunctions: derivedAggregateFunctions,
+        groupByFields: derivedGroupByFields,
+      },
+      protocol,
+    );
+  }
+
+  let url = getSentryWebBaseUrl(host, organizationSlug, "/explore/", protocol);
 
   const params = new URLSearchParams();
   params.append("query", query);
   params.append("dataset", dataset);
   params.append("layout", "table");
 
-  if (projectSlug) {
-    params.append("project", projectSlug);
+  if (projectSlugOrId) {
+    params.append("project", projectSlugOrId);
   }
 
   if (fields && fields.length > 0) {

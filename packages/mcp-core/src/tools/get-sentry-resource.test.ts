@@ -1,14 +1,20 @@
-import { describe, it, expect } from "vitest";
+import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { http, HttpResponse } from "msw";
 import {
   mswServer,
   organizationFixture,
+  transactionProfileV1Fixture,
   replayDetailsFixture,
   traceMetaFixture,
+  traceMixedFixture,
   traceFixture,
   eventFixture,
 } from "@sentry/mcp-server-mocks";
 import getSentryResource from "./get-sentry-resource.js";
+
+const originalOpenAIApiKey = process.env.OPENAI_API_KEY;
+const originalAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
+const originalEmbeddedAgentProvider = process.env.EMBEDDED_AGENT_PROVIDER;
 
 const baseContext = {
   constraints: {
@@ -18,9 +24,29 @@ const baseContext = {
   userId: "1",
 };
 
+function mockOrganization(org: string) {
+  return http.get(`https://sentry.io/api/0/organizations/${org}/`, () =>
+    HttpResponse.json({
+      ...organizationFixture,
+      slug: org,
+      links: {
+        ...organizationFixture.links,
+        regionUrl: "https://sentry.io",
+        organizationUrl: `https://${org}.sentry.io`,
+      },
+    }),
+  );
+}
+
 function callHandler(params: {
   url?: string;
-  resourceType?: "issue" | "event" | "trace" | "breadcrumbs" | "replay";
+  resourceType?:
+    | "issue"
+    | "event"
+    | "trace"
+    | "span"
+    | "breadcrumbs"
+    | "replay";
   resourceId?: string;
   organizationSlug?: string;
 }) {
@@ -28,6 +54,32 @@ function callHandler(params: {
 }
 
 describe("get_sentry_resource", () => {
+  beforeEach(() => {
+    Reflect.deleteProperty(process.env, "OPENAI_API_KEY");
+    Reflect.deleteProperty(process.env, "ANTHROPIC_API_KEY");
+    Reflect.deleteProperty(process.env, "EMBEDDED_AGENT_PROVIDER");
+  });
+
+  afterAll(() => {
+    if (originalOpenAIApiKey === undefined) {
+      Reflect.deleteProperty(process.env, "OPENAI_API_KEY");
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAIApiKey;
+    }
+
+    if (originalAnthropicApiKey === undefined) {
+      Reflect.deleteProperty(process.env, "ANTHROPIC_API_KEY");
+    } else {
+      process.env.ANTHROPIC_API_KEY = originalAnthropicApiKey;
+    }
+
+    if (originalEmbeddedAgentProvider === undefined) {
+      Reflect.deleteProperty(process.env, "EMBEDDED_AGENT_PROVIDER");
+    } else {
+      process.env.EMBEDDED_AGENT_PROVIDER = originalEmbeddedAgentProvider;
+    }
+  });
+
   // ─── URL mode: issue URLs ──────────────────────────────────────────────────
   describe("URL mode — issue URLs", () => {
     it("resolves issue from subdomain URL (my-org.sentry.io)", async () => {
@@ -100,6 +152,7 @@ describe("get_sentry_resource", () => {
 
     function mockTraceEndpoints(org: string) {
       mswServer.use(
+        mockOrganization(org),
         http.get(
           `https://sentry.io/api/0/organizations/${org}/trace-meta/${traceId}/`,
           () => HttpResponse.json(traceMetaFixture),
@@ -133,10 +186,159 @@ describe("get_sentry_resource", () => {
     it("resolves trace with span focus query param", async () => {
       mockTraceEndpoints("test-org");
       const result = await callHandler({
-        url: `https://test-org.sentry.io/performance/trace/${traceId}?node=span-abc123`,
+        url: `https://test-org.sentry.io/performance/trace/${traceId}?node=span-aa8e7f3343113fbf`,
       });
-      // Span focus is parsed but not yet used in output — just verify trace loads
-      expect(result).toContain(`# Trace \`${traceId}\` in **test-org**`);
+      expect(result).toContain(
+        `# Span \`aa8e7f3343113fbf\` in Trace \`${traceId}\` in **test-org**`,
+      );
+      expect(result).toContain(
+        "POST https://api.openai.com/v1/chat/completions [ad0f7c48 · http.client · 1708ms]",
+      );
+      expect(result).toContain("### Tags");
+    });
+
+    it("resolves a span from a compound resourceId", async () => {
+      const focusedTraceId = "b4d1aae7216b47ff8117cf4e09ce9d0b";
+
+      mswServer.use(
+        mockOrganization("test-org"),
+        http.get(
+          `https://sentry.io/api/0/organizations/test-org/trace-meta/${focusedTraceId}/`,
+          () =>
+            HttpResponse.json({
+              logs: 0,
+              errors: 2,
+              performance_issues: 0,
+              span_count: 4,
+              transaction_child_count_map: [],
+              span_count_map: {},
+            }),
+          { once: true },
+        ),
+        http.get(
+          `https://sentry.io/api/0/organizations/test-org/trace/${focusedTraceId}/`,
+          () => HttpResponse.json(traceMixedFixture),
+          { once: true },
+        ),
+      );
+
+      const result = await callHandler({
+        resourceType: "span",
+        organizationSlug: "test-org",
+        resourceId: `${focusedTraceId}:aa8e7f3384ef4ff5`,
+      });
+
+      expect(result).toMatchInlineSnapshot(`
+        "# Span \`aa8e7f3384ef4ff5\` in Trace \`b4d1aae7216b47ff8117cf4e09ce9d0b\` in **test-org**
+
+        ## Summary
+
+        **Project**: mcp-server
+        **Operation**: function
+        **Description**: tools/call search_events
+        **Duration**: 5203ms
+        **Exclusive Time**: 3495ms
+        **Status**: unknown
+        **Parent Span ID**: None (root span)
+        **Child Spans**: 1
+        **Descendant Spans**: 1
+        **Errors**: 0
+        **Event Type**: span
+        **SDK**: sentry.javascript.bun
+        **Trace Total Spans**: 4
+
+        ## Child Snapshot
+
+        tools/call search_events [aa8e7f33 · function · 5203ms]
+           └─ POST https://api.openai.com/v1/chat/completions [ad0f7c48 · http.client · 1708ms]
+
+        *Child snapshot shows 1 of 1 descendant spans.*
+
+        ## View Full Span
+
+        **Sentry URL**: https://test-org.sentry.io/explore/traces/trace/b4d1aae7216b47ff8117cf4e09ce9d0b?node=span-aa8e7f3384ef4ff5
+
+        ## Attributes
+
+        ### Core Fields
+
+        \`\`\`json
+        {
+          "description": "tools/call search_events",
+          "duration": 5203,
+          "end_timestamp": 1713805463.608875,
+          "event_id": "aa8e7f3384ef4ff5850ba966b29ed10d",
+          "exclusive_time": 3495,
+          "hash": "4ed30c7c-4fae-4c79-b2f1-be95c24e7b04",
+          "is_segment": true,
+          "op": "function",
+          "organization": null,
+          "parent_span_id": null,
+          "profile_id": "",
+          "profiler_id": "",
+          "project_id": 4509109107622913,
+          "project_slug": "mcp-server",
+          "same_process_as_parent": true,
+          "sdk_name": "sentry.javascript.bun",
+          "span_id": "aa8e7f3384ef4ff5",
+          "start_timestamp": 1713805458.405616,
+          "status": null,
+          "timestamp": 1713805463.608875,
+          "trace": "b4d1aae7216b47ff8117cf4e09ce9d0b",
+          "transaction_id": "aa8e7f3384ef4ff5850ba966b29ed10d"
+        }
+        \`\`\`
+
+        ### Measurements
+
+        \`\`\`json
+        {}
+        \`\`\`
+
+        ### Tags
+
+        \`\`\`json
+        {
+          "ai.input_messages": "1",
+          "ai.model_id": "gpt-4o-2024-08-06",
+          "ai.pipeline.name": "search_events",
+          "ai.response.finish_reason": "stop",
+          "ai.streaming": "false",
+          "ai.total_tokens.used": "435",
+          "server_name": "mcp-server"
+        }
+        \`\`\`
+
+        ### Data
+
+        \`\`\`json
+        {}
+        \`\`\`
+
+        ### Additional Attributes
+
+        \`\`\`json
+        {}
+        \`\`\`
+
+        ### Errors
+
+        \`\`\`json
+        []
+        \`\`\`
+
+        ### Occurrences
+
+        \`\`\`json
+        []
+        \`\`\`
+
+        ## Next Steps
+
+        - **Search spans**: \`search_events(organizationSlug='test-org', dataset='spans', query='trace:${focusedTraceId}')\`
+        - **Search errors**: \`search_events(organizationSlug='test-org', dataset='errors', query='trace:${focusedTraceId}')\`
+        - **Search logs**: \`search_events(organizationSlug='test-org', dataset='logs', query='trace:${focusedTraceId}')\`"
+      `);
     });
 
     it("resolves trace from /organizations/{org}/ path", async () => {
@@ -146,42 +348,87 @@ describe("get_sentry_resource", () => {
       });
       expect(result).toContain(`# Trace \`${traceId}\` in **test-org**`);
     });
+
+    it("returns traces under an active project constraint", async () => {
+      mockTraceEndpoints("test-org");
+      mswServer.use(
+        http.get("https://sentry.io/api/0/projects/test-org/frontend/", () => {
+          throw new Error("getProject should not be called for trace lookups");
+        }),
+      );
+
+      const result = await getSentryResource.handler(
+        {
+          url: `https://test-org.sentry.io/explore/traces/trace/${traceId}`,
+        },
+        {
+          ...baseContext,
+          constraints: {
+            organizationSlug: "test-org",
+            projectSlug: "frontend",
+          },
+        },
+      );
+
+      expect(result).toContain(`# Trace \`${traceId}\` in **test-org**`);
+    });
   });
 
   // ─── URL mode: profile URLs ───────────────────────────────────────────────
   describe("URL mode — profile URLs", () => {
-    it("dispatches profile from flamegraph URL to getProfile handler", async () => {
-      // Profile handler requires transactionName which is not in the URL,
-      // so it throws a clear error
-      await expect(
-        callHandler({
-          url: "https://my-org.sentry.io/explore/profiling/profile/sentry/cfe78a5c/flamegraph/",
-        }),
-      ).rejects.toThrow("Transaction name is required");
+    it("dispatches transaction profile URLs to get_profile_details", async () => {
+      const result = await callHandler({
+        url: `https://my-org.sentry.io/explore/profiling/profile/backend/${transactionProfileV1Fixture.profile_id}/flamegraph/`,
+      });
+
+      expect(result).toContain(
+        `# Profile ${transactionProfileV1Fixture.profile_id}`,
+      );
+      expect(result).toContain("**Project**: backend");
+      expect(result).toContain("**Transaction**: /api/users");
     });
 
-    it("dispatches profile from flamegraph URL with query params", async () => {
-      await expect(
-        callHandler({
-          url: "https://sentry.sentry.io/explore/profiling/profile/sentry/cfe78a5c892d4a64a962d837673398d2/flamegraph/?colorCoding=by%20system%20vs%20application%20frame&frameName=SentryEnvMiddleware",
-        }),
-      ).rejects.toThrow("Transaction name is required");
+    it("dispatches transaction profile URLs with organizations path", async () => {
+      const result = await callHandler({
+        url: `https://sentry.io/organizations/my-org/profiling/profile/backend/${transactionProfileV1Fixture.profile_id}/flamegraph/?frameName=handle_request`,
+      });
+
+      expect(result).toContain(
+        `# Profile ${transactionProfileV1Fixture.profile_id}`,
+      );
+      expect(result).toContain(
+        "**Trace ID**: a4d1aae7216b47ff8117cf4e09ce9d0a",
+      );
     });
 
-    it("dispatches profile from /profiling/profile/ URL (without /explore/)", async () => {
-      await expect(
-        callHandler({
-          url: "https://my-org.sentry.io/profiling/profile/my-project/flamegraph/",
-        }),
-      ).rejects.toThrow("Transaction name is required");
+    it("dispatches continuous profile URLs to get_profile_details", async () => {
+      const result = await callHandler({
+        url: "https://my-org.sentry.io/profiling/profile/backend/flamegraph/?profilerId=041bde57b9844e36b8b7e5734efae5f7&start=2024-01-01T00:00:00Z&end=2024-01-01T01:00:00Z",
+      });
+
+      expect(result).toContain(
+        "# Continuous Profile 041bde57b9844e36b8b7e5734efae5f7",
+      );
+      expect(result).toContain("## Raw Sample Analysis");
     });
 
-    it("dispatches profile from /organizations/ path variant", async () => {
+    it("rejects profile URLs outside the active constrained project", async () => {
       await expect(
-        callHandler({
-          url: "https://sentry.io/organizations/my-org/profiling/profile/my-project/flamegraph/",
-        }),
-      ).rejects.toThrow("Transaction name is required");
+        getSentryResource.handler(
+          {
+            url: `https://my-org.sentry.io/explore/profiling/profile/frontend/${transactionProfileV1Fixture.profile_id}/flamegraph/`,
+          },
+          {
+            ...baseContext,
+            constraints: {
+              organizationSlug: "my-org",
+              projectSlug: "backend",
+            },
+          },
+        ),
+      ).rejects.toThrow(
+        'Profile URL is outside the active project constraint. Expected project "backend" but got "frontend".',
+      );
     });
   });
 
@@ -261,6 +508,44 @@ describe("get_sentry_resource", () => {
         - **Search issues**: Use \`search_issues\` with query \`release:backend@2024.01.15-abc123\` to find issues in this release"
       `);
     });
+
+    it("uses configured host and protocol for self-hosted monitor URL", async () => {
+      const result = await getSentryResource.handler(
+        {
+          resourceType: undefined,
+          resourceId: undefined,
+          organizationSlug: undefined,
+          url: "http://sentry.internal:9000/organizations/my-org/crons/daily-backup/",
+        },
+        {
+          ...baseContext,
+          sentryHost: "sentry.internal:9000",
+          sentryProtocol: "http",
+        },
+      );
+      expect(result).toContain(
+        "[Open Monitor](http://sentry.internal:9000/organizations/my-org/crons/daily-backup/)",
+      );
+    });
+
+    it("uses configured host and protocol for self-hosted release URL", async () => {
+      const result = await getSentryResource.handler(
+        {
+          resourceType: undefined,
+          resourceId: undefined,
+          organizationSlug: undefined,
+          url: "http://sentry.internal:9000/organizations/my-org/releases/v1.2.3/",
+        },
+        {
+          ...baseContext,
+          sentryHost: "sentry.internal:9000",
+          sentryProtocol: "http",
+        },
+      );
+      expect(result).toContain(
+        "[Open Release](http://sentry.internal:9000/organizations/my-org/releases/v1.2.3/)",
+      );
+    });
   });
 
   // ─── URL mode: error cases ────────────────────────────────────────────────
@@ -306,6 +591,26 @@ describe("get_sentry_resource", () => {
       expect(result).toContain("navigation");
     });
 
+    it("rejects breadcrumbs outside the active project constraint", async () => {
+      await expect(
+        getSentryResource.handler(
+          {
+            url: "https://sentry-mcp-evals.sentry.io/issues/CLOUDFLARE-MCP-41",
+            resourceType: "breadcrumbs",
+          },
+          {
+            ...baseContext,
+            constraints: {
+              organizationSlug: "sentry-mcp-evals",
+              projectSlug: "frontend",
+            },
+          },
+        ),
+      ).rejects.toThrow(
+        'Issue is outside the active project constraint. Expected project "frontend".',
+      );
+    });
+
     it("fetches breadcrumbs from event URL (extracts issueId)", async () => {
       const result = await callHandler({
         url: "https://sentry-mcp-evals.sentry.io/issues/CLOUDFLARE-MCP-41/events/7ca573c0f4814912aaa9bdc77d1a7d51",
@@ -349,6 +654,17 @@ describe("get_sentry_resource", () => {
         }),
       ).rejects.toThrow("Could not extract issue ID from URL for breadcrumbs");
     });
+
+    it("rejects span override on a plain trace URL", async () => {
+      await expect(
+        callHandler({
+          url: "https://test-org.sentry.io/explore/traces/trace/a4d1aae7216b47ff8117cf4e09ce9d0a",
+          resourceType: "span",
+        }),
+      ).rejects.toThrow(
+        "Could not extract span ID from URL for span resource.",
+      );
+    });
   });
 
   // ─── By type and ID ─────────────────────────────────────────────────────────
@@ -387,12 +703,14 @@ describe("get_sentry_resource", () => {
       expect(result).toContain(
         "**Event ID**: 7ca573c0f4814912aaa9bdc77d1a7d51",
       );
+      expect(result).toContain("**user.geo**: US, United States");
     });
 
     it("fetches trace by traceId", async () => {
       const traceId = "a4d1aae7216b47ff8117cf4e09ce9d0a";
 
       mswServer.use(
+        mockOrganization("test-org"),
         http.get(
           `https://sentry.io/api/0/organizations/test-org/trace-meta/${traceId}/`,
           () => HttpResponse.json(traceMetaFixture),
@@ -413,6 +731,33 @@ describe("get_sentry_resource", () => {
       expect(result).toContain(`# Trace \`${traceId}\` in **test-org**`);
       expect(result).toContain("**Total Spans**: 112");
       expect(result).toContain("**Errors**: 0");
+    });
+
+    it("fetches span by traceId:spanId", async () => {
+      const traceId = "a4d1aae7216b47ff8117cf4e09ce9d0a";
+
+      mswServer.use(
+        mockOrganization("test-org"),
+        http.get(
+          `https://sentry.io/api/0/organizations/test-org/trace-meta/${traceId}/`,
+          () => HttpResponse.json(traceMetaFixture),
+          { once: true },
+        ),
+        http.get(
+          `https://sentry.io/api/0/organizations/test-org/trace/${traceId}/`,
+          () => HttpResponse.json(traceFixture),
+          { once: true },
+        ),
+      );
+
+      const result = await callHandler({
+        resourceType: "span",
+        organizationSlug: "test-org",
+        resourceId: `${traceId}:aa8e7f3343113fbf`,
+      });
+      expect(result).toContain(
+        "# Span `aa8e7f3343113fbf` in Trace `a4d1aae7216b47ff8117cf4e09ce9d0a` in **test-org**",
+      );
     });
 
     it("fetches breadcrumbs by issueId", async () => {
@@ -578,6 +923,15 @@ describe("get_sentry_resource", () => {
       await expect(
         callHandler({
           resourceType: "trace",
+          organizationSlug: "my-org",
+        }),
+      ).rejects.toThrow("`resourceId` is required when not using a URL");
+    });
+
+    it("throws when resourceId missing for span type", async () => {
+      await expect(
+        callHandler({
+          resourceType: "span",
           organizationSlug: "my-org",
         }),
       ).rejects.toThrow("`resourceId` is required when not using a URL");
