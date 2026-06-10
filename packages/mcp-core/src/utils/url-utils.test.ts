@@ -5,8 +5,11 @@ import {
   validateOpenAiBaseUrlThrows,
   getIssueUrl,
   getIssuesSearchUrl,
+  getPreprodSnapshotUrl,
   getReplaysSearchUrl,
   getReplayUrl,
+  getReleaseUrl,
+  getMonitorUrl,
   getTraceUrl,
   getEventsExplorerUrl,
   getTraceMetricsExploreUrl,
@@ -158,6 +161,78 @@ describe("url-utils", () => {
       );
       expect(result).toBe(
         "http://sentry.internal:9000/organizations/myorg/issues/PROJ-123",
+      );
+    });
+  });
+
+  describe("getReleaseUrl", () => {
+    it("should encode release versions in the path segment", () => {
+      const result = getReleaseUrl(
+        "sentry.io",
+        "myorg",
+        "backend/web 2025.04.13",
+      );
+      expect(result).toBe(
+        "https://myorg.sentry.io/releases/backend%2Fweb%202025.04.13/",
+      );
+    });
+  });
+
+  describe("getMonitorUrl", () => {
+    it("should encode project and monitor path segments independently", () => {
+      const result = getMonitorUrl(
+        "sentry.io",
+        "myorg",
+        "daily/import 1",
+        "https",
+        "backend",
+      );
+      expect(result).toBe(
+        "https://myorg.sentry.io/crons/backend/daily%2Fimport%201/",
+      );
+    });
+
+    it("should use self-hosted organization paths", () => {
+      const result = getMonitorUrl(
+        "sentry.internal:9000",
+        "myorg",
+        "daily-backup",
+        "http",
+        "backend",
+      );
+      expect(result).toBe(
+        "http://sentry.internal:9000/organizations/myorg/crons/backend/daily-backup/",
+      );
+    });
+  });
+
+  describe("getPreprodSnapshotUrl", () => {
+    it("should handle regional URLs correctly for SaaS", () => {
+      const result = getPreprodSnapshotUrl("us.sentry.io", "myorg", "12");
+      expect(result).toBe("https://myorg.sentry.io/preprod/snapshots/12/");
+    });
+
+    it("should handle standard sentry.io correctly", () => {
+      const result = getPreprodSnapshotUrl("sentry.io", "myorg", "12");
+      expect(result).toBe("https://myorg.sentry.io/preprod/snapshots/12/");
+    });
+
+    it("should handle self-hosted correctly", () => {
+      const result = getPreprodSnapshotUrl("sentry.example.com", "myorg", "12");
+      expect(result).toBe(
+        "https://sentry.example.com/organizations/myorg/preprod/snapshots/12/",
+      );
+    });
+
+    it("should support HTTP for self-hosted snapshot URLs when requested", () => {
+      const result = getPreprodSnapshotUrl(
+        "sentry.internal:9000",
+        "myorg",
+        "12",
+        "http",
+      );
+      expect(result).toBe(
+        "http://sentry.internal:9000/organizations/myorg/preprod/snapshots/12/",
       );
     });
   });

@@ -71,6 +71,12 @@ import profileChunkFixture from "./fixtures/profile-chunk.json" with {
 import issueTagValuesFixture from "./fixtures/issue-tag-values.json" with {
   type: "json",
 };
+import issueActivityFixture from "./fixtures/issue-activity.json" with {
+  type: "json",
+};
+import issueCommentsFixture from "./fixtures/issue-comments.json" with {
+  type: "json",
+};
 import issueFixture from "./fixtures/issue.json" with { type: "json" };
 import issueNullCulpritFixture from "./fixtures/issue-null-culprit.json" with {
   type: "json",
@@ -83,6 +89,19 @@ import performanceEventFixture from "./fixtures/performance-event.json" with {
 };
 import projectFixture from "./fixtures/project.json" with { type: "json" };
 import releaseFixture from "./fixtures/release.json" with { type: "json" };
+import releaseCommitsFixture from "./fixtures/release-commits.json" with {
+  type: "json",
+};
+import releaseDeploysFixture from "./fixtures/release-deploys.json" with {
+  type: "json",
+};
+import monitorFixture from "./fixtures/monitor.json" with { type: "json" };
+import monitorCheckInsFixture from "./fixtures/monitor-checkins.json" with {
+  type: "json",
+};
+import monitorStatsFixture from "./fixtures/monitor-stats.json" with {
+  type: "json",
+};
 import tagsFixture from "./fixtures/tags.json" with { type: "json" };
 import teamFixture from "./fixtures/team.json" with { type: "json" };
 import traceEventFixture from "./fixtures/trace-event.json" with {
@@ -816,8 +835,68 @@ export const restHandlers = buildHandlers([
   },
   {
     method: "get",
+    path: "/api/0/organizations/sentry-mcp-evals/releases/8ce89484-0fec-4913-a2cd-e8e2d41dee36/",
+    fetch: () => HttpResponse.json(releaseFixture),
+  },
+  {
+    method: "get",
+    path: "/api/0/organizations/sentry-mcp-evals/releases/8ce89484-0fec-4913-a2cd-e8e2d41dee36/deploys/",
+    fetch: () => HttpResponse.json(releaseDeploysFixture),
+  },
+  {
+    method: "get",
+    path: "/api/0/organizations/sentry-mcp-evals/releases/8ce89484-0fec-4913-a2cd-e8e2d41dee36/commits/",
+    fetch: () => HttpResponse.json(releaseCommitsFixture),
+  },
+  {
+    method: "get",
     path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/releases/",
     fetch: () => HttpResponse.json([releaseFixture]),
+  },
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/releases/8ce89484-0fec-4913-a2cd-e8e2d41dee36/",
+    fetch: () => HttpResponse.json(releaseFixture),
+  },
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/releases/8ce89484-0fec-4913-a2cd-e8e2d41dee36/commits/",
+    fetch: () => HttpResponse.json(releaseCommitsFixture),
+  },
+  {
+    method: "get",
+    path: "/api/0/organizations/sentry-mcp-evals/monitors/",
+    fetch: () => HttpResponse.json([monitorFixture]),
+  },
+  {
+    method: "get",
+    path: "/api/0/organizations/sentry-mcp-evals/monitors/nightly-import/",
+    fetch: () => HttpResponse.json(monitorFixture),
+  },
+  {
+    method: "get",
+    path: "/api/0/organizations/sentry-mcp-evals/monitors/nightly-import/checkins/",
+    fetch: () => HttpResponse.json(monitorCheckInsFixture),
+  },
+  {
+    method: "get",
+    path: "/api/0/organizations/sentry-mcp-evals/monitors/nightly-import/stats/",
+    fetch: () => HttpResponse.json(monitorStatsFixture),
+  },
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/monitors/nightly-import/",
+    fetch: () => HttpResponse.json(monitorFixture),
+  },
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/monitors/nightly-import/checkins/",
+    fetch: () => HttpResponse.json(monitorCheckInsFixture),
+  },
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/monitors/nightly-import/stats/",
+    fetch: () => HttpResponse.json(monitorStatsFixture),
   },
   {
     method: "get",
@@ -985,26 +1064,42 @@ export const restHandlers = buildHandlers([
       HttpResponse.json({
         autofix: {
           run_id: 13,
-          request: { project_id: 4505138086019073 },
-          status: "COMPLETED",
+          status: "completed",
           updated_at: "2025-04-09T22:39:50.778146",
-          steps: [
+          owner_user_id: null,
+          pending_user_input: null,
+          repo_pr_states: {},
+          blocks: [
             {
-              type: "root_cause_analysis",
-              key: "root_cause_analysis",
-              index: 0,
-              status: "COMPLETED",
-              title: "1. **Root Cause Analysis**",
-              output_stream: null,
-              progress: [],
-              description: "The analysis has completed successfully.",
-              causes: [
+              id: "block-1",
+              message: {
+                role: "assistant",
+                content: "The analysis has completed successfully.",
+                thinking_content: null,
+                tool_calls: null,
+                metadata: null,
+              },
+              timestamp: "2025-04-09T22:39:50.000000",
+              loading: false,
+              artifacts: [
                 {
-                  description: "The analysis has completed successfully.",
-                  id: 1,
-                  root_cause_reproduction: [],
+                  key: "root_cause",
+                  reason: "Root cause analysis completed",
+                  data: {
+                    one_line_description:
+                      "The analysis has completed successfully.",
+                    five_whys: [],
+                    reproduction_steps: [],
+                    relevant_repo: null,
+                  },
                 },
               ],
+              file_patches: null,
+              merged_file_patches: null,
+              pr_commit_shas: null,
+              todos: null,
+              tool_links: null,
+              tool_results: null,
             },
           ],
         },
@@ -1031,6 +1126,16 @@ export const restHandlers = buildHandlers([
     },
   },
   {
+    method: "get",
+    path: "/api/0/organizations/:org/issues/:issueId/activities/",
+    fetch: () => HttpResponse.json(issueActivityFixture),
+  },
+  {
+    method: "get",
+    path: "/api/0/organizations/:org/issues/:issueId/notes/",
+    fetch: () => HttpResponse.json(issueCommentsFixture),
+  },
+  {
     method: "post",
     path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/teams/:teamSlug/",
     fetch: async ({ request, params }) => {
@@ -1052,9 +1157,13 @@ export const restHandlers = buildHandlers([
       const body = (await request.json()) as { text: string };
       return HttpResponse.json({
         id: "12345",
-        text: body.text,
+        user: userFixture,
+        sentry_app: null,
         type: "note",
-        dateCreated: new Date().toISOString(),
+        data: {
+          text: body.text,
+        },
+        dateCreated: "2025-04-14T12:34:56.000Z",
       });
     },
   },
@@ -1163,6 +1272,70 @@ export const restHandlers = buildHandlers([
         headers: {
           "Content-Type": "image/png",
         },
+      });
+    },
+  },
+  // Scenario: metadata mimetype is stale "application/octet-stream" (pre-fix
+  // ingest or legacy attachment) but the download response returns the correct
+  // Content-Type. Validates that the MCP uses Step 2 (download header) over
+  // Step 1 (metadata), so the attachment is rendered as an image not a blob.
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/octet-stream-event-id/attachments/",
+    fetch: () =>
+      HttpResponse.json([
+        {
+          id: "456",
+          name: "screenshot.png",
+          type: "event.attachment",
+          size: 1024,
+          mimetype: "application/octet-stream",
+          dateCreated: "2025-04-08T21:15:04.000Z",
+          sha1: "abc123def456",
+          headers: { "Content-Type": "application/octet-stream" },
+        },
+      ]),
+  },
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/octet-stream-event-id/attachments/456/",
+    fetch: () => {
+      const mockBlob = new Blob(["fake image data"], { type: "image/png" });
+      return new HttpResponse(mockBlob, {
+        headers: {
+          "Content-Type": "image/png",
+        },
+      });
+    },
+  },
+  {
+    method: "get",
+    path: "/api/0/organizations/:organizationSlug/repos/",
+    fetch: () => {
+      return HttpResponse.json([
+        {
+          id: "101",
+          name: "getsentry/sentry",
+          provider: { id: "integrations:github", name: "GitHub" },
+          status: "active",
+          externalSlug: "getsentry/sentry",
+          externalId: "123456",
+          integrationId: "1",
+        },
+      ]);
+    },
+  },
+  {
+    method: "post",
+    path: "/api/0/projects/:organizationSlug/:projectSlug/repo/",
+    fetch: async ({ request }) => {
+      const body = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json({
+        id: "1",
+        projectId: "4509109104082945",
+        repositoryId: String((body?.repositoryId as string | number) || "101"),
+        source: "scm_onboarding",
+        created: true,
       });
     },
   },

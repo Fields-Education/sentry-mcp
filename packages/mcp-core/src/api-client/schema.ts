@@ -123,6 +123,35 @@ export const ProjectSchema = z
 
 export const ProjectListSchema = z.array(ProjectSchema);
 
+export const RepositorySchema = z
+  .object({
+    id: z.union([z.string(), z.number()]),
+    name: z.string(),
+    provider: z
+      .object({
+        id: z.string(),
+        name: z.string(),
+      })
+      .passthrough(),
+    status: z.string(),
+    externalSlug: z.string().optional(),
+    externalId: z.string().optional(),
+    integrationId: z.union([z.string(), z.number()]).nullable().optional(),
+  })
+  .passthrough();
+
+export const RepositoryListSchema = z.array(RepositorySchema);
+
+export const ProjectRepoLinkSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]),
+    projectId: z.union([z.string(), z.number()]),
+    repositoryId: z.union([z.string(), z.number()]),
+    source: z.string(),
+    created: z.boolean(),
+  })
+  .passthrough();
+
 const ReplayTagsSchema = z.preprocess(
   (value) => {
     if (value === undefined || value === null || Array.isArray(value)) {
@@ -295,6 +324,165 @@ export const ReleaseSchema = z.object({
 });
 
 export const ReleaseListSchema = z.array(ReleaseSchema);
+
+const ApiResourceIdSchema = z.union([z.string(), z.number()]);
+
+const ApiActorSchema = z
+  .object({
+    id: ApiResourceIdSchema.optional(),
+    name: z.string().nullable().optional(),
+    email: z.string().nullable().optional(),
+    username: z.string().nullable().optional(),
+    type: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+const ApiProjectRefSchema = z
+  .object({
+    id: ApiResourceIdSchema.optional(),
+    slug: z.string().nullable().optional(),
+    name: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+export const MonitorEnvironmentSchema = z
+  .object({
+    id: ApiResourceIdSchema.optional(),
+    name: z.string().nullable().optional(),
+    status: z.string().nullable().optional(),
+    dateCreated: z.string().datetime().nullable().optional(),
+    lastCheckIn: z.string().datetime().nullable().optional(),
+    nextCheckIn: z.string().datetime().nullable().optional(),
+    nextCheckInLatest: z.string().datetime().nullable().optional(),
+    isMuted: z.boolean().nullable().optional(),
+    activeIncident: z.record(z.string(), z.unknown()).nullable().optional(),
+  })
+  .passthrough();
+
+export const MonitorSchema = z
+  .object({
+    id: ApiResourceIdSchema.optional(),
+    slug: z.string(),
+    name: z.string().nullable().optional(),
+    status: z.string().nullable().optional(),
+    type: z.string().nullable().optional(),
+    isMuted: z.boolean().nullable().optional(),
+    isUpserting: z.boolean().nullable().optional(),
+    project: ApiProjectRefSchema.nullable().optional(),
+    owner: z.union([z.string(), ApiActorSchema]).nullable().optional(),
+    dateCreated: z.string().datetime().nullable().optional(),
+    nextCheckIn: z.string().datetime().nullable().optional(),
+    lastCheckIn: z.string().datetime().nullable().optional(),
+    config: z.record(z.string(), z.unknown()).nullable().optional(),
+    environments: z.array(MonitorEnvironmentSchema).optional(),
+    alertRule: z.record(z.string(), z.unknown()).optional(),
+  })
+  .passthrough();
+
+export const MonitorListSchema = z.array(MonitorSchema);
+
+export const MonitorCheckInSchema = z
+  .object({
+    id: ApiResourceIdSchema.optional(),
+    checkInId: z.string().nullable().optional(),
+    status: z.string().nullable().optional(),
+    duration: z.number().nullable().optional(),
+    dateCreated: z.string().datetime().nullable().optional(),
+    dateAdded: z.string().datetime().nullable().optional(),
+    dateUpdated: z.string().datetime().nullable().optional(),
+    dateInProgress: z.string().datetime().nullable().optional(),
+    dateClock: z.string().datetime().nullable().optional(),
+    expectedTime: z.string().datetime().nullable().optional(),
+    environment: z.string().nullable().optional(),
+    monitorConfig: z.record(z.string(), z.unknown()).optional(),
+    groups: z
+      .array(z.union([z.string(), z.record(z.string(), z.unknown())]))
+      .optional(),
+  })
+  .passthrough();
+
+export const MonitorCheckInListSchema = z.array(MonitorCheckInSchema);
+
+export const MonitorStatSchema = z
+  .object({
+    ts: z.number(),
+  })
+  .passthrough();
+
+export const MonitorStatsSchema = z.array(MonitorStatSchema);
+
+export const ReleaseDetailsSchema = ReleaseSchema.extend({
+  adoptionStages: z.unknown().optional(),
+  authors: z.array(ApiActorSchema).optional(),
+  commitCount: z.number().optional(),
+  currentProjectMeta: z.record(z.string(), z.unknown()).optional(),
+  deployCount: z.number().optional(),
+  lastDeploy: ReleaseSchema.shape.lastDeploy.optional(),
+  newGroups: z.number().optional(),
+  owner: ApiActorSchema.nullable().optional(),
+  projects: z.array(ReleaseProjectSchema).optional(),
+  refs: z.array(z.record(z.string(), z.unknown())).optional(),
+})
+  .partial()
+  .extend({
+    id: ApiResourceIdSchema,
+    version: z.string(),
+  })
+  .passthrough();
+
+export const DeploySchema = z
+  .object({
+    id: ApiResourceIdSchema,
+    environment: z.string().nullable().optional(),
+    name: z.string().nullable().optional(),
+    url: z.string().nullable().optional(),
+    dateStarted: z.string().datetime().nullable().optional(),
+    dateFinished: z.string().datetime().nullable().optional(),
+  })
+  .passthrough();
+
+export const DeployListSchema = z.array(DeploySchema);
+
+export const CommitSchema = z
+  .object({
+    id: ApiResourceIdSchema,
+    message: z.string().nullable().optional(),
+    dateCreated: z.string().datetime().nullable().optional(),
+    pullRequest: z.record(z.string(), z.unknown()).nullable().optional(),
+    suspectCommitType: z.string().optional(),
+    author: ApiActorSchema.nullable().optional(),
+    repository: z
+      .object({
+        name: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+  })
+  .passthrough();
+
+export const CommitListSchema = z.array(CommitSchema);
+
+export const IssueActivitySchema = z
+  .object({
+    id: ApiResourceIdSchema,
+    type: z.string().nullable().optional(),
+    dateCreated: z.string().datetime().nullable().optional(),
+    user: ApiActorSchema.nullable().optional(),
+    sentry_app: z.record(z.string(), z.unknown()).nullable().optional(),
+    data: z.record(z.string(), z.unknown()).nullable().optional(),
+  })
+  .passthrough();
+
+export const IssueActivityListResponseSchema = z.object({
+  activity: z.array(IssueActivitySchema),
+});
+
+export const IssueCommentSchema = IssueActivitySchema.extend({
+  type: z.string().nullable().optional(),
+});
+
+export const IssueCommentListSchema = z.array(IssueCommentSchema);
 
 /**
  * Organization tag lists are backed by `TagKeySerializerResponse`, which only
@@ -747,127 +935,60 @@ export const AutofixRunSchema = z
   })
   .passthrough();
 
+// Run statuses from Sentry's `SeerRunState` (`seer/agent/client_models.py`).
 const AutofixStatusSchema = z.enum([
-  "PENDING",
-  "PROCESSING",
-  "IN_PROGRESS",
-  "NEED_MORE_INFORMATION",
-  "COMPLETED",
-  "FAILED",
-  "ERROR",
-  "CANCELLED",
-  "WAITING_FOR_USER_RESPONSE",
+  "processing",
+  "completed",
+  "error",
+  "awaiting_user_input",
 ]);
 
-const AutofixRunStepBaseSchema = z.object({
-  type: z.string(),
-  key: z.string(),
-  index: z.number(),
-  status: AutofixStatusSchema,
-  title: z.string(),
-  output_stream: z.string().nullable(),
-  progress: z.array(
-    z.object({
-      data: z.unknown().nullable(),
-      message: z.string(),
-      timestamp: z.string(),
-      type: z.enum(["INFO", "WARNING", "ERROR"]),
-    }),
-  ),
-});
+const AutofixArtifactSchema = z
+  .object({
+    key: z.string(),
+    data: z.record(z.string(), z.unknown()).nullable().default(null),
+  })
+  .passthrough();
 
-export const AutofixRunStepDefaultSchema = AutofixRunStepBaseSchema.extend({
-  type: z.literal("default"),
-  insights: z
-    .array(
-      z.object({
-        change_diff: z.unknown().nullable(),
-        generated_at_memory_index: z.number(),
-        insight: z.string(),
-        justification: z.string(),
-        type: z.literal("insight"),
-      }),
-    )
-    .nullable(),
-}).passthrough();
+const AutofixTodoSchema = z
+  .object({
+    content: z.string(),
+    status: z.string(),
+  })
+  .passthrough();
 
-export const AutofixRunStepRootCauseAnalysisSchema =
-  AutofixRunStepBaseSchema.extend({
-    type: z.literal("root_cause_analysis"),
-    causes: z.array(
-      z.object({
-        description: z.string(),
-        id: z.number(),
-        root_cause_reproduction: z.array(
-          z.object({
-            code_snippet_and_analysis: z.string(),
-            is_most_important_event: z.boolean(),
-            relevant_code_file: z
-              .object({
-                file_path: z.string(),
-                repo_name: z.string(),
-              })
-              .nullable(),
-            timeline_item_type: z.string(),
-            title: z.string(),
-          }),
-        ),
-      }),
-    ),
-  }).passthrough();
-
-export const AutofixRunStepSolutionSchema = AutofixRunStepBaseSchema.extend({
-  type: z.literal("solution"),
-  solution: z.array(
-    z.object({
-      code_snippet_and_analysis: z.string().nullable(),
-      is_active: z.boolean(),
-      is_most_important_event: z.boolean(),
-      relevant_code_file: z.null(),
-      timeline_item_type: z.union([
-        z.literal("internal_code"),
-        z.literal("repro_test"),
-      ]),
-      title: z.string(),
-    }),
-  ),
-}).passthrough();
-
-export const AutofixRunStepSchema = z.union([
-  AutofixRunStepDefaultSchema,
-  AutofixRunStepRootCauseAnalysisSchema,
-  AutofixRunStepSolutionSchema,
-  AutofixRunStepBaseSchema.passthrough(),
-]);
+// Agent memory blocks (Sentry's `MemoryBlock`). Analysis content arrives as
+// artifacts keyed "root_cause" and "solution"; only what we render is modeled.
+const AutofixBlockSchema = z
+  .object({
+    artifacts: z.array(AutofixArtifactSchema).default([]),
+    todos: z.array(AutofixTodoSchema).nullable().optional(),
+  })
+  .passthrough();
 
 /**
- * The Seer autofix GET endpoint is explicitly experimental and currently has
- * two materially different payload shapes:
- * - legacy `get_autofix_state(...).dict()` responses with `request` and `steps`
- * - explorer responses with `blocks`, `pending_user_input`, and coding-agent
- *   metadata but no `steps`
- *
- * We normalize missing `steps` to `[]` so existing formatting code keeps
- * working even if the server returns the explorer shape.
+ * The Seer autofix GET endpoint is explicitly experimental. It returns the
+ * agent-based run state (`blocks`, `pending_user_input`, coding-agent
+ * metadata).
  *
  * Upstream source of truth in getsentry/sentry:
  * - `src/sentry/seer/endpoints/group_ai_autofix.py`
- * - `src/sentry/seer/autofix/types.py` (`AutofixStateResponse`)
+ * - `src/sentry/seer/agent/client_models.py` (`SeerRunState`)
  */
 export const AutofixRunStateSchema = z.object({
   autofix: z
     .object({
       run_id: z.number(),
-      request: z.unknown().optional(),
       updated_at: z.string().nullable().optional(),
       status: AutofixStatusSchema,
-      steps: z.preprocess(
-        (value) => value ?? [],
-        z.array(AutofixRunStepSchema),
-      ),
-      blocks: z.array(z.unknown()).optional(),
+      blocks: z.array(AutofixBlockSchema).default([]),
       pending_user_input: z.unknown().nullable().optional(),
-      repo_pr_states: z.record(z.string(), z.unknown()).optional(),
+      repo_pr_states: z
+        .record(
+          z.string(),
+          z.object({ pr_url: z.string().nullable().optional() }).passthrough(),
+        )
+        .optional(),
       coding_agents: z.record(z.string(), z.unknown()).optional(),
     })
     .passthrough()
@@ -955,19 +1076,40 @@ export const ExternalIssueListSchema = z.array(ExternalIssueSchema);
  * Upstream source of truth in getsentry/sentry:
  * - `src/sentry/api/endpoints/organization_trace_meta.py`
  */
-export const TraceMetaSchema = z.object({
-  logs: z.number(),
-  errors: z.number(),
-  performance_issues: z.number(),
-  span_count: z.number(),
-  transaction_child_count_map: z.array(
-    z.object({
-      "transaction.event_id": z.string().nullable(),
-      "count()": z.number(),
-    }),
-  ),
-  span_count_map: z.record(z.string(), z.number()),
+const TraceMetaTransactionChildCountSchema = z.object({
+  "transaction.event_id": z.string().nullable(),
+  "count()": z.number(),
 });
+
+export const TraceMetaSchema = z
+  .object({
+    logs: z.number().optional(),
+    errors: z.number().optional(),
+    performance_issues: z.number().optional(),
+    span_count: z.number().optional(),
+    transaction_child_count_map: z
+      .array(TraceMetaTransactionChildCountSchema)
+      .optional(),
+    span_count_map: z.record(z.string(), z.number()).optional(),
+    logsCount: z.number().optional(),
+    errorsCount: z.number().optional(),
+    performanceIssuesCount: z.number().optional(),
+    spansCount: z.number().optional(),
+    transactionChildCountMap: z
+      .array(TraceMetaTransactionChildCountSchema)
+      .optional(),
+    spansCountMap: z.record(z.string(), z.number()).optional(),
+  })
+  .transform((meta) => ({
+    logs: meta.logs ?? meta.logsCount ?? 0,
+    errors: meta.errors ?? meta.errorsCount ?? 0,
+    performance_issues:
+      meta.performance_issues ?? meta.performanceIssuesCount ?? 0,
+    span_count: meta.span_count ?? meta.spansCount ?? 0,
+    transaction_child_count_map:
+      meta.transaction_child_count_map ?? meta.transactionChildCountMap ?? [],
+    span_count_map: meta.span_count_map ?? meta.spansCountMap ?? {},
+  }));
 
 /**
  * Schema for individual spans within a trace.

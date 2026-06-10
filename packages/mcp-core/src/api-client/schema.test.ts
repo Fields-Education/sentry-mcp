@@ -21,6 +21,7 @@ import {
   ReleaseSchema,
   ReplayDetailsSchema,
   TagSchema,
+  TraceMetaSchema,
   TransactionProfileSampleSchema,
   TransactionProfileSchema,
 } from "./schema";
@@ -606,6 +607,53 @@ describe("TagSchema", () => {
   });
 });
 
+describe("TraceMetaSchema", () => {
+  it("defaults missing trace metadata counts and maps", () => {
+    expect(TraceMetaSchema.parse({})).toEqual({
+      logs: 0,
+      errors: 0,
+      performance_issues: 0,
+      span_count: 0,
+      transaction_child_count_map: [],
+      span_count_map: {},
+    });
+  });
+
+  it("normalizes current trace-meta response keys", () => {
+    expect(
+      TraceMetaSchema.parse({
+        logsCount: 3,
+        errorsCount: 2,
+        performanceIssuesCount: 1,
+        spansCount: 4,
+        transactionChildCountMap: [
+          {
+            "transaction.event_id": "0daf40dc453a429c8c57e4c215c4e82c",
+            "count()": 4,
+          },
+        ],
+        spansCountMap: {
+          "http.client": 4,
+        },
+      }),
+    ).toEqual({
+      logs: 3,
+      errors: 2,
+      performance_issues: 1,
+      span_count: 4,
+      transaction_child_count_map: [
+        {
+          "transaction.event_id": "0daf40dc453a429c8c57e4c215c4e82c",
+          "count()": 4,
+        },
+      ],
+      span_count_map: {
+        "http.client": 4,
+      },
+    });
+  });
+});
+
 describe("AutofixRunSchema", () => {
   it("accepts the numeric run_id returned by the autofix POST endpoint", () => {
     const run = AutofixRunSchema.parse({ run_id: 123 });
@@ -615,21 +663,14 @@ describe("AutofixRunSchema", () => {
 });
 
 describe("AutofixRunStateSchema", () => {
-  it("accepts explorer-style autofix state without legacy steps", () => {
+  it("accepts agent-based autofix state without legacy steps", () => {
     const state = AutofixRunStateSchema.parse(autofixStateExplorerFixture);
 
-    expect(state.autofix?.steps).toEqual([]);
-    expect(state.autofix?.blocks).toEqual([
-      {
-        type: "root_cause",
-        title: "Investigate failing request",
-        status: "COMPLETED",
-      },
-      {
-        type: "solution",
-        title: "Draft fix plan",
-        status: "IN_PROGRESS",
-      },
+    expect(state.autofix?.status).toBe("processing");
+    expect(state.autofix?.blocks).toHaveLength(1);
+    expect(state.autofix?.blocks[0].todos).toEqual([
+      { content: "Investigate failing request", status: "completed" },
+      { content: "Draft fix plan", status: "in_progress" },
     ]);
   });
 });

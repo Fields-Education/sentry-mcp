@@ -20,11 +20,7 @@ import type { ServerOptions } from "@modelcontextprotocol/sdk/server/index.js";
  * ```
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import type {
-  ServerNotification,
-  ServerRequest,
-} from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   type SpanAttributeValue,
   getActiveSpan,
@@ -34,24 +30,33 @@ import {
 } from "@sentry/core";
 import { isApiAuthenticationErrorDeep } from "./api-client";
 import { MCP_SERVER_NAME } from "./constants";
-import {
-  getConstraintKeysToFilter,
-  getConstraintParametersToInject,
-} from "./internal/constraint-helpers";
 import { formatErrorForUser } from "./internal/error-handling";
-import { type Skill, isEnabledBySkills } from "./skills";
+import type { Skill } from "./skills";
 import { type LogIssueOptions, logIssue } from "./telem/logging";
-import tools from "./tools/index";
 import {
-  type ToolConfig,
-  isToolVisibleInMode,
-  resolveDescription,
-} from "./tools/types";
-import type { ProjectCapabilities, ServerContext } from "./types";
+  type RegisteredToolHandlerExtra,
+  type ToolRegistry,
+  executeToolHandler,
+  getFilteredInputSchema,
+  getAvailableTools,
+  injectConstraintParams,
+  resolveToolDescription,
+} from "./tools/catalog-runtime/availability";
+import tools from "./tools/index";
+import type { ServerContext } from "./types";
 import { LIB_VERSION } from "./version";
 
 function getSkillGrantedAttributeName(skill: Skill): string {
   return `app.consent.skill.${skill.replaceAll("-", "_")}.granted`;
+}
+
+function isCallToolResult(output: unknown): output is CallToolResult {
+  return (
+    !!output &&
+    typeof output === "object" &&
+    !Array.isArray(output) &&
+    Array.isArray((output as { content?: unknown }).content)
+  );
 }
 
 /**
@@ -105,7 +110,7 @@ export function buildServer({
   context: ServerContext;
   agentMode?: boolean;
   experimentalMode?: boolean;
-  tools?: Record<string, ToolConfig<any>>;
+  tools?: ToolRegistry;
   /**
    * JSON Schema validator for MCP protocol validation.
    *
@@ -127,9 +132,15 @@ export function buildServer({
     { jsonSchemaValidator },
   );
 
+  const contextWithModes: ServerContext = {
+    ...context,
+    agentMode,
+    experimentalMode,
+  };
+
   configureServer({
     server,
-    context,
+    context: contextWithModes,
     agentMode,
     experimentalMode,
     tools: customTools,
@@ -158,26 +169,11 @@ function configureServer({
   context: ServerContext;
   agentMode?: boolean;
   experimentalMode?: boolean;
-  tools?: Record<string, ToolConfig<any>>;
+  tools?: ToolRegistry;
 }) {
-  // Determine which tools to register:
-  // - Agent mode: only use_sentry
-  // - Custom tools provided: use those
-  // - Default: all standard tools
-  let toolsToRegister = agentMode
+  const registry: ToolRegistry = agentMode
     ? { use_sentry: tools.use_sentry }
     : (customTools ?? tools);
-
-  // Filter tools based on public visibility and experimental mode
-  // (applies to all tools, including custom)
-  // Skip in agent mode (use_sentry handles filtering internally)
-  if (!agentMode) {
-    toolsToRegister = Object.fromEntries(
-      Object.entries(toolsToRegister).filter(([, tool]) =>
-        isToolVisibleInMode(tool, experimentalMode),
-      ),
-    ) as typeof toolsToRegister;
-  }
 
   // Get granted skills from context for tool filtering
   const grantedSkills: Set<Skill> | undefined = context.grantedSkills
@@ -186,6 +182,25 @@ function configureServer({
   const grantedSkillIds = grantedSkills
     ? Array.from(grantedSkills).sort()
     : undefined;
+  const availableTools = getAvailableTools({
+    tools: registry,
+    context,
+    agentMode,
+    experimentalMode,
+    useDefaultSurfacePolicy: !customTools || agentMode,
+  });
+  const toolsToRegister = agentMode
+    ? availableTools
+    : availableTools.filter(({ isTopLevel }) => isTopLevel);
+  const contextWithToolAvailability: ServerContext = {
+    ...context,
+    availableToolNames: new Set(
+      availableTools.flatMap(({ key, tool }) => [key, tool.name]),
+    ),
+    directToolNames: new Set(
+      toolsToRegister.flatMap(({ key, tool }) => [key, tool.name]),
+    ),
+  };
 
   server.server.onerror = (error) => {
     const transportLogOptions: LogIssueOptions = {
@@ -200,106 +215,41 @@ function configureServer({
     logIssue(error, transportLogOptions);
   };
 
-  for (const [toolKey, tool] of Object.entries(toolsToRegister)) {
-    /**
-     * Skills-Based Authorization
-     * ==========================
-     *
-     * Tools are filtered at registration time based on grantedSkills.
-     * Tool must have non-empty `skills` array to be exposed.
-     * Empty `skills: []` means intentionally excluded from skills system.
-     *
-     * In agent mode, authorization is skipped - use_sentry handles it internally.
-     *
-     * ## Examples:
-     *    ```typescript
-     *    // Tool belongs to "triage" skill only:
-     *    { skills: ["triage"] }
-     *
-     *    // Tool belongs to ALL skills (foundational tool like whoami):
-     *    { skills: ALL_SKILLS }
-     *
-     *    // Tool excluded from skills system (like use_sentry in agent mode):
-     *    { skills: [] }
-     *    ```
-     */
-    let allowed = false;
-
-    // In agent mode, skip authorization - use_sentry handles it internally
-    if (agentMode) {
-      allowed = true;
-    }
-    // Skills system: tool must have non-empty skills to be exposed
-    else if (grantedSkills) {
-      if (tool.skills && tool.skills.length > 0) {
-        allowed = isEnabledBySkills(grantedSkills, tool.skills);
-      }
-      // Empty skills means NOT exposed via skills system
-    }
-
-    // Skip tool if not allowed by active authorization system
-    if (!allowed) {
-      continue;
-    }
-
-    // Skip list tools when context is constrained to a specific tenant/project
-    // When organizationSlug is constrained, find_organizations is not useful
-    // When projectSlug is constrained, find_projects is not useful
-    if (
-      (toolKey === "find_organizations" &&
-        context.constraints.organizationSlug) ||
-      (toolKey === "find_projects" && context.constraints.projectSlug)
-    ) {
-      continue;
-    }
-
-    // Skip tools when project lacks required capabilities (experimental)
-    // Fail-open: if capabilities are unknown, show all tools
-    if (
-      experimentalMode &&
-      context.constraints.projectSlug &&
-      context.constraints.projectCapabilities &&
-      tool.requiredCapabilities?.length
-    ) {
-      const caps = context.constraints.projectCapabilities;
-      const hasAllCapabilities = tool.requiredCapabilities.every(
-        (cap: keyof ProjectCapabilities) => caps[cap] === true,
-      );
-      if (!hasAllCapabilities) {
-        continue;
-      }
-    }
-
-    // Filter out constraint parameters from schema that will be auto-injected
-    // Only filter parameters that are ACTUALLY constrained in the current context
-    // to avoid breaking tools when constraints are not set
-    const constraintKeysToFilter = new Set(
-      getConstraintKeysToFilter(context.constraints, tool.inputSchema),
+  for (const { tool } of toolsToRegister) {
+    const filteredInputSchema = getFilteredInputSchema(
+      tool,
+      contextWithToolAvailability,
     );
-    const filteredInputSchema = Object.fromEntries(
-      Object.entries(tool.inputSchema).filter(
-        ([key]) => !constraintKeysToFilter.has(key),
-      ),
-    ) as typeof tool.inputSchema;
-
-    // Resolve dynamic descriptions based on server context
-    const resolvedDescription = resolveDescription(tool.description, {
+    const resolvedDescription = resolveToolDescription(tool, {
       experimentalMode,
+      availableToolNames: contextWithToolAvailability.availableToolNames,
+      directToolNames: contextWithToolAvailability.directToolNames,
     });
 
-    server.tool(
+    server.registerTool(
       tool.name,
-      resolvedDescription,
-      filteredInputSchema,
-      tool.annotations,
-      async (
-        params: any,
-        extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
-      ) => {
+      {
+        description: resolvedDescription,
+        inputSchema: filteredInputSchema,
+        outputSchema: tool.outputSchema,
+        annotations: tool.annotations,
+      },
+      async (params: unknown, extra: RegisteredToolHandlerExtra) => {
         // Get the active MCP server span and attach request-scoped attributes.
         const activeSpan = getActiveSpan();
 
         if (activeSpan) {
+          activeSpan.setAttribute("app.server.mode.agent", agentMode);
+          activeSpan.setAttribute(
+            "app.server.mode.experimental",
+            experimentalMode,
+          );
+          if (context.transport) {
+            activeSpan.setAttribute("app.transport", context.transport);
+          }
+          if (context.clientFamily) {
+            activeSpan.setAttribute("app.client.family", context.clientFamily);
+          }
           if (context.constraints.organizationSlug) {
             activeSpan.setAttribute(
               "app.constraint.organization_slug",
@@ -334,22 +284,26 @@ function configureServer({
         if (context.clientId) {
           setTag("client.id", context.clientId);
         }
-        setTag("mode.agent", agentMode);
-        setTag("mode.experimental", experimentalMode);
+        if (context.clientFamily) {
+          setTag("app.client.family", context.clientFamily);
+        }
+        if (context.transport) {
+          setTag("app.transport", context.transport);
+        }
+        setTag("app.server.mode.agent", agentMode);
+        setTag("app.server.mode.experimental", experimentalMode);
 
         try {
+          const rawParams =
+            params && typeof params === "object" && !Array.isArray(params)
+              ? (params as Record<string, unknown>)
+              : {};
           // Apply constraints as parameters, handling aliases (e.g., projectSlug → projectSlugOrId)
-          const applicableConstraints = getConstraintParametersToInject(
-            context.constraints,
-            tool.inputSchema,
+          const paramsWithConstraints = injectConstraintParams(
+            rawParams,
+            tool,
+            contextWithToolAvailability,
           );
-
-          // Constraints override raw tool arguments. String constraint fields are
-          // also removed from tool schemas and re-injected (see getConstraintKeysToFilter).
-          const paramsWithConstraints = {
-            ...params,
-            ...applicableConstraints,
-          } as Record<string, unknown>;
 
           if (activeSpan) {
             // Intentional GenAI semconv extension: per-key attrs like http.request.header.<key>.
@@ -365,7 +319,11 @@ function configureServer({
             }
           }
 
-          const output = await tool.handler(paramsWithConstraints, context);
+          const output = await executeToolHandler({
+            tool,
+            params: rawParams,
+            context: contextWithToolAvailability,
+          });
 
           if (activeSpan) {
             activeSpan.setStatus({
@@ -389,6 +347,11 @@ function configureServer({
             return {
               content: output,
             };
+          }
+          // Some tools return a full MCP CallToolResult so they can expose
+          // structuredContent alongside a text fallback.
+          if (isCallToolResult(output)) {
+            return output;
           }
           throw new Error(`Invalid tool output: ${output}`);
         } catch (error) {

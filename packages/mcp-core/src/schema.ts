@@ -24,7 +24,7 @@ export const ParamTeamSlug = z
   .trim()
   .superRefine(validateSlug)
   .describe(
-    "The team's slug. You can find a list of existing teams in an organization using the `find_teams()` tool.",
+    "The team's slug. You can find a list of existing teams in an organization with the Sentry tool `find_teams`.",
   );
 
 export const ParamProjectSlug = z
@@ -159,7 +159,7 @@ export const ParamAssignedTo = z
   .string()
   .trim()
   .describe(
-    "The assignee in format 'user:ID' or 'team:ID_OR_SLUG' where ID is numeric. Example: 'user:123456', 'team:789', or 'team:my-team-slug'. Use the whoami tool to find your user ID.",
+    "The assignee in format 'user:ID' or 'team:ID_OR_SLUG' where ID is numeric. Example: 'user:123456', 'team:789', or 'team:my-team-slug'. Use `execute_tool(name='whoami', arguments={})` to find your user ID.",
   );
 
 export const ParamIgnoreDurationMinutes = z

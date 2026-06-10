@@ -1,6 +1,6 @@
 {
   "name": "@fields/mcp-cloudflare",
-  "version": "0.28.0",
+  "version": "0.36.0",
   "private": true,
   "type": "module",
   "license": "FSL-1.1-ALv2",
@@ -8,7 +8,7 @@
   "files": ["./dist/*"],
   "exports": {
     ".": {
-      "types": "./dist/index.ts",
+      "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     }
   },
@@ -27,6 +27,7 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.13.15",
+    "@cloudflare/vitest-pool-workers": "catalog:",
     "@cloudflare/workers-types": "catalog:",
     "@sentry/mcp-core": "workspace:*",
     "@sentry/mcp-server-mocks": "workspace:*",
@@ -42,9 +43,11 @@
     "urlpattern-polyfill": "^10.1.0",
     "vite": "catalog:",
     "vitest": "catalog:",
-    "wrangler": "^4.45.0"
+    "miniflare": "catalog:",
+    "wrangler": "4.80.0"
   },
   "dependencies": {
+    "@ai-sdk/mcp": "catalog:",
     "@ai-sdk/openai": "catalog:",
     "@ai-sdk/react": "catalog:",
     "@cloudflare/workers-oauth-provider": "catalog:",

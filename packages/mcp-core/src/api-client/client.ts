@@ -4,6 +4,7 @@ import {
   getAIConversationUrl as getAIConversationUrlUtil,
   getIssueUrl as getIssueUrlUtil,
   getMonitorUrl as getMonitorUrlUtil,
+  getPreprodSnapshotUrl as getPreprodSnapshotUrlUtil,
   getProfileUrl as getProfileUrlUtil,
   getProfilingExplorerUrl,
   getReleaseUrl as getReleaseUrlUtil,
@@ -14,6 +15,7 @@ import {
   isSentryHost,
   type TraceMetricIdentifier,
 } from "../utils/url-utils";
+import { isNumericId } from "../utils/slug-validation";
 import {
   isMetricsDataset,
   isProfilesDataset,
@@ -28,8 +30,20 @@ import {
   TeamListSchema,
   TeamSchema,
   ProjectListSchema,
+  ProjectRepoLinkSchema,
   ProjectSchema,
+  CommitListSchema,
+  DeployListSchema,
+  MonitorCheckInListSchema,
+  MonitorListSchema,
+  MonitorSchema,
+  MonitorStatsSchema,
+  RepositoryListSchema,
+  ReleaseDetailsSchema,
   ReleaseListSchema,
+  IssueActivityListResponseSchema,
+  IssueCommentListSchema,
+  IssueCommentSchema,
   IssueListSchema,
   IssueSchema,
   IssueTagValuesSchema,
@@ -69,12 +83,22 @@ import type {
   EventAttachment,
   EventAttachmentList,
   Issue,
+  IssueActivityList,
+  IssueComment,
+  IssueCommentList,
   IssueList,
   IssueTagValues,
   ExternalIssueList,
+  CommitList,
+  DeployList,
+  Monitor,
+  MonitorCheckInList,
+  MonitorList,
+  MonitorStats,
   OrganizationList,
   Project,
   ProjectList,
+  ReleaseDetails,
   ReleaseList,
   TagList,
   Team,
@@ -105,6 +129,27 @@ const NETWORK_ERROR_MESSAGES: Record<string, string> = {
   ETIMEDOUT: "Connection timed out. Check network connectivity.",
   ECONNRESET: "Connection reset. Try again in a moment.",
 };
+
+function normalizeStatsPeriod(statsPeriod?: string): string | undefined {
+  const normalized = statsPeriod?.trim();
+  return normalized || undefined;
+}
+
+function parseStatsPeriod(statsPeriod: string): {
+  amount: number;
+  unit: string;
+} {
+  const match = /^(\d+)([smhdw])$/.exec(statsPeriod);
+  if (!match) {
+    throw new ApiValidationError(
+      "statsPeriod must use a supported relative time format, such as `24h`, `7d`, or `2w`.",
+    );
+  }
+  return {
+    amount: Number(match[1]),
+    unit: match[2],
+  };
+}
 
 function getNextCursor(linkHeader: string | null): string | null {
   if (!linkHeader) {
@@ -287,6 +332,7 @@ export class SentryApiService {
   private accessToken: string | null;
   private clientId: string | null;
   private clientName: string | null;
+  private clientFamily: string | null;
   protected host: string;
   protected protocol: SentryProtocol;
   protected apiPrefix: string;
@@ -301,6 +347,7 @@ export class SentryApiService {
    * @param config.host Sentry hostname (e.g. "sentry.io", "sentry.example.com")
    * @param config.clientId DCR-registered OAuth client ID
    * @param config.clientName DCR-registered OAuth client name
+   * @param config.clientFamily Bucketed client family (e.g. "claude-code", "cursor")
    */
   constructor({
     accessToken = null,
@@ -308,16 +355,19 @@ export class SentryApiService {
     protocol = "https",
     clientId = null,
     clientName = null,
+    clientFamily = null,
   }: {
     accessToken?: string | null;
     host?: string;
     protocol?: SentryProtocol;
     clientId?: string | null;
     clientName?: string | null;
+    clientFamily?: string | null;
   }) {
     this.accessToken = accessToken;
     this.clientId = clientId;
     this.clientName = clientName;
+    this.clientFamily = clientFamily;
     this.host = host;
     this.protocol = protocol;
     this.apiPrefix = `${protocol}://${host}/api/0`;
@@ -384,6 +434,73 @@ export class SentryApiService {
     }
   }
 
+  private applyStatsMixinTimeParams(
+    queryParams: URLSearchParams,
+    statsPeriod?: string,
+    start?: string,
+    end?: string,
+    resolutionSeconds?: number,
+  ): void {
+    if (statsPeriod && (start || end)) {
+      throw new ApiValidationError(
+        "Cannot use both statsPeriod and start/end parameters. Use either statsPeriod for relative time or start/end for absolute time.",
+      );
+    }
+    if ((start && !end) || (!start && end)) {
+      throw new ApiValidationError(
+        "Both start and end parameters must be provided together for absolute time ranges.",
+      );
+    }
+
+    let since: number;
+    let until: number;
+
+    if (start && end) {
+      const startMs = Date.parse(start);
+      const endMs = Date.parse(end);
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+        throw new ApiValidationError(
+          "start and end parameters must be valid ISO 8601 date strings.",
+        );
+      }
+      since = Math.floor(startMs / 1000);
+      until = Math.floor(endMs / 1000);
+    } else {
+      const period = statsPeriod ?? "24h";
+      const { amount, unit } = parseStatsPeriod(period);
+      let unitSeconds: number;
+      switch (unit) {
+        case "s":
+          unitSeconds = 1;
+          break;
+        case "m":
+          unitSeconds = 60;
+          break;
+        case "h":
+          unitSeconds = 60 * 60;
+          break;
+        case "d":
+          unitSeconds = 60 * 60 * 24;
+          break;
+        case "w":
+          unitSeconds = 60 * 60 * 24 * 7;
+          break;
+        default:
+          throw new ApiValidationError(
+            "statsPeriod must use a supported relative time format, such as `24h`, `7d`, or `2w`.",
+          );
+      }
+      until = Math.floor(Date.now() / 1000);
+      since = until - amount * unitSeconds;
+    }
+
+    queryParams.set("since", String(since));
+    queryParams.set("until", String(until));
+    if (resolutionSeconds !== undefined) {
+      queryParams.set("resolution", `${resolutionSeconds}s`);
+    }
+  }
+
   /**
    * Internal method for making authenticated requests to Sentry API.
    *
@@ -421,6 +538,9 @@ export class SentryApiService {
     }
     if (this.clientName) {
       headers["X-Sentry-MCP-Client-Name"] = this.clientName;
+    }
+    if (this.clientFamily) {
+      headers["X-Sentry-MCP-Client-Family"] = this.clientFamily;
     }
 
     // Check if fetch is available, otherwise provide a helpful error message
@@ -739,12 +859,17 @@ export class SentryApiService {
     );
   }
 
-  getMonitorUrl(organizationSlug: string, monitorSlug: string): string {
+  getMonitorUrl(
+    organizationSlug: string,
+    monitorSlug: string,
+    projectSlug?: string,
+  ): string {
     return getMonitorUrlUtil(
       this.host,
       organizationSlug,
       monitorSlug,
       this.protocol,
+      projectSlug,
     );
   }
 
@@ -1439,6 +1564,49 @@ export class SentryApiService {
     return ProjectSchema.parse(body);
   }
 
+  async listRepos(
+    {
+      organizationSlug,
+      query,
+    }: {
+      organizationSlug: string;
+      query?: string;
+    },
+    opts?: RequestOptions,
+  ) {
+    const params = new URLSearchParams();
+    if (query) {
+      params.set("query", query);
+    }
+    const qs = params.toString();
+    const url = `/organizations/${organizationSlug}/repos/${qs ? `?${qs}` : ""}`;
+    const body = await this.requestJSON(url, { method: "GET" }, opts);
+    return RepositoryListSchema.parse(body);
+  }
+
+  async linkProjectRepo(
+    {
+      organizationSlug,
+      projectSlug,
+      repositoryId,
+    }: {
+      organizationSlug: string;
+      projectSlug: string;
+      repositoryId: number | string;
+    },
+    opts?: RequestOptions,
+  ) {
+    const body = await this.requestJSON(
+      `/projects/${organizationSlug}/${projectSlug}/repo/`,
+      {
+        method: "POST",
+        body: JSON.stringify({ repositoryId }),
+      },
+      opts,
+    );
+    return ProjectRepoLinkSchema.parse(body);
+  }
+
   /**
    * Assigns a team to a project.
    *
@@ -1595,6 +1763,277 @@ export class SentryApiService {
       opts,
     );
     return ReleaseListSchema.parse(body);
+  }
+
+  async getReleaseDetails(
+    {
+      organizationSlug,
+      releaseVersion,
+      projectSlugOrId,
+      includeHealth,
+    }: {
+      organizationSlug: string;
+      releaseVersion: string;
+      projectSlugOrId?: string;
+      includeHealth?: boolean;
+    },
+    opts?: RequestOptions,
+  ): Promise<ReleaseDetails> {
+    const searchQuery = new URLSearchParams();
+    if (includeHealth) {
+      searchQuery.set("health", "1");
+    }
+
+    const encodedVersion = encodeURIComponent(releaseVersion);
+    const path = projectSlugOrId
+      ? `/projects/${organizationSlug}/${projectSlugOrId}/releases/${encodedVersion}/`
+      : `/organizations/${organizationSlug}/releases/${encodedVersion}/`;
+    const body = await this.requestJSON(
+      searchQuery.toString() ? `${path}?${searchQuery.toString()}` : path,
+      undefined,
+      opts,
+    );
+    return ReleaseDetailsSchema.parse(body);
+  }
+
+  async listReleaseDeploys(
+    {
+      organizationSlug,
+      releaseVersion,
+      projectSlugOrId,
+      limit,
+    }: {
+      organizationSlug: string;
+      releaseVersion: string;
+      projectSlugOrId?: string;
+      limit?: number;
+    },
+    opts?: RequestOptions,
+  ): Promise<DeployList> {
+    const searchQuery = new URLSearchParams();
+    if (projectSlugOrId) {
+      searchQuery.set(
+        isNumericId(projectSlugOrId) ? "project" : "projectSlug",
+        projectSlugOrId,
+      );
+    }
+    if (limit !== undefined) {
+      searchQuery.set("per_page", String(limit));
+    }
+
+    const encodedVersion = encodeURIComponent(releaseVersion);
+    const path = `/organizations/${organizationSlug}/releases/${encodedVersion}/deploys/`;
+    const body = await this.requestJSON(
+      searchQuery.toString() ? `${path}?${searchQuery.toString()}` : path,
+      undefined,
+      opts,
+    );
+    return DeployListSchema.parse(body);
+  }
+
+  async listReleaseCommits(
+    {
+      organizationSlug,
+      releaseVersion,
+      projectSlugOrId,
+      limit,
+    }: {
+      organizationSlug: string;
+      releaseVersion: string;
+      projectSlugOrId?: string;
+      limit?: number;
+    },
+    opts?: RequestOptions,
+  ): Promise<CommitList> {
+    const searchQuery = new URLSearchParams();
+    if (limit !== undefined) {
+      searchQuery.set("per_page", String(limit));
+    }
+
+    const encodedVersion = encodeURIComponent(releaseVersion);
+    const path = projectSlugOrId
+      ? `/projects/${organizationSlug}/${projectSlugOrId}/releases/${encodedVersion}/commits/`
+      : `/organizations/${organizationSlug}/releases/${encodedVersion}/commits/`;
+    const body = await this.requestJSON(
+      searchQuery.toString() ? `${path}?${searchQuery.toString()}` : path,
+      undefined,
+      opts,
+    );
+    return CommitListSchema.parse(body);
+  }
+
+  async listMonitors(
+    {
+      organizationSlug,
+      projectSlug,
+      environment,
+      owner,
+      query,
+      limit,
+    }: {
+      organizationSlug: string;
+      projectSlug?: string;
+      environment?: string;
+      owner?: string;
+      query?: string;
+      limit?: number;
+    },
+    opts?: RequestOptions,
+  ): Promise<MonitorList> {
+    const searchQuery = new URLSearchParams();
+    if (projectSlug) {
+      searchQuery.append("projectSlug", projectSlug);
+    }
+    if (environment) {
+      searchQuery.append("environment", environment);
+    }
+    if (owner) {
+      searchQuery.append("owner", owner);
+    }
+    if (query) {
+      searchQuery.set("query", query);
+    }
+    if (limit !== undefined) {
+      searchQuery.set("per_page", String(limit));
+    }
+
+    const body = await this.requestJSON(
+      searchQuery.toString()
+        ? `/organizations/${organizationSlug}/monitors/?${searchQuery.toString()}`
+        : `/organizations/${organizationSlug}/monitors/`,
+      undefined,
+      opts,
+    );
+    return MonitorListSchema.parse(body);
+  }
+
+  async getMonitorDetails(
+    {
+      organizationSlug,
+      projectSlug,
+      monitorSlug,
+      environment,
+    }: {
+      organizationSlug: string;
+      projectSlug?: string;
+      monitorSlug: string;
+      environment?: string;
+    },
+    opts?: RequestOptions,
+  ): Promise<Monitor> {
+    const searchQuery = new URLSearchParams();
+    if (environment) {
+      searchQuery.append("environment", environment);
+    }
+
+    const encodedMonitor = encodeURIComponent(monitorSlug);
+    const path = projectSlug
+      ? `/projects/${organizationSlug}/${projectSlug}/monitors/${encodedMonitor}/`
+      : `/organizations/${organizationSlug}/monitors/${encodedMonitor}/`;
+    const body = await this.requestJSON(
+      searchQuery.toString() ? `${path}?${searchQuery.toString()}` : path,
+      undefined,
+      opts,
+    );
+    return MonitorSchema.parse(body);
+  }
+
+  async listMonitorCheckIns(
+    {
+      organizationSlug,
+      projectSlug,
+      monitorSlug,
+      environment,
+      statsPeriod,
+      start,
+      end,
+      limit,
+    }: {
+      organizationSlug: string;
+      projectSlug?: string;
+      monitorSlug: string;
+      environment?: string;
+      statsPeriod?: string;
+      start?: string;
+      end?: string;
+      limit?: number;
+    },
+    opts?: RequestOptions,
+  ): Promise<MonitorCheckInList> {
+    const searchQuery = new URLSearchParams();
+    if (environment) {
+      searchQuery.append("environment", environment);
+    }
+    if (limit !== undefined) {
+      searchQuery.set("per_page", String(limit));
+    }
+    const normalizedStatsPeriod = normalizeStatsPeriod(statsPeriod);
+    const effectiveStatsPeriod =
+      start || end ? normalizedStatsPeriod : (normalizedStatsPeriod ?? "24h");
+    if (effectiveStatsPeriod) {
+      parseStatsPeriod(effectiveStatsPeriod);
+    }
+    this.applyTimeParams(searchQuery, effectiveStatsPeriod, start, end);
+
+    const encodedMonitor = encodeURIComponent(monitorSlug);
+    const path = projectSlug
+      ? `/projects/${organizationSlug}/${projectSlug}/monitors/${encodedMonitor}/checkins/`
+      : `/organizations/${organizationSlug}/monitors/${encodedMonitor}/checkins/`;
+    const body = await this.requestJSON(
+      searchQuery.toString() ? `${path}?${searchQuery.toString()}` : path,
+      undefined,
+      opts,
+    );
+    return MonitorCheckInListSchema.parse(body);
+  }
+
+  async getMonitorStats(
+    {
+      organizationSlug,
+      projectSlug,
+      monitorSlug,
+      environment,
+      statsPeriod,
+      start,
+      end,
+      rollup,
+    }: {
+      organizationSlug: string;
+      projectSlug?: string;
+      monitorSlug: string;
+      environment?: string;
+      statsPeriod?: string;
+      start?: string;
+      end?: string;
+      rollup?: number;
+    },
+    opts?: RequestOptions,
+  ): Promise<MonitorStats> {
+    const searchQuery = new URLSearchParams();
+    if (environment) {
+      searchQuery.append("environment", environment);
+    }
+    const normalizedStatsPeriod = normalizeStatsPeriod(statsPeriod);
+    const effectiveStatsPeriod =
+      start || end ? normalizedStatsPeriod : (normalizedStatsPeriod ?? "24h");
+    this.applyStatsMixinTimeParams(
+      searchQuery,
+      effectiveStatsPeriod,
+      start,
+      end,
+      rollup,
+    );
+
+    const encodedMonitor = encodeURIComponent(monitorSlug);
+    const path = projectSlug
+      ? `/projects/${organizationSlug}/${projectSlug}/monitors/${encodedMonitor}/stats/`
+      : `/organizations/${organizationSlug}/monitors/${encodedMonitor}/stats/`;
+    const body = await this.requestJSON(
+      searchQuery.toString() ? `${path}?${searchQuery.toString()}` : path,
+      undefined,
+      opts,
+    );
+    return MonitorStatsSchema.parse(body);
   }
 
   /**
@@ -2247,6 +2686,7 @@ export class SentryApiService {
     downloadUrl: string;
     filename: string;
     blob: Blob;
+    contentType: string;
   }> {
     // Get the attachment metadata first
     const attachmentsData = await this.requestJSON(
@@ -2268,20 +2708,24 @@ export class SentryApiService {
     const downloadUrl = `/projects/${organizationSlug}/${projectSlug}/events/${eventId}/attachments/${attachmentId}/?download=1`;
     const downloadResponse = await this.request(
       downloadUrl,
-      {
-        method: "GET",
-        headers: {
-          Accept: "application/octet-stream",
-        },
-      },
+      { method: "GET" },
       opts,
     );
+
+    // Prefer Content-Type from the download response over the metadata mimetype:
+    // the two share the same DB source but the download header reflects any
+    // server-side correction (getsentry/sentry#115977) applied at request time.
+    const contentType =
+      downloadResponse.headers.get("content-type")?.split(";")[0].trim() ||
+      attachment.mimetype ||
+      "application/octet-stream";
 
     return {
       attachment,
       downloadUrl: downloadResponse.url,
       filename: attachment.name,
       blob: await downloadResponse.blob(),
+      contentType,
     };
   }
 
@@ -2425,8 +2869,8 @@ export class SentryApiService {
       text: string;
     },
     opts?: RequestOptions,
-  ): Promise<void> {
-    await this.requestJSON(
+  ): Promise<IssueComment> {
+    const body = await this.requestJSON(
       `/organizations/${organizationSlug}/issues/${issueId}/notes/`,
       {
         method: "POST",
@@ -2434,6 +2878,51 @@ export class SentryApiService {
       },
       opts,
     );
+    return IssueCommentSchema.parse(body);
+  }
+
+  async getIssueActivity(
+    {
+      organizationSlug,
+      issueId,
+    }: {
+      organizationSlug: string;
+      issueId: string;
+    },
+    opts?: RequestOptions,
+  ): Promise<IssueActivityList> {
+    const body = await this.requestJSON(
+      `/organizations/${organizationSlug}/issues/${issueId}/activities/`,
+      undefined,
+      opts,
+    );
+    return IssueActivityListResponseSchema.parse(body).activity;
+  }
+
+  async listIssueComments(
+    {
+      organizationSlug,
+      issueId,
+      limit,
+    }: {
+      organizationSlug: string;
+      issueId: string;
+      limit?: number;
+    },
+    opts?: RequestOptions,
+  ): Promise<IssueCommentList> {
+    const searchQuery = new URLSearchParams();
+    if (limit !== undefined) {
+      searchQuery.set("per_page", String(limit));
+    }
+
+    const path = `/organizations/${organizationSlug}/issues/${issueId}/notes/`;
+    const body = await this.requestJSON(
+      searchQuery.toString() ? `${path}?${searchQuery.toString()}` : path,
+      undefined,
+      opts,
+    );
+    return IssueCommentListSchema.parse(body);
   }
 
   // TODO: Sentry is not yet exposing a reasonable API to fetch trace data
@@ -3122,6 +3611,15 @@ export class SentryApiService {
     return response.chunks[0];
   }
 
+  getPreprodSnapshotUrl(organizationSlug: string, snapshotId: string): string {
+    return getPreprodSnapshotUrlUtil(
+      this.host,
+      organizationSlug,
+      snapshotId,
+      this.protocol,
+    );
+  }
+
   async getSnapshotDetails({
     organizationSlug,
     snapshotId,
@@ -3148,7 +3646,7 @@ export class SentryApiService {
     snapshotId: string;
     imageIdentifier: string;
   }): Promise<unknown> {
-    const path = `/organizations/${encodeURIComponent(organizationSlug)}/preprodartifacts/snapshots/${encodeURIComponent(snapshotId)}/images/${imageIdentifier}/`;
+    const path = `/organizations/${encodeURIComponent(organizationSlug)}/preprodartifacts/snapshots/${encodeURIComponent(snapshotId)}/images/${encodeURIComponent(imageIdentifier)}/`;
     return this.requestJSON(path);
   }
 
@@ -3181,18 +3679,21 @@ export class SentryApiService {
     appId,
     branch,
     project,
+    projectSlug,
     compactMetadata = true,
   }: {
     organizationSlug: string;
     appId: string;
     branch?: string;
     project?: string;
+    projectSlug?: string;
     compactMetadata?: boolean;
   }): Promise<unknown> {
     const params = new URLSearchParams();
     params.set("app_id", appId);
     if (branch) params.set("branch", branch);
     if (project) params.set("project", project);
+    if (projectSlug) params.set("projectSlug", projectSlug);
     if (compactMetadata) params.set("compact_metadata", "true");
     const path = `/organizations/${encodeURIComponent(organizationSlug)}/preprodartifacts/snapshots/latest-base/?${params.toString()}`;
     return this.requestJSON(path);
