@@ -4,6 +4,8 @@ import pkg from "../package.json";
 const PREVIEW_URL = process.env.PREVIEW_URL;
 // All endpoints should respond quickly - 1 second is plenty for 401/200 responses
 const DEFAULT_TIMEOUT_MS = 1000;
+// MCP initialize can take longer immediately after a fresh Worker deploy.
+const MCP_INITIALIZE_TIMEOUT_MS = 5000;
 const IS_LOCAL_DEV =
   PREVIEW_URL?.includes("localhost") || PREVIEW_URL?.includes("127.0.0.1");
 
@@ -110,6 +112,7 @@ describeIfPreviewUrl(
       const { response, data } = await safeFetch(`${PREVIEW_URL}/mcp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        timeoutMs: MCP_INITIALIZE_TIMEOUT_MS,
         body: JSON.stringify({
           jsonrpc: "2.0",
           method: "initialize",
@@ -168,6 +171,7 @@ describeIfPreviewUrl(
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
+            timeoutMs: MCP_INITIALIZE_TIMEOUT_MS,
             body: JSON.stringify({
               jsonrpc: "2.0",
               method: "initialize",
@@ -221,6 +225,7 @@ describeIfPreviewUrl(
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
+            timeoutMs: MCP_INITIALIZE_TIMEOUT_MS,
             body: JSON.stringify({
               jsonrpc: "2.0",
               method: "initialize",
