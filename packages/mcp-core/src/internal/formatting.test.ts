@@ -120,28 +120,25 @@ describe("formatIssueOutput", () => {
       autofixState: {
         autofix: {
           run_id: 42,
-          request: {},
-          status: "COMPLETED",
+          status: "completed",
           updated_at: "2025-04-09T22:39:50.778146",
-          steps: [
+          blocks: [
             {
-              type: "solution",
-              key: "solution_step_with_a_name_long_enough_to_match_summary_filter",
-              index: 0,
-              status: "COMPLETED",
-              title: "Proposed Solution",
-              output_stream: null,
-              progress: [],
-              description: "",
-              solution: [
+              artifacts: [
                 {
-                  code_snippet_and_analysis:
-                    "Use the canonical issue identifier before retrying the analysis request so the summary remains readable.",
-                  is_active: true,
-                  is_most_important_event: true,
-                  relevant_code_file: null,
-                  timeline_item_type: "internal_code",
-                  title: "Normalize the issue identifier",
+                  key: "solution",
+                  reason: "Solution plan completed",
+                  data: {
+                    one_line_summary:
+                      "Use the canonical issue identifier before retrying the analysis request so the summary remains readable.",
+                    steps: [
+                      {
+                        title: "Normalize the issue identifier",
+                        description:
+                          "Use the canonical issue identifier before retrying.",
+                      },
+                    ],
+                  },
                 },
               ],
             },
@@ -155,6 +152,51 @@ describe("formatIssueOutput", () => {
       "Use the canonical issue identifier before retrying the analysis request so the summary remains readable.",
     );
     expect(output).not.toContain("<seer_analysis");
+  });
+
+  it("does not show trace search tool calls when search_events is unavailable", () => {
+    const output = formatIssueOutput({
+      organizationSlug: "sentry-mcp-evals",
+      issue: {
+        shortId: "CLOUDFLARE-MCP-42",
+        title: "Retry job failed",
+        count: "1",
+        userCount: 1,
+        status: "unresolved",
+        project: {
+          name: "cloudflare-mcp",
+          slug: "cloudflare-mcp",
+        },
+      } as Issue,
+      event: new EventBuilder("javascript")
+        .withId("event-1")
+        .withContexts({
+          trace: {
+            trace_id: "3032af8bcdfe4423b937fc5c041d5d82",
+          },
+        })
+        .build(),
+      apiService: {
+        getIssueUrl: () => "https://sentry.example/issues/CLOUDFLARE-MCP-42",
+      } as unknown as SentryApiService,
+      experimentalMode: true,
+      availableToolNames: new Set([
+        "get_sentry_resource",
+        "search_issue_events",
+      ]),
+      directToolNames: new Set(["get_sentry_resource", "search_issue_events"]),
+    });
+
+    expect(output).toContain(
+      "- Full distributed trace and span tree: Use the Sentry tool `get_sentry_resource`",
+    );
+    expect(output).toContain(
+      "- Related span search: Related span search is not available in this session",
+    );
+    expect(output).toContain(
+      "- Related log search: Related log search is not available in this session",
+    );
+    expect(output).not.toContain("search_events(");
   });
 });
 
@@ -1955,10 +1997,10 @@ describe("formatEventOutput", () => {
         ### Span Tree (Limited to 10 spans)
 
         \`\`\`
-        GET /users [parent12 · http.server · 250ms]
-           ├─ SELECT * FROM users WHERE id = 1 [span1 · db.query · 3ms] [N+1]
-           ├─ SELECT * FROM users WHERE id = 2 [span2 · db.query · 4ms] [N+1]
-           └─ SELECT * FROM users WHERE id = 3 [span3 · db.query · 8ms] [N+1]
+        GET /users [http.server · 250ms · parent123]
+           ├─ SELECT * FROM users WHERE id = 1 [db.query · 3ms · span1] [N+1]
+           ├─ SELECT * FROM users WHERE id = 2 [db.query · 4ms · span2] [N+1]
+           └─ SELECT * FROM users WHERE id = 3 [db.query · 8ms · span3] [N+1]
         \`\`\`
 
         "
@@ -2022,9 +2064,9 @@ describe("formatEventOutput", () => {
         ### Span Tree (Limited to 10 spans)
 
         \`\`\`
-        GET /durations [parentDu · http.server · 1250ms]
-           ├─ SELECT * FROM durations WHERE bucket = 'fast' [spanA · db.query · 1ms] [N+1]
-           └─ SELECT * FROM durations WHERE bucket = 'slow' [spanB · db.query · 1500ms] [N+1]
+        GET /durations [http.server · 1250ms · parentDur]
+           ├─ SELECT * FROM durations WHERE bucket = 'fast' [db.query · 1ms · spanA] [N+1]
+           └─ SELECT * FROM durations WHERE bucket = 'slow' [db.query · 1500ms · spanB] [N+1]
         \`\`\`
 
         "

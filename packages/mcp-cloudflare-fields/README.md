@@ -14,7 +14,8 @@ mcp-cloudflare-fields/
 ├── tsconfig*.json    → symlinks to ../mcp-cloudflare/
 ├── package.json      # Unique - different name
 ├── wrangler.jsonc    # Unique - Fields worker config
-└── wrangler.canary.jsonc  # Unique - Canary config
+├── wrangler.canary.jsonc  # Unique - Canary config
+└── wrangler.test.jsonc  # Unique - test config for shared upstream tests
 ```
 
 This means upstream changes to `mcp-cloudflare` automatically apply here.

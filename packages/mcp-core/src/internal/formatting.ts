@@ -7,7 +7,6 @@
  */
 import type { z } from "zod";
 import type {
-  AutofixRunStepRootCauseAnalysisSchema,
   DefaultEventSchema,
   ErrorEntrySchema,
   ErrorEventSchema,
@@ -30,10 +29,11 @@ import type {
 } from "../api-client/types";
 import { logIssue } from "../telem/logging";
 import {
-  getOutputForAutofixStep,
+  getAutofixArtifactSummaries,
   getStatusDisplayName,
   isTerminalStatus,
 } from "./tool-helpers/seer";
+import { formatToolCallInstruction } from "./tool-helpers/tool-call-formatting";
 import { formatUserGeoSummary } from "./user-formatting";
 
 /**
@@ -184,6 +184,9 @@ export function formatEventOutput(
       apiService: SentryApiService;
       organizationSlug: string;
       relatedReplayIds?: string[];
+      experimentalMode?: boolean;
+      availableToolNames?: ReadonlySet<string>;
+      directToolNames?: ReadonlySet<string>;
     };
   },
 ) {
@@ -204,6 +207,9 @@ export function formatEventOutput(
       organizationSlug: options.replaySummary.organizationSlug,
       event,
       relatedReplayIds: options.replaySummary.relatedReplayIds,
+      experimentalMode: options.replaySummary.experimentalMode ?? false,
+      availableToolNames: options.replaySummary.availableToolNames,
+      directToolNames: options.replaySummary.directToolNames,
     });
   }
 
@@ -1090,15 +1096,16 @@ function renderPerformanceSpanTree(spans: PerformanceSpan[]): string[] {
     const connector = prefix === "" ? "" : isLast ? "└─ " : "├─ ";
 
     const displayName = span.description?.trim() || span.op || "unnamed";
-    const shortId = span.span_id ? span.span_id.substring(0, 8) : "unknown";
+    const spanId = span.span_id ?? "unknown";
     const durationDisplay =
       span.duration > 0 ? `${Math.round(span.duration)}ms` : "unknown";
 
-    const metadataParts: string[] = [shortId];
+    // Full span ID goes last so human-readable parts read first.
+    const metadataParts: string[] = [];
     if (span.op && span.op !== "default") {
       metadataParts.push(span.op);
     }
-    metadataParts.push(durationDisplay);
+    metadataParts.push(durationDisplay, spanId);
 
     const line = `${prefix}${connector}${displayName} [${metadataParts.join(
       " · ",
@@ -1625,112 +1632,30 @@ function formatSeerSummary(autofixState: AutofixRunState | undefined): string {
   parts.push("");
 
   // Show status first
-  const statusDisplay = getStatusDisplayName(autofix.status);
   if (!isTerminalStatus(autofix.status)) {
-    parts.push(`**Status:** ${statusDisplay}`);
+    parts.push(`**Status:** ${getStatusDisplayName(autofix.status)}`);
     parts.push("");
   }
 
-  // Show summary of what we have so far
-  if (autofix.steps.length > 0) {
-    const completedSteps = autofix.steps.filter(
-      (step) => step.status === "COMPLETED",
-    );
-
-    // Find the solution step if available
-    const solutionStep = completedSteps.find(
-      (step) => step.type === "solution",
-    );
-
-    if (solutionStep) {
-      // For solution steps, use the description directly
-      const solutionDescription = solutionStep.description;
-      if (
-        solutionDescription &&
-        typeof solutionDescription === "string" &&
-        solutionDescription.trim()
-      ) {
-        parts.push("**Summary:**");
-        parts.push(solutionDescription.trim());
-      } else {
-        // Fallback to extracting from output if no description
-        const solutionOutput = getOutputForAutofixStep(solutionStep, {
-          includeProvenanceTags: false,
-        });
-        const lines = solutionOutput.split("\n");
-        const firstParagraph = lines.find(
-          (line) =>
-            line.trim().length > 50 &&
-            !line.startsWith("#") &&
-            !line.startsWith("*"),
-        );
-        if (firstParagraph) {
-          parts.push("**Summary:**");
-          parts.push(firstParagraph.trim());
-        }
-      }
-    } else if (completedSteps.length > 0) {
-      // Show what steps have been completed so far
-      const rootCauseStep = completedSteps.find(
-        (step) => step.type === "root_cause_analysis",
-      );
-
-      if (rootCauseStep) {
-        const typedStep = rootCauseStep as z.infer<
-          typeof AutofixRunStepRootCauseAnalysisSchema
-        >;
-        if (
-          typedStep.causes &&
-          typedStep.causes.length > 0 &&
-          typedStep.causes[0].description
-        ) {
-          parts.push("**Root Cause Identified:**");
-          parts.push(typedStep.causes[0].description.trim());
-        }
-      } else {
-        // Show generic progress
-        parts.push(
-          `**Progress:** ${completedSteps.length} of ${autofix.steps.length} steps completed`,
-        );
-      }
-    }
-  } else {
-    // No steps yet - check for terminal states first
-    if (isTerminalStatus(autofix.status)) {
-      if (autofix.status === "FAILED" || autofix.status === "ERROR") {
-        parts.push("**Status:** Analysis failed.");
-      } else if (autofix.status === "CANCELLED") {
-        parts.push("**Status:** Analysis was cancelled.");
-      } else if (
-        autofix.status === "NEED_MORE_INFORMATION" ||
-        autofix.status === "WAITING_FOR_USER_RESPONSE"
-      ) {
-        parts.push(
-          "**Status:** Analysis paused - additional information needed.",
-        );
-      }
-    } else {
-      parts.push("Analysis has started but no results yet.");
-    }
+  // Summarize from the run's artifacts: the solution if available, otherwise
+  // the root cause if it has been identified.
+  const { rootCause, solution } = getAutofixArtifactSummaries(autofix);
+  if (solution) {
+    parts.push("**Summary:**");
+    parts.push(solution);
+  } else if (rootCause) {
+    parts.push("**Root Cause Identified:**");
+    parts.push(rootCause);
+  } else if (!isTerminalStatus(autofix.status)) {
+    parts.push("Analysis has started but no results yet.");
   }
 
-  // Add specific messages for terminal states when steps exist
-  if (autofix.steps.length > 0 && isTerminalStatus(autofix.status)) {
-    if (autofix.status === "FAILED" || autofix.status === "ERROR") {
-      parts.push("");
-      parts.push("**Status:** Analysis failed.");
-    } else if (autofix.status === "CANCELLED") {
-      parts.push("");
-      parts.push("**Status:** Analysis was cancelled.");
-    } else if (
-      autofix.status === "NEED_MORE_INFORMATION" ||
-      autofix.status === "WAITING_FOR_USER_RESPONSE"
-    ) {
-      parts.push("");
-      parts.push(
-        "**Status:** Analysis paused - additional information needed.",
-      );
-    }
+  if (autofix.status === "error") {
+    parts.push("");
+    parts.push("**Status:** Analysis failed.");
+  } else if (autofix.status === "awaiting_user_input") {
+    parts.push("");
+    parts.push("**Status:** Analysis paused - additional information needed.");
   }
 
   return `${parts.join("\n")}\n\n`;
@@ -1753,6 +1678,8 @@ export function formatIssueOutput({
   externalIssues,
   relatedReplayIds,
   experimentalMode,
+  availableToolNames,
+  directToolNames,
 }: {
   organizationSlug: string;
   issue: Issue;
@@ -1763,6 +1690,8 @@ export function formatIssueOutput({
   externalIssues?: ExternalIssueList;
   relatedReplayIds?: string[];
   experimentalMode?: boolean;
+  availableToolNames?: ReadonlySet<string>;
+  directToolNames?: ReadonlySet<string>;
 }) {
   let output = `# Issue ${issue.shortId} in **${organizationSlug}**\n\n`;
 
@@ -1910,6 +1839,9 @@ export function formatIssueOutput({
       apiService,
       organizationSlug,
       relatedReplayIds,
+      experimentalMode: experimentalMode ?? false,
+      availableToolNames,
+      directToolNames,
     },
   });
 
@@ -1933,18 +1865,69 @@ export function formatIssueOutput({
       ? event.contexts.trace.trace_id
       : undefined;
 
-  output += "# Using this information\n\n";
-  output += `- You can reference the IssueID in commit messages (e.g. \`Fixes ${issue.shortId}\`) to automatically close the issue when the commit is merged.\n`;
+  output += "## Response Notes\n\n";
+  output += `- Commit message issue reference: \`Fixes ${issue.shortId}\` automatically closes the issue when the commit is merged.\n`;
   output +=
-    "- The stacktrace includes both first-party application code as well as third-party code, its important to triage to first-party code.\n";
-  output += `- To search for specific occurrences or filter events within this issue, use \`search_issue_events(organizationSlug='${organizationSlug}', issueId='${issue.shortId}', query='your query')\`\n`;
+    "- The stacktrace includes first-party application code and third-party code. First-party frames are usually the best starting point for triage.\n";
+  const issueEventSearchInstruction = formatToolCallInstruction({
+    toolName: "search_issue_events",
+    arguments: {
+      organizationSlug,
+      issueId: issue.shortId,
+      query: "your query",
+    },
+    experimentalMode: experimentalMode ?? false,
+    availableToolNames,
+    directToolNames,
+    fallbackInstruction: "Issue event search is not available in this session",
+  });
+  output += `- Issue event search: ${issueEventSearchInstruction}\n`;
   if (traceId) {
-    output += `- To inspect the full distributed trace and span tree for this event, use \`get_sentry_resource(resourceType='trace', organizationSlug='${organizationSlug}', resourceId='${traceId}')\`\n`;
-    output += `- To search related spans, use \`search_events(organizationSlug='${organizationSlug}', dataset='spans', query='trace:${traceId}')\`\n`;
-    output += `- To search related logs, use \`search_events(organizationSlug='${organizationSlug}', dataset='logs', query='trace:${traceId}')\`\n`;
+    const traceDetailsInstruction = formatToolCallInstruction({
+      toolName: "get_sentry_resource",
+      arguments: {
+        resourceType: "trace",
+        organizationSlug,
+        resourceId: traceId,
+      },
+      experimentalMode: experimentalMode ?? false,
+      availableToolNames,
+      directToolNames,
+      fallbackInstruction:
+        "Full distributed trace lookup is not available in this session",
+    });
+    const spanSearchInstruction = formatToolCallInstruction({
+      toolName: "search_events",
+      arguments: {
+        organizationSlug,
+        dataset: "spans",
+        query: `trace:${traceId}`,
+      },
+      experimentalMode: experimentalMode ?? false,
+      availableToolNames,
+      directToolNames,
+      fallbackInstruction:
+        "Related span search is not available in this session",
+    });
+    const logSearchInstruction = formatToolCallInstruction({
+      toolName: "search_events",
+      arguments: {
+        organizationSlug,
+        dataset: "logs",
+        query: `trace:${traceId}`,
+      },
+      experimentalMode: experimentalMode ?? false,
+      availableToolNames,
+      directToolNames,
+      fallbackInstruction:
+        "Related log search is not available in this session",
+    });
+    output += `- Full distributed trace and span tree: ${traceDetailsInstruction}\n`;
+    output += `- Related span search: ${spanSearchInstruction}\n`;
+    output += `- Related log search: ${logSearchInstruction}\n`;
   }
   if (experimentalMode) {
-    output += `- To see the trail of events leading up to this error, use \`get_sentry_resource(url='${apiService.getIssueUrl(organizationSlug, issue.shortId)}', resourceType='breadcrumbs')\`\n`;
+    output += `- Breadcrumb trail leading up to this error: \`get_sentry_resource(url='${apiService.getIssueUrl(organizationSlug, issue.shortId)}', resourceType='breadcrumbs')\`\n`;
   }
   return output;
 }
@@ -1956,11 +1939,17 @@ function formatIssueReplayOutput({
   organizationSlug,
   event,
   relatedReplayIds,
+  experimentalMode,
+  availableToolNames,
+  directToolNames,
 }: {
   apiService: SentryApiService;
   organizationSlug: string;
   event: Event;
   relatedReplayIds?: string[];
+  experimentalMode: boolean;
+  availableToolNames?: ReadonlySet<string>;
+  directToolNames?: ReadonlySet<string>;
 }): string {
   const attachedReplayId = getReplayIdFromEvent(event);
   const normalizedRelatedReplayIds = dedupeReplayIds(relatedReplayIds ?? []);
@@ -2014,10 +2003,21 @@ function formatIssueReplayOutput({
   const exampleReplayId =
     attachedReplayId ?? normalizedRelatedReplayIds.at(0) ?? null;
   if (exampleReplayId) {
+    const replayDetailsInstruction = formatToolCallInstruction({
+      toolName: "get_replay_details",
+      arguments: {
+        organizationSlug,
+        replayId: exampleReplayId,
+      },
+      experimentalMode,
+      availableToolNames,
+      directToolNames,
+      fallbackInstruction:
+        "Replay detail lookup is not available in this session",
+      purpose: "to inspect a replay in detail",
+    });
     lines.push("");
-    lines.push(
-      `Use \`get_replay_details(organizationSlug='${organizationSlug}', replayId='${exampleReplayId}')\` to inspect a replay in detail.`,
-    );
+    lines.push(`${replayDetailsInstruction}.`);
   }
 
   return `${lines.join("\n")}\n\n`;

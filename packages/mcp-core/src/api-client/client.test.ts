@@ -1,4 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+import { http, HttpResponse } from "msw";
+import { mswServer } from "@sentry/mcp-server-mocks";
 import { SentryApiService } from "./client";
 import { ConfigurationError } from "../errors";
 
@@ -58,6 +60,36 @@ describe("getIssueUrl", () => {
     const result = apiService.getIssueUrl("myorg", "PROJECT-456");
     // Should use sentry.io, not eu.sentry.io for web UI
     expect(result).toEqual("https://myorg.sentry.io/issues/PROJECT-456");
+  });
+});
+
+describe("getPreprodSnapshotUrl", () => {
+  it("should work with sentry.io", () => {
+    const apiService = new SentryApiService({ host: "sentry.io" });
+    const result = apiService.getPreprodSnapshotUrl("sentry", "12");
+    expect(result).toEqual("https://sentry.sentry.io/preprod/snapshots/12/");
+  });
+  it("should work with self-hosted", () => {
+    const apiService = new SentryApiService({ host: "sentry.example.com" });
+    const result = apiService.getPreprodSnapshotUrl("sentry", "12");
+    expect(result).toEqual(
+      "https://sentry.example.com/organizations/sentry/preprod/snapshots/12/",
+    );
+  });
+  it("should respect HTTP protocol for self-hosted", () => {
+    const apiService = new SentryApiService({
+      host: "localhost:8000",
+      protocol: "http",
+    });
+    const result = apiService.getPreprodSnapshotUrl("sentry", "12");
+    expect(result).toEqual(
+      "http://localhost:8000/organizations/sentry/preprod/snapshots/12/",
+    );
+  });
+  it("should use sentry.io (not regional) for SaaS web URL", () => {
+    const apiService = new SentryApiService({ host: "us.sentry.io" });
+    const result = apiService.getPreprodSnapshotUrl("sentry", "12");
+    expect(result).toEqual("https://sentry.sentry.io/preprod/snapshots/12/");
   });
 });
 
@@ -297,6 +329,126 @@ describe("getEventsExplorerUrl", () => {
   });
 });
 
+describe("monitor time parameters", () => {
+  it("defaults blank monitor statsPeriod values to a 24h window", async () => {
+    const requestUrls: URL[] = [];
+    mswServer.use(
+      http.get(
+        "https://sentry.io/api/0/organizations/my-org/monitors/nightly-import/checkins/",
+        ({ request }) => {
+          requestUrls.push(new URL(request.url));
+          return HttpResponse.json([]);
+        },
+      ),
+      http.get(
+        "https://sentry.io/api/0/organizations/my-org/monitors/nightly-import/stats/",
+        ({ request }) => {
+          requestUrls.push(new URL(request.url));
+          return HttpResponse.json([]);
+        },
+      ),
+    );
+
+    const apiService = new SentryApiService({
+      host: "sentry.io",
+      accessToken: "test-token",
+    });
+
+    await apiService.listMonitorCheckIns({
+      organizationSlug: "my-org",
+      monitorSlug: "nightly-import",
+      statsPeriod: "   ",
+      limit: 10,
+    });
+    await apiService.getMonitorStats({
+      organizationSlug: "my-org",
+      monitorSlug: "nightly-import",
+      statsPeriod: "   ",
+    });
+
+    expect(requestUrls).toHaveLength(2);
+    const [checkInsUrl, statsUrl] = requestUrls as [URL, URL];
+    expect(checkInsUrl.pathname).toBe(
+      "/api/0/organizations/my-org/monitors/nightly-import/checkins/",
+    );
+    expect(checkInsUrl.searchParams.get("statsPeriod")).toBe("24h");
+    expect(statsUrl.pathname).toBe(
+      "/api/0/organizations/my-org/monitors/nightly-import/stats/",
+    );
+    expect(statsUrl.searchParams.get("statsPeriod")).toBeNull();
+    expect(statsUrl.searchParams.get("since")).not.toBeNull();
+    expect(statsUrl.searchParams.get("until")).not.toBeNull();
+  });
+
+  it("rejects invalid monitor check-in statsPeriod values before sending a request", async () => {
+    let requestReceived = false;
+    mswServer.use(
+      http.get(
+        "https://sentry.io/api/0/organizations/my-org/monitors/nightly-import/checkins/",
+        () => {
+          requestReceived = true;
+          return HttpResponse.json([]);
+        },
+      ),
+    );
+
+    const apiService = new SentryApiService({
+      host: "sentry.io",
+      accessToken: "test-token",
+    });
+
+    await expect(
+      apiService.listMonitorCheckIns({
+        organizationSlug: "my-org",
+        monitorSlug: "nightly-import",
+        statsPeriod: "bogus",
+        limit: 10,
+      }),
+    ).rejects.toThrow("statsPeriod must use a supported relative time format");
+    expect(requestReceived).toBe(false);
+  });
+
+  it("rejects conflicting monitor statsPeriod and absolute time ranges before sending requests", async () => {
+    let requestReceived = false;
+    mswServer.use(
+      http.get(
+        "https://sentry.io/api/0/organizations/my-org/monitors/nightly-import/checkins/",
+        () => {
+          requestReceived = true;
+          return HttpResponse.json([]);
+        },
+      ),
+      http.get(
+        "https://sentry.io/api/0/organizations/my-org/monitors/nightly-import/stats/",
+        () => {
+          requestReceived = true;
+          return HttpResponse.json([]);
+        },
+      ),
+    );
+
+    const apiService = new SentryApiService({
+      host: "sentry.io",
+      accessToken: "test-token",
+    });
+    const params = {
+      organizationSlug: "my-org",
+      monitorSlug: "nightly-import",
+      statsPeriod: "24h",
+      start: "2024-01-01T00:00:00Z",
+      end: "2024-01-02T00:00:00Z",
+    };
+
+    await expect(apiService.listMonitorCheckIns(params)).rejects.toThrow(
+      "Cannot use both statsPeriod and start/end parameters",
+    );
+    await expect(apiService.getMonitorStats(params)).rejects.toThrow(
+      "Cannot use both statsPeriod and start/end parameters",
+    );
+    expect(requestReceived).toBe(false);
+  });
+});
+
 describe("network error handling", () => {
   let originalFetch: typeof globalThis.fetch;
 
@@ -488,6 +640,7 @@ describe("request headers", () => {
       accessToken: "test-token",
       clientId: "abc123",
       clientName: "Claude Code",
+      clientFamily: "claude-code",
     });
 
     await apiService.getAuthenticatedUser();
@@ -496,6 +649,9 @@ describe("request headers", () => {
       .calls[0];
     expect(requestInit.headers["X-Sentry-MCP-Client-Id"]).toBe("abc123");
     expect(requestInit.headers["X-Sentry-MCP-Client-Name"]).toBe("Claude Code");
+    expect(requestInit.headers["X-Sentry-MCP-Client-Family"]).toBe(
+      "claude-code",
+    );
   });
 
   it("should not send MCP client headers when clientId and clientName are not set", async () => {
@@ -524,6 +680,7 @@ describe("request headers", () => {
       .calls[0];
     expect(requestInit.headers["X-Sentry-MCP-Client-Id"]).toBeUndefined();
     expect(requestInit.headers["X-Sentry-MCP-Client-Name"]).toBeUndefined();
+    expect(requestInit.headers["X-Sentry-MCP-Client-Family"]).toBeUndefined();
   });
 });
 
@@ -1596,6 +1753,177 @@ describe("API query builders", () => {
           "count()",
         ]);
       });
+    });
+  });
+
+  describe("listRepos", () => {
+    let apiService: SentryApiService;
+
+    beforeEach(() => {
+      apiService = new SentryApiService({
+        host: "sentry.io",
+        accessToken: "test-token",
+      });
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("should call the repos endpoint without query", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: {
+          get: (key: string) =>
+            key === "content-type" ? "application/json" : null,
+        },
+        json: () =>
+          Promise.resolve([
+            {
+              id: "101",
+              name: "getsentry/sentry",
+              provider: { id: "integrations:github", name: "GitHub" },
+              status: "active",
+            },
+          ]),
+      });
+
+      const repos = await apiService.listRepos({
+        organizationSlug: "test-org",
+      });
+
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/organizations/test-org/repos/"),
+        expect.any(Object),
+      );
+      expect(globalThis.fetch).not.toHaveBeenCalledWith(
+        expect.stringContaining("query="),
+        expect.any(Object),
+      );
+      expect(repos).toHaveLength(1);
+      expect(repos[0].name).toBe("getsentry/sentry");
+    });
+
+    it("should include query parameter when provided", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: {
+          get: (key: string) =>
+            key === "content-type" ? "application/json" : null,
+        },
+        json: () =>
+          Promise.resolve([
+            {
+              id: "101",
+              name: "getsentry/sentry",
+              provider: { id: "integrations:github", name: "GitHub" },
+              status: "active",
+            },
+          ]),
+      });
+
+      await apiService.listRepos({
+        organizationSlug: "test-org",
+        query: "getsentry/sentry",
+      });
+
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("query=getsentry"),
+        expect.any(Object),
+      );
+    });
+
+    it("should return empty array when no repos exist", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: {
+          get: (key: string) =>
+            key === "content-type" ? "application/json" : null,
+        },
+        json: () => Promise.resolve([]),
+      });
+
+      const repos = await apiService.listRepos({
+        organizationSlug: "test-org",
+      });
+
+      expect(repos).toHaveLength(0);
+    });
+  });
+
+  describe("linkProjectRepo", () => {
+    let apiService: SentryApiService;
+
+    beforeEach(() => {
+      apiService = new SentryApiService({
+        host: "sentry.io",
+        accessToken: "test-token",
+      });
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("should POST to the repo endpoint with repositoryId", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: {
+          get: (key: string) =>
+            key === "content-type" ? "application/json" : null,
+        },
+        json: () =>
+          Promise.resolve({
+            id: "1",
+            projectId: "456",
+            repositoryId: "101",
+            source: "scm_onboarding",
+            created: true,
+          }),
+      });
+
+      const result = await apiService.linkProjectRepo({
+        organizationSlug: "test-org",
+        projectSlug: "my-project",
+        repositoryId: 101,
+      });
+
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/projects/test-org/my-project/repo/"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ repositoryId: 101 }),
+        }),
+      );
+      expect(result.created).toBe(true);
+      expect(result.repositoryId).toBe("101");
+    });
+
+    it("should handle idempotent response", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: {
+          get: (key: string) =>
+            key === "content-type" ? "application/json" : null,
+        },
+        json: () =>
+          Promise.resolve({
+            id: "1",
+            projectId: "456",
+            repositoryId: "101",
+            source: "manual",
+            created: false,
+          }),
+      });
+
+      const result = await apiService.linkProjectRepo({
+        organizationSlug: "test-org",
+        projectSlug: "my-project",
+        repositoryId: 101,
+      });
+
+      expect(result.created).toBe(false);
+      expect(result.source).toBe("manual");
     });
   });
 });

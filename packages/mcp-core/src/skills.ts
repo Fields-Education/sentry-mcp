@@ -11,8 +11,7 @@ export type Skill =
   | "triage"
   | "project-management"
   | "seer"
-  | "docs"
-  | "preprod";
+  | "docs";
 
 // Central registry with metadata (used by OAuth UI)
 export interface SkillDefinition {
@@ -61,14 +60,6 @@ export const SKILLS: Record<Skill, SkillDefinition> = {
     defaultEnabled: false,
     order: 5,
   },
-  preprod: {
-    id: "preprod",
-    name: "Preprod Snapshots",
-    description:
-      "Inspect visual regression snapshot tests from CI — view changed images and diff masks",
-    defaultEnabled: false,
-    order: 6,
-  },
 };
 
 // Sorted array for UI ordering
@@ -80,7 +71,11 @@ export const SKILLS_ARRAY: SkillDefinition[] = Object.values(SKILLS).sort(
 export async function getSkillsArrayWithCounts(): Promise<SkillDefinition[]> {
   // Dynamically import to avoid circular dependency
   const toolsModule = await import("./tools");
+  const surfacesModule = await import("./tools/surfaces");
   const tools = toolsModule.default;
+  const isCatalogInfrastructureTool =
+    surfacesModule.isCatalogInfrastructureToolName;
+  const isWrapperTool = surfacesModule.isWrapperToolName;
 
   const counts = new Map<Skill, number>();
 
@@ -90,8 +85,8 @@ export async function getSkillsArrayWithCounts(): Promise<SkillDefinition[]> {
   }
 
   // Count tools for each skill
-  for (const tool of Object.values(tools)) {
-    if (tool.internalOnly) {
+  for (const [toolName, tool] of Object.entries(tools)) {
+    if (isWrapperTool(toolName) || isCatalogInfrastructureTool(toolName)) {
       continue;
     }
     if (Array.isArray(tool.skills)) {
@@ -117,7 +112,7 @@ export const DEFAULT_SKILLS: Skill[] = SKILLS_ARRAY.filter(
 
 // Validation
 export function isValidSkill(skill: string): skill is Skill {
-  return skill in SKILLS;
+  return Object.hasOwn(SKILLS, skill);
 }
 
 // Check if tool is enabled by granted skills (ANY match = enabled)
@@ -166,13 +161,17 @@ export async function getScopesForSkills(
   // Import here to avoid circular dependency at module load time
   const { DEFAULT_SCOPES } = await import("./constants.js");
   const toolsModule = await import("./tools/index.js");
+  const surfacesModule = await import("./tools/surfaces.js");
   const tools = toolsModule.default;
+  const isCatalogInfrastructureTool =
+    surfacesModule.isCatalogInfrastructureToolName;
+  const isWrapperTool = surfacesModule.isWrapperToolName;
 
   const scopes = new Set<string>(DEFAULT_SCOPES);
 
   // Iterate through all tools and collect required scopes for tools enabled by granted skills
-  for (const tool of Object.values(tools)) {
-    if (tool.internalOnly) {
+  for (const [toolName, tool] of Object.entries(tools)) {
+    if (isWrapperTool(toolName) || isCatalogInfrastructureTool(toolName)) {
       continue;
     }
     // Check if any of the tool's skills are granted
