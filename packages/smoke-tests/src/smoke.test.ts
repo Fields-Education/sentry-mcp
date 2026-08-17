@@ -169,7 +169,6 @@ describeIfPreviewUrl(
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            timeoutMs: MCP_INITIALIZE_TIMEOUT_MS,
             body: JSON.stringify({
               jsonrpc: "2.0",
               method: "initialize",
@@ -223,7 +222,6 @@ describeIfPreviewUrl(
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            timeoutMs: MCP_INITIALIZE_TIMEOUT_MS,
             body: JSON.stringify({
               jsonrpc: "2.0",
               method: "initialize",
