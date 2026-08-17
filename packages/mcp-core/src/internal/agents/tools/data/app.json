@@ -1,22 +1,96 @@
 {
   "namespace": "app",
+  "custom": true,
   "description": "Describes attributes related to client-side applications (e.g. web apps or mobile apps), plus Sentry MCP application-owned telemetry attributes.\n",
   "attributes": {
+    "app.access.error.code": {
+      "description": "Scrubber-safe OAuth error code returned by Sentry MCP or the OAuth provider.",
+      "type": "string",
+      "note": "Emitted under app.access.* so default Sentry data scrubbing does not redact values via sensitive substrings (auth/oauth, token, bearer, credentials). invalid_token responses are bucketed as invalid_access.",
+      "examples": ["invalid_access", "invalid_grant", "invalid_client", "other"]
+    },
+    "app.access.error.reason": {
+      "description": "Low-cardinality scrubber-safe bucket for an OAuth error description.",
+      "type": "string",
+      "note": "Values deliberately avoid sensitive substrings (token, bearer, auth/oauth, credentials).",
+      "examples": [
+        "missing_or_invalid_access",
+        "invalid_access",
+        "grant_not_found",
+        "other"
+      ]
+    },
+    "app.access.grant.age_bucket": {
+      "description": "Bounded MCP grant age at refresh or revocation.",
+      "type": "string",
+      "examples": ["lt_1h", "1d_7d", "gte_30d", "unknown"]
+    },
+    "app.access.grant.id_hash": {
+      "description": "Deterministic non-secret fingerprint of a Sentry MCP OAuth grant ID used to correlate grant lifecycle logs.",
+      "type": "string",
+      "examples": ["a1b2c3d4"]
+    },
+    "app.access.grant.revoked_reason": {
+      "description": "Reason a Sentry MCP OAuth wrapper grant was revoked.",
+      "type": "string",
+      "examples": [
+        "stale_props_no_refresh",
+        "upstream_rejected",
+        "upstream_rejected_in_use"
+      ]
+    },
+    "app.access.grant.shape": {
+      "description": "Shape of the Sentry MCP OAuth grant used during refresh.",
+      "type": "string",
+      "examples": ["refreshable"]
+    },
+    "app.access.method": {
+      "description": "How the MCP request obtained upstream Sentry access.",
+      "type": "string",
+      "examples": ["mcp_grant", "sentry_access"]
+    },
+    "app.access.probe.reason": {
+      "description": "Sentry MCP bucket for an indeterminate upstream OAuth access probe.",
+      "type": "string",
+      "examples": ["rate_limit", "server_error", "unknown"]
+    },
+    "app.access.probe.status_code": {
+      "description": "HTTP status returned by the upstream Sentry access-validity probe.",
+      "type": "string",
+      "examples": ["200", "401", "429", "500"]
+    },
+    "app.access.refresh.outcome": {
+      "description": "Outcome bucket for a Sentry MCP OAuth refresh/token-exchange path.",
+      "type": "string",
+      "note": "Attached to metric app.oauth.token_exchange. Attribute key avoids sensitive substrings for scrubber safety.",
+      "examples": [
+        "cached_valid_local",
+        "cached_valid_probed",
+        "upstream_rejected",
+        "verification_indeterminate"
+      ]
+    },
+    "app.access.request.header_shape": {
+      "description": "Low-cardinality shape of the Authorization header supplied to an access-protected request.",
+      "type": "string",
+      "examples": [
+        "missing",
+        "wrapper",
+        "malformed",
+        "non_scheme",
+        "empty_scheme"
+      ]
+    },
+    "app.access.upstream.expires_in_bucket": {
+      "description": "Bounded remaining time before the original upstream Sentry expiry at refresh or revocation.",
+      "type": "string",
+      "examples": ["expired", "lt_1h", "1d_7d", "unknown"]
+    },
     "app.client.family": {
       "description": "Sentry MCP low-cardinality bucket for the MCP client family.",
       "type": "string",
       "note": "Resolved from the MCP client's User-Agent on direct MCP requests, or from the registered client name on browser-mediated OAuth endpoints.",
       "examples": ["claude-code", "cursor", "codex", "unknown"]
-    },
-    "app.constraint.organization_slug": {
-      "description": "Sentry MCP organization slug constraint applied to the MCP session.",
-      "type": "string",
-      "examples": ["my-org"]
-    },
-    "app.constraint.project_slug": {
-      "description": "Sentry MCP project slug constraint applied to the MCP session.",
-      "type": "string",
-      "examples": ["backend"]
     },
     "app.consent.skill": {
       "description": "Sentry MCP skill granted during OAuth approval.",
@@ -29,6 +103,16 @@
       "note": "The dynamic <skill> segment uses the skill id with hyphens replaced by underscores.",
       "examples": ["app.consent.skill.project_management.granted"]
     },
+    "app.constraint.organization_slug": {
+      "description": "Sentry MCP organization slug constraint applied to the MCP session.",
+      "type": "string",
+      "examples": ["my-org"]
+    },
+    "app.constraint.project_slug": {
+      "description": "Sentry MCP project slug constraint applied to the MCP session.",
+      "type": "string",
+      "examples": ["backend"]
+    },
     "app.installation.id": {
       "description": "A unique identifier representing the installation of an application on a specific device\n",
       "type": "string",
@@ -36,44 +120,11 @@
       "stability": "development",
       "examples": ["2ab2916d-a51f-4ac8-80ee-45ac31a28092"]
     },
-    "app.oauth.grant.shape": {
-      "description": "Shape of the Sentry MCP OAuth grant used during token exchange.",
-      "type": "string",
-      "examples": ["refreshable"]
-    },
-    "app.oauth.grant_revoked.reason": {
-      "description": "Reason a Sentry MCP OAuth wrapper grant was revoked.",
-      "type": "string",
-      "examples": [
-        "stale_props_no_refresh",
-        "upstream_rejected",
-        "upstream_rejected_in_use"
-      ]
-    },
-    "app.oauth.probe.reason": {
-      "description": "Sentry MCP bucket for an indeterminate upstream OAuth token probe.",
-      "type": "string",
-      "examples": ["rate_limit", "server_error", "unknown"]
-    },
-    "app.oauth.probe.status_code": {
-      "description": "HTTP status returned by the upstream Sentry token-validity probe.",
-      "type": "string",
-      "examples": ["200", "401", "429", "500"]
-    },
-    "app.oauth.token_exchange.outcome": {
-      "description": "Outcome bucket for a Sentry MCP OAuth token exchange or refresh.",
-      "type": "string",
-      "examples": [
-        "cached_valid_local",
-        "refreshed",
-        "upstream_rejected",
-        "verification_indeterminate"
-      ]
-    },
     "app.rate_limit.scope": {
       "description": "Scope of a Sentry MCP local rate-limit response.",
       "type": "string",
-      "examples": ["ip", "user"]
+      "examples": ["ip", "user", "sentry_access"],
+      "note": "sentry_access is the scrubber-safe bucket for direct Sentry access-header rate limits."
     },
     "app.referrer.family": {
       "description": "Sentry MCP low-cardinality bucket for the external referrer host.",
@@ -116,12 +167,6 @@
       "type": "number",
       "stability": "development",
       "examples": ["12", "99"]
-    },
-    "app.server.mode.agent": {
-      "description": "Whether Sentry MCP agent mode is enabled for the request or stdio session.",
-      "type": "boolean",
-      "note": "Metrics and tags record this as the low-cardinality string values `true` or `false`; spans record it as a boolean.",
-      "examples": [true, false]
     },
     "app.server.mode.experimental": {
       "description": "Whether Sentry MCP experimental mode is enabled for the request or stdio session.",

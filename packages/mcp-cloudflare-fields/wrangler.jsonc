@@ -7,7 +7,7 @@
  *   - SENTRY_CLIENT_ID      : OAuth app client ID from s.fields.app
  *   - SENTRY_CLIENT_SECRET  : OAuth app client secret
  *   - COOKIE_SECRET         : Session encryption (32+ chars)
- *   - OPENAI_API_KEY        : For AI features
+ *   - OPENROUTER_API_KEY    : For hosted chat and AI features
  *   - SENTRY_DSN            : DSN from s.fields.app for error reporting
  *   - SENTRY_HOST           : s.fields.app
  */

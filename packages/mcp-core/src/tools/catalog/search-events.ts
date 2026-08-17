@@ -2,21 +2,27 @@ import { getActiveSpan, setTag } from "@sentry/core";
 import { z } from "zod";
 import { UserInputError } from "../../errors";
 import { hasAgentProvider } from "../../internal/agents/provider-factory";
+import { withProviderFallback } from "../../internal/agents/provider-fallback";
 import { apiServiceFromContext } from "../../internal/tool-helpers/api";
 import { defineTool } from "../../internal/tool-helpers/define";
 import {
   ParamOrganizationSlug,
+  ParamPeriod,
   ParamProjectSlug,
   ParamRegionUrl,
 } from "../../schema";
 import type { ServerContext } from "../../types";
 import {
-  PUBLIC_EVENTS_DATASETS,
-  type PublicEventsDataset,
   isMetricsDataset,
   normalizeEventsDataset,
+  PUBLIC_EVENTS_DATASETS,
+  type PublicEventsDataset,
 } from "../../utils/events-datasets";
-import { searchEventsAgent } from "../support/search-events/agent";
+import { extractConversationIdFromSearchQuery } from "../../utils/url-utils";
+import {
+  searchEventsAgent,
+  type searchEventsAgentOutputSchema,
+} from "../support/search-events/agent";
 import {
   RECOMMENDED_FIELDS,
   TRACE_METRICS_SAMPLE_IDENTITY_FIELDS,
@@ -35,12 +41,18 @@ import {
   isValidReplaySort,
 } from "../support/search-events/replays";
 import {
+  formatEventsValidationResults,
   isAggregateQuery,
+  isSemanticFilterDowngrade,
   looksLikeSentrySearchSyntax,
+  recordEventsSearchValidationTelemetry,
+  validateEventsSearch,
 } from "../support/search-events/utils";
 
 const SEARCH_EVENTS_DATASETS = [...PUBLIC_EVENTS_DATASETS, "replays"] as const;
 const DEFAULT_EVENTS_SORT = "-timestamp";
+
+type SearchEventsAgentResult = z.output<typeof searchEventsAgentOutputSchema>;
 
 function defaultSortForDataset(dataset: PublicEventsDataset | "replays") {
   return dataset === "replays" ? DEFAULT_REPLAY_SORT : DEFAULT_EVENTS_SORT;
@@ -92,6 +104,30 @@ function parseAgentTimeRange(
   return undefined;
 }
 
+function augmentFieldsWithSort(fields: string[], sort: string): string[] {
+  const sortField = sort.startsWith("-") ? sort.slice(1) : sort;
+  const sortIsAggregate = sortField.includes("(") && sortField.includes(")");
+  if (
+    sortField &&
+    !fields.includes(sortField) &&
+    (sortIsAggregate || !isAggregateQuery(fields))
+  ) {
+    return [...fields, sortField];
+  }
+  return fields;
+}
+
+function buildRequestFields(
+  dataset: PublicEventsDataset | "replays",
+  fields: string[],
+): string[] {
+  return dataset !== "replays" &&
+    isMetricsDataset(dataset) &&
+    !isAggregateQuery(fields)
+    ? Array.from(new Set([...fields, ...TRACE_METRICS_SAMPLE_IDENTITY_FIELDS]))
+    : fields;
+}
+
 function isTraceItemDataset(dataset: PublicEventsDataset | "replays"): boolean {
   return dataset === "spans" || dataset === "logs" || dataset === "metrics";
 }
@@ -133,6 +169,17 @@ function appendSearchFilter(query: string, filter?: string): string {
     return trimmedQuery;
   }
   return [trimmedQuery, filter].filter(Boolean).join(" ");
+}
+
+function applyEnvironmentToEventsQuery(
+  dataset: PublicEventsDataset | "replays",
+  query: string,
+  environment?: string | string[] | null,
+): string {
+  if (dataset === "replays") {
+    return query;
+  }
+  return appendSearchFilter(query, formatEnvironmentFilter(environment));
 }
 
 function tokenizeSearchQuery(query: string): string[] {
@@ -208,6 +255,10 @@ function choosePreservingRepairedQuery(params: {
     return appendSearchFilter(originalQuery, params.filter);
   }
 
+  if (isSemanticFilterDowngrade(originalQuery, repairedQuery)) {
+    return appendSearchFilter(originalQuery, params.filter);
+  }
+
   if (!originalQuery || preservesSearchTokens(originalQuery, repairedQuery)) {
     return appendSearchFilter(repairedQuery, params.filter);
   }
@@ -215,7 +266,7 @@ function choosePreservingRepairedQuery(params: {
   return appendSearchFilter(originalQuery, params.filter);
 }
 
-function buildSearchRepairPrompt(params: {
+function buildAgentPrompt(params: {
   query?: string;
   dataset: PublicEventsDataset | "replays";
   fields?: string[] | null;
@@ -224,12 +275,14 @@ function buildSearchRepairPrompt(params: {
   environment?: string | string[] | null;
 }): string {
   return [
-    "Fix this Sentry event search request.",
+    "Translate this Sentry event search request.",
     "The query may be natural language or already-valid Sentry search syntax.",
     "Preserve valid explicit parameters, but correct dataset, query syntax, fields, sort, and time range when they conflict or would fail.",
-    "If the user query already uses Sentry search syntax, treat its filters as authoritative unless validation proves a field is invalid.",
-    "For spans, logs, and metrics, use datasetAttributes exact attribute validation for explicit fields or query filters before dropping or renaming them.",
+    "If the user query already uses Sentry search syntax, treat its filters as authoritative unless validateSearch proves a field is invalid.",
+    "Never replace a structured field filter with message/log.body/full-text matching. If no valid attribute exists for an explicit field:value filter, keep the field and let validation fail.",
+    "For spans, logs, and metrics, use datasetAttributes to discover likely fields with substringMatch, query, and attributeTypes before dropping or renaming explicit fields.",
     "A broad datasetAttributes result may be truncated, so absence from that preview does not prove an explicit field is invalid.",
+    "For non-replay datasets, call validateSearch on the candidate request and fix failures in this same pass before returning.",
     "For non-replay datasets, convert environment parameters into query filters. For replays, keep environment in the separate environment parameter.",
     "",
     `User query: ${params.query || "(empty)"}`,
@@ -323,15 +376,13 @@ export default defineTool({
         z.string().trim().min(1),
         z.array(z.string().trim().min(1)).min(1),
       ])
-      .nullable()
+      // Keep optional (omit when unused). Do not add .nullable(): Zod emits nested
+      // anyOf for union+null, which some model APIs reject on tool schemas.
       .optional()
       .describe(
-        "Optional environment filter for dataset='replays'. Use a string for one environment or an array for multiple. For other datasets, filter environment in the query string instead.",
+        "Optional environment filter for dataset='replays'. Use a string for one environment or an array for multiple. Omit when unused. For other datasets, filter environment in the query string instead.",
       ),
-    statsPeriod: z
-      .string()
-      .optional()
-      .describe("Initial time period hint: 1h, 24h, 7d, 14d, 30d, etc."),
+    period: ParamPeriod.optional(),
     regionUrl: ParamRegionUrl.nullable().default(null),
     limit: z
       .number()
@@ -348,6 +399,7 @@ export default defineTool({
   },
   annotations: {
     readOnlyHint: true,
+    destructiveHint: false,
     openWorldHint: true,
   },
   async handler(params, context: ServerContext) {
@@ -398,7 +450,7 @@ export default defineTool({
     const hasExplicitDataset = params.dataset !== undefined;
     const hasExplicitFields = hasFields(params.fields);
     const hasExplicitSort = explicitSort !== undefined;
-    const hasExplicitStatsPeriod = params.statsPeriod !== undefined;
+    const hasExplicitPeriod = params.period !== undefined;
     const hasExplicitTraceItemDataset =
       hasExplicitDataset && isTraceItemDataset(inputDataset);
     const shouldTrustStructuredTraceSearch =
@@ -411,21 +463,37 @@ export default defineTool({
       shouldTrustStructuredTraceSearch && hasExplicitFields && hasExplicitSort;
 
     if (hasAgentProvider() && !canRunWithoutAgent) {
-      const agentResult = await searchEventsAgent({
-        query: buildSearchRepairPrompt({
-          query: params.query,
+      const parsed = await withProviderFallback<SearchEventsAgentResult>({
+        operation: "search_events.rewrite",
+        fallback: () => ({
           dataset: inputDataset,
-          fields: params.fields,
-          sort: params.sort,
-          statsPeriod: params.statsPeriod,
-          environment: params.environment,
+          query: params.query ?? "",
+          fields:
+            inputDataset === "replays"
+              ? []
+              : (params.fields ?? defaultFieldsForDataset(inputDataset)),
+          sort: explicitSort || defaultSortForDataset(inputDataset),
+          environment: params.environment ?? null,
+          timeRange: { statsPeriod: params.period ?? "14d" },
+          explanation: "",
         }),
-        organizationSlug,
-        apiService,
-        projectId,
+        run: async () =>
+          (
+            await searchEventsAgent({
+              query: buildAgentPrompt({
+                query: params.query,
+                dataset: inputDataset,
+                fields: params.fields,
+                sort: params.sort,
+                statsPeriod: params.period,
+                environment: params.environment,
+              }),
+              organizationSlug,
+              apiService,
+              projectId,
+            })
+          ).result,
       });
-
-      const parsed = agentResult.result;
       const shouldTrustExplicitSearchParams =
         shouldTrustStructuredTraceSearch ||
         (hasStructuredQuery && parsed.dataset === inputDataset);
@@ -448,7 +516,10 @@ export default defineTool({
             repairedQuery: parsed.query,
             filter: environmentFilter,
           })
-        : parsed.query || "";
+        : looksLikeSentrySearchSyntax(params.query) &&
+            isSemanticFilterDowngrade(params.query ?? "", parsed.query || "")
+          ? (params.query ?? "")
+          : parsed.query || "";
       sortParam =
         shouldTrustExplicitSearchParams && explicitSort
           ? explicitSort
@@ -457,8 +528,8 @@ export default defineTool({
       environment = params.environment ?? parsed.environment;
 
       timeParams =
-        shouldTrustExplicitSearchParams && hasExplicitStatsPeriod
-          ? { statsPeriod: params.statsPeriod }
+        shouldTrustExplicitSearchParams && hasExplicitPeriod
+          ? { statsPeriod: params.period }
           : (parseAgentTimeRange(parsed.timeRange) ?? { statsPeriod: "14d" });
 
       if (dataset === "replays") {
@@ -477,7 +548,7 @@ export default defineTool({
         ? explicitStructuredTraceQuery
         : (params.query ?? "");
       sortParam = explicitSort || defaultSortForDataset(dataset);
-      timeParams = { statsPeriod: params.statsPeriod ?? "14d" };
+      timeParams = { statsPeriod: params.period ?? "14d" };
       fields =
         dataset === "replays"
           ? []
@@ -563,33 +634,53 @@ export default defineTool({
     // changes the GROUP BY and silently corrupts the result. Better to let
     // Sentry's 400 propagate so the caller can fix the request explicitly.
     //
-    // Note: fields remain in function form (e.g. "count_unique(user.id)") and
-    // sortParam is also pre-normalization here. The API client normalizes
-    // aggregate sort params to underscore form (e.g. "count_unique_user_id")
-    // later, so an exact string match against fields is correct at this stage.
-    const sortField = sortParam.startsWith("-")
-      ? sortParam.slice(1)
-      : sortParam;
-    const sortIsAggregate = sortField.includes("(") && sortField.includes(")");
-    if (
-      sortField &&
-      !fields.includes(sortField) &&
-      (sortIsAggregate || !isAggregateQuery(fields))
-    ) {
-      fields = [...fields, sortField];
+    // Note: fields and sortParam use the same function syntax sent to the API.
+    fields = augmentFieldsWithSort(fields, sortParam);
+
+    const requestFields = buildRequestFields(dataset, fields);
+
+    // Final gate only. The agent should already have used validateSearch while
+    // constructing the request; the handler does not run a second repair agent.
+    sentryQuery = applyEnvironmentToEventsQuery(
+      dataset,
+      sentryQuery,
+      environment,
+    );
+    const lastValidation = await validateEventsSearch(apiService, {
+      organizationSlug,
+      dataset,
+      fields: requestFields,
+      query: sentryQuery,
+      sort: sortParam,
+      projectId,
+      environment: environment ?? undefined,
+      ...timeParams,
+    });
+    recordEventsSearchValidationTelemetry({
+      attempt: 0,
+      validation: lastValidation,
+    });
+
+    if (!lastValidation.valid) {
+      const formatted = formatEventsValidationResults(lastValidation);
+      throw new UserInputError(
+        formatted
+          ? `Search validation failed:\n${formatted}`
+          : "Search validation failed.",
+      );
     }
 
-    const requestFields =
-      isMetricsDataset(dataset) && !isAggregateQuery(fields)
-        ? Array.from(
-            new Set([...fields, ...TRACE_METRICS_SAMPLE_IDENTITY_FIELDS]),
-          )
-        : fields;
+    const finalRequestFields = buildRequestFields(dataset, fields);
+    sentryQuery = applyEnvironmentToEventsQuery(
+      dataset,
+      sentryQuery,
+      environment,
+    );
 
     const eventsResponse = await apiService.searchEvents({
       organizationSlug,
       query: sentryQuery,
-      fields: requestFields,
+      fields: finalRequestFields,
       limit: params.limit,
       projectId,
       dataset,
@@ -633,20 +724,23 @@ export default defineTool({
       eventData.length,
     );
 
-    const explorerUrl = apiService.getEventsExplorerUrl(
-      organizationSlug,
-      sentryQuery,
-      projectId,
-      dataset,
-      fields,
-      sortParam,
-      aggregateFunctions,
-      groupByFields,
-      timeParams.statsPeriod,
-      timeParams.start,
-      timeParams.end,
-      eventData,
-    );
+    const conversationId = extractConversationIdFromSearchQuery(sentryQuery);
+    const explorerUrl = conversationId
+      ? apiService.getAIConversationUrl(organizationSlug, conversationId)
+      : apiService.getEventsExplorerUrl(
+          organizationSlug,
+          sentryQuery,
+          projectId,
+          dataset,
+          fields,
+          sortParam,
+          aggregateFunctions,
+          groupByFields,
+          timeParams.statsPeriod,
+          timeParams.start,
+          timeParams.end,
+          eventData,
+        );
 
     const formatParams = {
       eventData,

@@ -25,6 +25,7 @@ import { startStdio } from "./transports/stdio";
 import * as Sentry from "@sentry/node";
 import { LIB_VERSION } from "@sentry/mcp-core/version";
 import { buildUsage } from "./cli/usage";
+import { printCliLine } from "./cli/output";
 import { parseArgv, parseEnv, merge } from "./cli/parse";
 import { finalize } from "./cli/resolve";
 import { resolveAccessToken } from "./auth/resolve-token";
@@ -61,11 +62,11 @@ async function main() {
 
   const cli = parseArgv(rawArgs);
   if (cli.help) {
-    console.log(usageText);
+    printCliLine(usageText);
     process.exit(0);
   }
   if (cli.version) {
-    console.log(`${packageName} ${LIB_VERSION}`);
+    printCliLine(`${packageName} ${LIB_VERSION}`);
     process.exit(0);
   }
   if (cli.unknownArgs.length > 0) {
@@ -92,9 +93,7 @@ async function main() {
 
   // Configure embedded agent provider
   if (cfg.agentProvider) {
-    setAgentProvider(
-      cfg.agentProvider as Parameters<typeof setAgentProvider>[0],
-    );
+    setAgentProvider(cfg.agentProvider);
   }
   setProviderBaseUrls({
     openaiBaseUrl: cfg.openaiBaseUrl,
@@ -109,11 +108,14 @@ async function main() {
 
   // Helper functions for provider status messages
   function hasProviderConflict(): boolean {
-    const hasAnthropic = Boolean(process.env.ANTHROPIC_API_KEY);
-    const hasOpenAI = Boolean(process.env.OPENAI_API_KEY);
+    const providerKeyCount = [
+      process.env.ANTHROPIC_API_KEY,
+      process.env.OPENAI_API_KEY,
+      process.env.OPENROUTER_API_KEY,
+    ].filter(Boolean).length;
     const hasExplicitProvider =
       cfg.agentProvider || process.env.EMBEDDED_AGENT_PROVIDER;
-    return hasAnthropic && hasOpenAI && !hasExplicitProvider;
+    return providerKeyCount > 1 && !hasExplicitProvider;
   }
 
   function getConfiguredProvider(): string | undefined {
@@ -132,24 +134,42 @@ async function main() {
 
     const hasAnthropic = Boolean(process.env.ANTHROPIC_API_KEY);
     const hasOpenAI = Boolean(process.env.OPENAI_API_KEY);
+    const hasOpenRouter = Boolean(process.env.OPENROUTER_API_KEY);
 
     // Check if configured provider's key is missing but other key is present
     if (
       (configured === "openai" || configured === "azure-openai") &&
       !hasOpenAI &&
-      hasAnthropic
+      (hasAnthropic || hasOpenRouter)
     ) {
       return {
         mismatch: true,
         configured,
-        availableKey: "ANTHROPIC_API_KEY",
+        availableKey: hasOpenRouter
+          ? "OPENROUTER_API_KEY"
+          : "ANTHROPIC_API_KEY",
       };
     }
-    if (configured === "anthropic" && !hasAnthropic && hasOpenAI) {
+    if (
+      configured === "anthropic" &&
+      !hasAnthropic &&
+      (hasOpenAI || hasOpenRouter)
+    ) {
       return {
         mismatch: true,
         configured: "anthropic",
-        availableKey: "OPENAI_API_KEY",
+        availableKey: hasOpenRouter ? "OPENROUTER_API_KEY" : "OPENAI_API_KEY",
+      };
+    }
+    if (
+      configured === "openrouter" &&
+      !hasOpenRouter &&
+      (hasOpenAI || hasAnthropic)
+    ) {
+      return {
+        mismatch: true,
+        configured: "openrouter",
+        availableKey: hasOpenAI ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY",
       };
     }
 
@@ -170,6 +190,7 @@ async function main() {
     | "openai"
     | "azure-openai"
     | "anthropic"
+    | "openrouter"
     | undefined;
 
   if (!resolvedProvider) {
@@ -184,10 +205,10 @@ async function main() {
 
     if (hasProviderConflict()) {
       console.warn(
-        "Warning: Both ANTHROPIC_API_KEY and OPENAI_API_KEY are set, but no provider is explicitly configured.",
+        "Warning: Multiple LLM API keys are set, but no provider is explicitly configured.",
       );
       console.warn(
-        "Please set EMBEDDED_AGENT_PROVIDER='openai', 'azure-openai', or 'anthropic' to specify which provider to use.",
+        "Please set EMBEDDED_AGENT_PROVIDER='openai', 'azure-openai', 'anthropic', or 'openrouter' to specify which provider to use.",
       );
       console.warn(
         "AI-powered search tools will be unavailable until a provider is selected.",
@@ -197,7 +218,9 @@ async function main() {
         mismatchInfo.configured === "openai" ||
         mismatchInfo.configured === "azure-openai"
           ? "OPENAI_API_KEY"
-          : "ANTHROPIC_API_KEY";
+          : mismatchInfo.configured === "openrouter"
+            ? "OPENROUTER_API_KEY"
+            : "ANTHROPIC_API_KEY";
       const configuredViaCliFlag = Boolean(cli.agentProvider);
       const providerSetting = configuredViaCliFlag
         ? `--agent-provider=${mismatchInfo.configured}`
@@ -226,9 +249,9 @@ async function main() {
       );
     } else {
       console.warn(
-        "Warning: No LLM API key found (OPENAI_API_KEY or ANTHROPIC_API_KEY).",
+        "Warning: No LLM API key found (OPENAI_API_KEY, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY).",
       );
-      console.warn("Agent-assisted search and use_sentry will be unavailable.");
+      console.warn("AI-powered search tools will be unavailable.");
       console.warn(
         "Search tools still work with direct Sentry query syntax via the 'query' parameter.",
       );
@@ -262,7 +285,6 @@ async function main() {
       tags: {
         "app.server.version": LIB_VERSION,
         "app.transport": "stdio",
-        "app.server.mode.agent": cli.agent ? "true" : "false",
         "app.server.mode.experimental": cli.experimental ? "true" : "false",
         "app.upstream.host": cfg.sentryHost,
         "app.url.full": cfg.mcpUrl,
@@ -281,15 +303,6 @@ async function main() {
       process.env.SENTRY_ENVIRONMENT ??
       (process.env.NODE_ENV !== "production" ? "development" : "production"),
   });
-
-  // Log agent mode status
-  if (cli.agent) {
-    console.warn("Agent mode enabled: Only use_sentry tool is available.");
-    console.warn(
-      "The use_sentry tool provides access to all Sentry operations through natural language.",
-    );
-    console.warn("");
-  }
 
   // Log experimental mode status
   if (cli.experimental) {
@@ -338,17 +351,14 @@ async function main() {
     sentryProtocol: cfg.sentryProtocol,
     mcpUrl: cfg.mcpUrl,
     openaiBaseUrl: cfg.openaiBaseUrl,
-    agentMode: cli.agent,
     experimentalMode: cli.experimental,
     transport: "stdio" as const,
   };
 
   // Build server with context to filter tools based on granted skills
-  // Use agentMode when --agent flag is set (only exposes use_sentry tool)
   // Use experimentalMode when --experimental flag is set (enables forward-looking variants)
   const server = buildServer({
     context,
-    agentMode: cli.agent,
     experimentalMode: cli.experimental,
   });
 

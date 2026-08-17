@@ -18,6 +18,8 @@ export type WorkerProps = {
   accessToken: string;
   refreshToken: string;
   accessTokenExpiresAt?: number; // Cached validity deadline; extended on successful probe.
+  sessionStartedAt?: number;
+  upstreamExpiresAt?: number;
   upstreamTokenInvalid?: boolean;
   clientId: string;
   clientName?: string;
@@ -58,7 +60,12 @@ export interface Env {
   SENTRY_ENVIRONMENT?: string;
   SENTRY_DSN?: string;
   SENTRY_HOST?: string;
-  OPENAI_API_KEY: string;
+  /** @deprecated Prefer OPENROUTER_API_KEY for hosted MCP AI features. */
+  OPENAI_API_KEY?: string;
+  OPENROUTER_API_KEY?: string;
+  OPENROUTER_MODEL?: string;
+  OPENROUTER_REASONING_EFFORT?: string;
+  EMBEDDED_AGENT_PROVIDER?: string;
   MCP_URL?: string;
   OAUTH_PROVIDER: OAuthHelpers;
   AI: Ai;

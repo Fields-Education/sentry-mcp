@@ -58,7 +58,7 @@ cd packages/mcp-cloudflare-fields
 wrangler secret put SENTRY_CLIENT_ID
 wrangler secret put SENTRY_CLIENT_SECRET
 wrangler secret put COOKIE_SECRET
-wrangler secret put OPENAI_API_KEY
+wrangler secret put OPENROUTER_API_KEY
 wrangler secret put SENTRY_DSN
 wrangler secret put SENTRY_HOST  # Enter: s.fields.app
 
@@ -66,7 +66,7 @@ wrangler secret put SENTRY_HOST  # Enter: s.fields.app
 wrangler secret put SENTRY_CLIENT_ID --config wrangler.canary.jsonc
 wrangler secret put SENTRY_CLIENT_SECRET --config wrangler.canary.jsonc
 wrangler secret put COOKIE_SECRET --config wrangler.canary.jsonc
-wrangler secret put OPENAI_API_KEY --config wrangler.canary.jsonc
+wrangler secret put OPENROUTER_API_KEY --config wrangler.canary.jsonc
 wrangler secret put SENTRY_DSN --config wrangler.canary.jsonc
 wrangler secret put SENTRY_HOST --config wrangler.canary.jsonc
 ```

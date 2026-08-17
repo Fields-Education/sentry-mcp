@@ -142,15 +142,184 @@ export const RepositorySchema = z
 
 export const RepositoryListSchema = z.array(RepositorySchema);
 
-export const ProjectRepoLinkSchema = z
+export const ProjectRepositoryMappingSchema = z
   .object({
-    id: z.union([z.string(), z.number()]),
-    projectId: z.union([z.string(), z.number()]),
-    repositoryId: z.union([z.string(), z.number()]),
-    source: z.string(),
-    created: z.boolean(),
+    created: z.number(),
+    updated: z.number(),
+    errors: z.number(),
+    mappings: z.array(
+      z
+        .object({
+          stackRoot: z.string(),
+          sourceRoot: z.string(),
+          status: z.string(),
+          detail: z.string().optional(),
+        })
+        .passthrough(),
+    ),
   })
   .passthrough();
+
+/**
+ * Dashboard schemas validated against getsentry/sentry:
+ * - `src/sentry/dashboards/endpoints/organization_dashboards.py`
+ * - `src/sentry/dashboards/endpoints/organization_dashboard_details.py`
+ * - `src/sentry/api/serializers/models/dashboard.py`
+ */
+export const DashboardPermissionsSchema = z
+  .object({
+    isEditableByEveryone: z.boolean().optional(),
+    teamsWithEditAccess: z.array(z.union([z.string(), z.number()])).optional(),
+  })
+  .passthrough();
+
+export const DashboardWidgetPreviewSchema = z
+  .object({
+    displayType: z.string(),
+    layout: z.record(z.string(), z.unknown()).nullable().optional(),
+  })
+  .passthrough();
+
+export const DashboardWidgetQuerySchema = z
+  .object({
+    id: z.union([z.string(), z.number()]),
+    name: z.string(),
+    fields: z.array(z.string()),
+    aggregates: z.array(z.string()),
+    columns: z.array(z.string()),
+    fieldAliases: z.array(z.string()),
+    conditions: z.string(),
+    orderby: z.string(),
+    widgetId: z.union([z.string(), z.number()]),
+    isHidden: z.boolean().optional(),
+    selectedAggregate: z.number().nullable().optional(),
+    linkedDashboards: z
+      .array(
+        z
+          .object({
+            field: z.string(),
+            dashboardId: z.union([z.string(), z.number()]),
+          })
+          .passthrough(),
+      )
+      .optional(),
+  })
+  .passthrough();
+
+export const DashboardWidgetSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]),
+    title: z.string(),
+    description: z.string().nullable().optional(),
+    displayType: z.string(),
+    interval: z.string().nullable().optional(),
+    dateCreated: z.string(),
+    dashboardId: z.union([z.string(), z.number()]),
+    queries: z.array(DashboardWidgetQuerySchema).default([]),
+    limit: z.number().nullable().optional(),
+    widgetType: z.string().nullable().optional(),
+    layout: z.record(z.string(), z.unknown()).nullable().optional(),
+    datasetSource: z.string().optional(),
+  })
+  .passthrough();
+
+export const DashboardFiltersSchema = z.record(z.string(), z.unknown());
+
+export const DashboardListItemSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]),
+    title: z.string(),
+    dateCreated: z.string(),
+    createdBy: z.unknown().nullable().optional(),
+    environment: z.array(z.string()).default([]),
+    filters: DashboardFiltersSchema.default({}),
+    lastVisited: z.string().nullable().optional(),
+    widgetDisplay: z.array(z.string()).default([]),
+    widgetPreview: z.array(DashboardWidgetPreviewSchema).default([]),
+    permissions: DashboardPermissionsSchema.nullable().optional(),
+    isFavorited: z.boolean().optional(),
+    projects: z.array(z.number()).default([]),
+    prebuiltId: z.union([z.string(), z.number()]).nullable().optional(),
+  })
+  .passthrough();
+
+export const DashboardListSchema = z.array(DashboardListItemSchema);
+
+export const DashboardSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]),
+    title: z.string(),
+    dateCreated: z.string(),
+    createdBy: z.unknown().nullable().optional(),
+    widgets: z.array(DashboardWidgetSchema),
+    projects: z.array(z.number()).default([]),
+    environment: z.array(z.string()).default([]),
+    filters: DashboardFiltersSchema.default({}),
+    permissions: DashboardPermissionsSchema.nullable().optional(),
+    isFavorited: z.boolean().optional(),
+    prebuiltId: z.union([z.string(), z.number()]).nullable().optional(),
+    period: z.string().nullable().optional(),
+    start: z.string().nullable().optional(),
+    end: z.string().nullable().optional(),
+    utc: z.union([z.string(), z.boolean()]).nullable().optional(),
+    expired: z.boolean().optional(),
+  })
+  .passthrough();
+
+export const AlertRuleComponentSchema = z.record(z.string(), z.unknown());
+
+export const IssueAlertRuleSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]),
+    name: z.string(),
+    status: z.string().optional(),
+    enabled: z.boolean().optional(),
+    actionMatch: z.string().nullable().optional(),
+    filterMatch: z.string().nullable().optional(),
+    conditions: z.array(AlertRuleComponentSchema).optional().default([]),
+    filters: z.array(AlertRuleComponentSchema).optional().default([]),
+    actions: z.array(AlertRuleComponentSchema).optional().default([]),
+    triggers: AlertRuleComponentSchema.nullable().optional(),
+    actionFilters: z
+      .array(AlertRuleComponentSchema)
+      .nullable()
+      .optional()
+      .default([]),
+    detectorIds: z
+      .array(z.union([z.string(), z.number()]))
+      .nullable()
+      .optional()
+      .default([]),
+    config: z.record(z.string(), z.unknown()).optional().default({}),
+    frequency: z.number().nullable().optional(),
+    environment: z.string().nullable().optional(),
+    owner: z.unknown().optional(),
+    dateCreated: z.string().optional(),
+    dateUpdated: z.string().optional(),
+    lastTriggered: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+export const IssueAlertRuleListSchema = z.array(IssueAlertRuleSchema);
+
+export const MetricAlertRuleSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]),
+    name: z.string(),
+    status: z.union([z.string(), z.number()]).optional(),
+    query: z.string().nullable().optional(),
+    aggregate: z.string().nullable().optional(),
+    dataset: z.string().nullable().optional(),
+    timeWindow: z.number().nullable().optional(),
+    environment: z.string().nullable().optional(),
+    owner: z.unknown().optional(),
+    projects: z.array(z.string()).optional().default([]),
+    triggers: z.array(AlertRuleComponentSchema).optional().default([]),
+    dateCreated: z.string().optional(),
+  })
+  .passthrough();
+
+export const MetricAlertRuleListSchema = z.array(MetricAlertRuleSchema);
 
 const ReplayTagsSchema = z.preprocess(
   (value) => {
@@ -243,7 +412,47 @@ export const ReplayDetailsSchema = z
   })
   .passthrough();
 
-export const ReplayRecordingSegmentsSchema = z.array(z.array(z.unknown()));
+const ReplayRecordingPayloadSchema = z
+  .object({
+    op: z.string().optional().catch(undefined),
+    description: z.string().optional().catch(undefined),
+    message: z.string().optional().catch(undefined),
+    category: z.string().optional().catch(undefined),
+    type: z.string().optional().catch(undefined),
+    data: z
+      .object({
+        duration: z.number().optional().catch(undefined),
+      })
+      .passthrough()
+      .optional()
+      .catch(undefined),
+  })
+  .passthrough();
+
+export const ReplayRecordingEventSchema = z
+  .object({
+    timestamp: z.number().optional().catch(undefined),
+    type: z.number().optional().catch(undefined),
+    data: z
+      .object({
+        tag: z.string().optional().catch(undefined),
+        href: z.string().optional().catch(undefined),
+        payload: ReplayRecordingPayloadSchema.optional().catch(undefined),
+      })
+      .passthrough()
+      .optional()
+      .catch(undefined),
+  })
+  .passthrough();
+
+export const ReplayRecordingSegmentsSchema = z.array(
+  z.array(z.unknown()).transform((events) =>
+    events.flatMap((event) => {
+      const result = ReplayRecordingEventSchema.safeParse(event);
+      return result.success ? [result.data] : [];
+    }),
+  ),
+);
 
 export const ReplayListResponseSchema = z.object({
   data: z.array(ReplayDetailsSchema),
@@ -258,11 +467,30 @@ export const ClientKeySchema = z
   .object({
     id: z.union([z.string(), z.number()]),
     name: z.string(),
-    dsn: z.object({
-      public: z.string(),
-    }),
+    dsn: z
+      .object({
+        public: z.string(),
+      })
+      .passthrough(),
     isActive: z.boolean(),
     dateCreated: z.string().datetime().nullable(),
+    rateLimit: z
+      .object({
+        window: z.number(),
+        count: z.number(),
+      })
+      .nullable()
+      .optional(),
+    browserSdkVersion: z.string().optional(),
+    dynamicSdkLoaderOptions: z
+      .object({
+        hasReplay: z.boolean(),
+        hasPerformance: z.boolean(),
+        hasDebug: z.boolean(),
+        hasFeedback: z.boolean().optional(),
+        hasLogsAndMetrics: z.boolean().optional(),
+      })
+      .optional(),
   })
   .passthrough();
 
@@ -411,6 +639,65 @@ export const MonitorStatSchema = z
 
 export const MonitorStatsSchema = z.array(MonitorStatSchema);
 
+/**
+ * Uptime monitor (detector) schemas.
+ *
+ * Verified against getsentry/sentry:
+ * - src/sentry/uptime/endpoints/serializers.py (UptimeDetectorSerializer)
+ * - src/sentry/uptime/endpoints/validators.py (UptimeMonitorValidator)
+ * - src/sentry/uptime/models.py (IntervalSeconds, SupportedHTTPMethods)
+ * Response fields are camelCase from CamelSnakeSerializer.
+ */
+export const UptimeMonitorSchema = z
+  .object({
+    id: ApiResourceIdSchema,
+    projectSlug: z.string(),
+    environment: z.string().nullable().optional(),
+    name: z.string(),
+    status: z.string(),
+    uptimeStatus: z.union([z.number(), z.string()]).optional(),
+    mode: z.number().optional(),
+    owner: ApiActorSchema.nullable().optional(),
+    recoveryThreshold: z.number().optional(),
+    downtimeThreshold: z.number().optional(),
+    url: z.string(),
+    method: z.string().optional(),
+    body: z.string().nullable().optional(),
+    headers: z
+      .array(z.tuple([z.string(), z.string()]))
+      .or(z.array(z.array(z.string())))
+      .optional(),
+    intervalSeconds: z.number(),
+    timeoutMs: z.number(),
+    traceSampling: z.boolean().optional(),
+    responseCaptureEnabled: z.boolean().optional(),
+    assertion: z.unknown().nullable().optional(),
+  })
+  .passthrough();
+
+export const UptimeMonitorListSchema = z.array(UptimeMonitorSchema);
+
+export const UptimeCheckSchema = z
+  .object({
+    uptimeCheckId: z.string().optional(),
+    timestamp: z.string().optional(),
+    scheduledCheckTime: z.string().optional(),
+    checkStatus: z.string().optional(),
+    checkStatusReason: z.string().nullable().optional(),
+    assertionFailureData: z.unknown().nullable().optional(),
+    httpStatusCode: z.number().nullable().optional(),
+    durationMs: z.number().optional(),
+    traceId: z.string().optional(),
+    traceItemId: z.string().optional(),
+    incidentStatus: z.number().optional(),
+    environment: z.string().optional(),
+    region: z.string().optional(),
+    regionName: z.string().optional(),
+  })
+  .passthrough();
+
+export const UptimeCheckListSchema = z.array(UptimeCheckSchema);
+
 export const ReleaseDetailsSchema = ReleaseSchema.extend({
   adoptionStages: z.unknown().optional(),
   authors: z.array(ApiActorSchema).optional(),
@@ -535,7 +822,7 @@ export const AssignedToSchema = z.union([
 export const IssueSchema = z
   .object({
     id: z.union([z.string(), z.number()]),
-    shortId: z.string(),
+    shortId: z.string().nullable(),
     title: z.string(),
     firstSeen: z.string().datetime().nullable(),
     lastSeen: z.string().datetime().nullable(),
@@ -547,12 +834,14 @@ export const IssueSchema = z
     status: z.string(),
     substatus: z.string().nullable().optional(),
     culprit: z.string().nullable(),
-    type: z.union([
-      z.literal("error"),
-      z.literal("transaction"),
-      z.literal("generic"),
-      z.unknown(),
-    ]),
+    type: z
+      .union([
+        z.literal("error"),
+        z.literal("transaction"),
+        z.literal("generic"),
+        z.unknown(),
+      ])
+      .optional(),
     assignedTo: AssignedToSchema.optional(),
     issueType: z.string().optional(),
     issueCategory: z.string().optional(),
@@ -565,7 +854,10 @@ export const IssueSchema = z
       .optional(),
     seerFixabilityScore: z.number().nullable().optional(),
   })
-  .passthrough();
+  .passthrough()
+  .transform((issue) =>
+    Object.assign(issue, { shortId: issue.shortId ?? String(issue.id) }),
+  );
 
 export const IssueListSchema = z.array(IssueSchema);
 
@@ -577,10 +869,13 @@ export const FrameInterface = z
     colNo: z.number().nullable(),
     absPath: z.string().nullable(),
     module: z.string().nullable(),
+    package: z.string().nullable(),
+    platform: z.string().nullable(),
+    sourceLink: z.string().nullable(),
     // lineno, source code
     context: z.array(z.tuple([z.number(), z.string()])),
     inApp: z.boolean().optional(),
-    vars: z.record(z.string(), z.unknown()).optional(),
+    vars: z.record(z.string(), z.unknown()).nullable().optional(),
   })
   .partial();
 
@@ -593,12 +888,15 @@ export const ExceptionInterface = z
         type: z.string().nullable(),
         handled: z.boolean().nullable(),
       })
-      .partial(),
+      .partial()
+      .nullable(),
     type: z.string().nullable(),
     value: z.string().nullable(),
-    stacktrace: z.object({
-      frames: z.array(FrameInterface),
-    }),
+    stacktrace: z
+      .object({
+        frames: z.array(FrameInterface),
+      })
+      .nullable(),
   })
   .partial();
 
@@ -629,18 +927,28 @@ export const MessageEntrySchema = z
   })
   .partial();
 
+const StacktraceSchema = z
+  .object({
+    frames: z.array(FrameInterface),
+    framesOmitted: z.array(z.unknown()).nullable().optional(),
+    registers: z.record(z.string(), z.unknown()).nullable().optional(),
+    hasSystemFrames: z.boolean().nullable().optional(),
+  })
+  .partial()
+  .extend({
+    frames: z.array(FrameInterface),
+  });
+
 export const ThreadEntrySchema = z
   .object({
-    id: z.number().nullable(),
+    id: z.union([z.number(), z.string()]).nullable(),
     name: z.string().nullable(),
     current: z.boolean().nullable(),
     crashed: z.boolean().nullable(),
     state: z.string().nullable(),
-    stacktrace: z
-      .object({
-        frames: z.array(FrameInterface),
-      })
-      .nullable(),
+    heldLocks: z.record(z.string(), z.unknown()).nullable().optional(),
+    stacktrace: StacktraceSchema.nullable(),
+    rawStacktrace: StacktraceSchema.nullable().optional(),
   })
   .partial();
 
@@ -657,7 +965,7 @@ export const BreadcrumbSchema = z
     category: z.string().nullable(),
     level: z.string().nullable(),
     message: z.string().nullable(),
-    data: z.record(z.unknown()).nullable(),
+    data: z.record(z.string(), z.unknown()).nullable(),
   })
   .partial();
 
@@ -695,6 +1003,7 @@ const EventTagsSchema = z.preprocess((value) => {
 
 const BaseEventSchema = z.object({
   id: z.string(),
+  groupID: z.string().nullable().optional(),
   title: z.string(),
   message: z.string().nullable(),
   platform: z.string().nullable().optional(),
@@ -736,13 +1045,15 @@ const BaseEventSchema = z.object({
       z.string(),
       z
         .object({
-          type: z.union([
-            z.literal("default"),
-            z.literal("runtime"),
-            z.literal("os"),
-            z.literal("trace"),
-            z.unknown(),
-          ]),
+          type: z
+            .union([
+              z.literal("default"),
+              z.literal("runtime"),
+              z.literal("os"),
+              z.literal("trace"),
+              z.unknown(),
+            ])
+            .optional(),
         })
         .passthrough(),
     )
@@ -750,6 +1061,26 @@ const BaseEventSchema = z.object({
   // "context" (singular) is the legacy "extra" field for arbitrary user-defined data
   // This is different from "contexts" (plural) which are structured contexts
   context: z.record(z.string(), z.unknown()).optional(),
+  sdk: z
+    .object({
+      name: z.string().nullable().optional(),
+    })
+    .passthrough()
+    .nullable()
+    .optional(),
+  release: z
+    .object({
+      lastCommit: z
+        .object({
+          id: z.string(),
+        })
+        .passthrough()
+        .nullable()
+        .optional(),
+    })
+    .passthrough()
+    .nullable()
+    .optional(),
   tags: EventTagsSchema.optional(),
   user: z
     .object({
@@ -772,7 +1103,7 @@ const BaseEventSchema = z.object({
   // It's safer to type as unknown since its structure varies
   _meta: z.unknown().optional(),
   // dateReceived is when the server received the event (may not be present in all contexts)
-  dateReceived: z.string().datetime().optional(),
+  dateReceived: z.string().datetime().nullish(),
 });
 
 export const ErrorEventSchema = BaseEventSchema.omit({
@@ -864,7 +1195,7 @@ export const GenericEventSchema = BaseEventSchema.omit({
   type: z.literal("generic"),
   culprit: z.string().nullable().optional(),
   dateCreated: z.string().datetime(),
-  occurrence: OccurrenceSchema.optional(),
+  occurrence: OccurrenceSchema.nullish(),
 });
 
 export const UnknownEventSchema = BaseEventSchema.omit({
@@ -884,6 +1215,20 @@ export const EventSchema = z.union([
   UnknownEventSchema,
 ]);
 
+export const StacktraceLinkSchema = z
+  .object({
+    config: z
+      .object({
+        repoName: z.string(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+    sourcePath: z.string().nullable().optional(),
+    sourceUrl: z.string().nullable().optional(),
+  })
+  .passthrough();
+
 export const EventsResponseSchema = z.object({
   data: z.array(z.unknown()),
   meta: z
@@ -893,7 +1238,7 @@ export const EventsResponseSchema = z.object({
     .passthrough(),
 });
 
-// https://us.sentry.io/api/0/organizations/sentry/events/?dataset=errors&field=issue&field=title&field=project&field=timestamp&field=trace&per_page=5&query=event.type%3Aerror&referrer=sentry-mcp&sort=-timestamp&statsPeriod=1w
+// https://us.sentry.io/api/0/organizations/sentry/events/?dataset=errors&field=issue&field=title&field=project&field=timestamp&field=trace&per_page=5&query=event.type%3Aerror&referrer=api.mcp.search-events&sort=-timestamp&statsPeriod=1w
 export const ErrorsSearchResponseSchema = EventsResponseSchema.extend({
   data: z.array(
     z.object({
@@ -1064,6 +1409,31 @@ export const ExternalIssueSchema = z.object({
   displayName: z.string(),
   webUrl: z.string(),
 });
+
+export const UserReportSchema = z.object({
+  id: z.string(),
+  eventID: z.string(),
+  name: z.string().nullable(),
+  email: z.string().nullable(),
+  comments: z.string(),
+  dateCreated: z.string(),
+  user: z
+    .object({
+      id: z.string(),
+      username: z.string().nullable(),
+      email: z.string().nullable(),
+      name: z.string().nullable(),
+      ipAddress: z.string().nullable(),
+      avatarUrl: z.string().nullable(),
+    })
+    .nullable(),
+  event: z.object({
+    id: z.string(),
+    eventID: z.string(),
+  }),
+});
+
+export const UserReportListSchema = z.array(UserReportSchema);
 
 export const ExternalIssueListSchema = z.array(ExternalIssueSchema);
 
@@ -1243,6 +1613,57 @@ export const AIConversationSpanSchema = z
 
 export const AIConversationSpanListSchema = z.array(AIConversationSpanSchema);
 
+/** Conversation details response envelope (`conversationId`, `title`, `spans`). */
+export const AIConversationDetailsResponseSchema = z
+  .object({
+    conversationId: z.string(),
+    title: z.string().nullable(),
+    spans: AIConversationSpanListSchema,
+  })
+  .passthrough();
+
+/**
+ * Schemas validated against getsentry/sentry:
+ * - `src/sentry/api/endpoints/organization_ai_conversations.py`
+ * - `src/sentry/api/serializers/rest_framework/ai_conversations.py`
+ * - `tests/sentry/api/endpoints/test_organization_ai_conversations.py`
+ */
+export const AIConversationUserSchema = z
+  .object({
+    id: z.string().nullable(),
+    email: z.string().nullable(),
+    username: z.string().nullable(),
+    ip_address: z.string().nullable(),
+  })
+  .passthrough();
+
+export const AIConversationSummarySchema = z
+  .object({
+    conversationId: z.string(),
+    // AI-generated title from conversation metadata when available.
+    title: z.string().nullable(),
+    flow: z.array(z.string()),
+    errors: z.number(),
+    llmCalls: z.number(),
+    toolCalls: z.number(),
+    totalTokens: z.number(),
+    totalCost: z.number(),
+    startTimestamp: z.number(),
+    endTimestamp: z.number(),
+    traceCount: z.number(),
+    traceIds: z.array(z.string()),
+    firstInput: z.string().nullable(),
+    lastOutput: z.string().nullable(),
+    user: AIConversationUserSchema.nullable(),
+    toolNames: z.array(z.string()),
+    toolErrors: z.number(),
+  })
+  .passthrough();
+
+export const AIConversationSummaryListSchema = z.array(
+  AIConversationSummarySchema,
+);
+
 /**
  * Schema for individual frames in a flamegraph.
  *
@@ -1251,13 +1672,13 @@ export const AIConversationSpanListSchema = z.array(AIConversationSpanSchema);
  */
 export const FlamegraphFrameSchema = z
   .object({
-    file: z.string(),
+    file: z.preprocess((value) => value ?? "", z.string()),
     image: z.string().optional(),
-    is_application: z.boolean(),
-    line: z.number(),
-    name: z.string(),
+    is_application: z.preprocess((value) => value ?? false, z.boolean()),
+    line: z.preprocess((value) => value ?? 0, z.number()),
+    name: z.preprocess((value) => value ?? "(unknown)", z.string()),
     path: z.string().optional(),
-    fingerprint: z.number(),
+    fingerprint: z.preprocess((value) => value ?? 0, z.number()),
   })
   .passthrough();
 
@@ -1270,28 +1691,52 @@ export const FlamegraphFrameSchema = z
 export const FlamegraphFrameInfoSchema = z
   .object({
     count: z.number(),
-    weight: z.number(),
+    weight: z.number().optional(),
     sumDuration: z.number(),
     sumSelfTime: z.number(),
     p75Duration: z.number(),
     p95Duration: z.number(),
     p99Duration: z.number(),
   })
-  .passthrough();
+  .passthrough()
+  .transform((frameInfo) => ({
+    ...frameInfo,
+    weight: frameInfo.weight ?? frameInfo.sumDuration,
+  }));
 
 /**
  * Schema for profile metadata within a flamegraph response.
  *
- * Links to individual profile IDs and their time ranges.
+ * Links flamegraph samples back to transaction profile IDs or continuous
+ * profile chunks. References can also be raw profile ID strings in older
+ * speedscope-compatible payloads. Timing fields are optional because Sentry's
+ * continuous candidate sources do not all populate the same reference metadata.
  */
-export const FlamegraphProfileMetadataSchema = z
-  .object({
-    project_id: z.number(),
-    profile_id: z.string(),
-    start: z.number(),
-    end: z.number(),
-  })
-  .passthrough();
+export const FlamegraphProfileMetadataSchema = z.union([
+  z.string(),
+  z
+    .object({
+      project_id: z.number(),
+      profile_id: z.string(),
+      start: z.union([z.number(), z.string()]).optional(),
+      end: z.union([z.number(), z.string()]).optional(),
+    })
+    .passthrough(),
+  // Compatibility with getsentry/sentry `ContinuousProfileCandidate`:
+  // continuous flamegraph refs may come from transaction/spans/functions paths,
+  // so only project_id/profiler_id/chunk_id are always present.
+  z
+    .object({
+      project_id: z.number(),
+      profiler_id: z.string(),
+      chunk_id: z.string(),
+      thread_id: z.string().optional(),
+      start: z.union([z.number(), z.string()]).optional(),
+      end: z.union([z.number(), z.string()]).optional(),
+      transaction_id: z.string().nullable().optional(),
+    })
+    .passthrough(),
+]);
 
 /**
  * Schema for a single profile within a flamegraph (typically one per thread).
@@ -1329,28 +1774,61 @@ export const FlamegraphProfileSchema = z
  * This is the primary data source for profile analysis as it's
  * already aggregated and includes percentile calculations.
  */
-export const FlamegraphSchema = z
-  .object({
-    activeProfileIndex: z.preprocess((value) => value ?? 0, z.number()),
-    metadata: z.record(z.unknown()).optional(),
-    platform: z.string(),
-    profiles: z.array(FlamegraphProfileSchema),
-    projectID: z.number(),
-    shared: z.object({
-      frames: z.array(FlamegraphFrameSchema),
-      frame_infos: z.preprocess(
-        (value) => value ?? [],
-        z.array(FlamegraphFrameInfoSchema),
-      ),
+export const FlamegraphSchema = z.preprocess(
+  (value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return value;
+    }
+
+    // Sparse no-data flamegraph responses can carry only `metadata`; keep them
+    // parseable so tools can render the explicit no-profile-data result.
+    const body = value as Record<string, unknown>;
+    const metadata =
+      body.metadata && typeof body.metadata === "object"
+        ? (body.metadata as Record<string, unknown>)
+        : {};
+
+    return {
+      ...body,
+      platform: body.platform ?? metadata.platform,
+      projectID: body.projectID ?? metadata.projectID,
+      transactionName: body.transactionName ?? metadata.transactionName,
+    };
+  },
+  z
+    .object({
+      activeProfileIndex: z.preprocess((value) => value ?? 0, z.number()),
+      metadata: z.record(z.string(), z.unknown()).optional(),
+      platform: z.string(),
       profiles: z.preprocess(
         (value) => value ?? [],
-        z.array(FlamegraphProfileMetadataSchema),
+        z.array(FlamegraphProfileSchema),
       ),
-    }),
-    transactionName: z.string().optional(),
-    metrics: z.unknown().optional(),
-  })
-  .passthrough();
+      projectID: z.number(),
+      shared: z.preprocess(
+        (value) => value ?? {},
+        z
+          .object({
+            frames: z.preprocess(
+              (value) => value ?? [],
+              z.array(FlamegraphFrameSchema),
+            ),
+            frame_infos: z.preprocess(
+              (value) => value ?? [],
+              z.array(FlamegraphFrameInfoSchema),
+            ),
+            profiles: z.preprocess(
+              (value) => value ?? [],
+              z.array(FlamegraphProfileMetadataSchema),
+            ),
+          })
+          .passthrough(),
+      ),
+      transactionName: z.string().optional(),
+      metrics: z.unknown().optional(),
+    })
+    .passthrough(),
+);
 
 /**
  * Schema for individual frames in raw profile chunk data.
@@ -1383,14 +1861,17 @@ export const ProfileFrameSchema = z
     raw_function: z.string().nullable().optional(),
     symbol: z.string().nullable().optional(),
     lang: z.string().nullable().optional(),
-    data: z.record(z.unknown()).optional(),
+    data: z.record(z.string(), z.unknown()).optional(),
   })
   .passthrough();
 
 const ProfileThreadMetadataSchema = z.record(
+  z.string(),
   z
     .object({
-      name: z.string().nullable(),
+      // Matches Sentry's `Profiling.ContinuousProfile.thread_metadata` type,
+      // where metadata entries may include only priority.
+      name: z.string().nullable().optional(),
       priority: z.number().nullable().optional(),
     })
     .passthrough(),
@@ -1454,17 +1935,20 @@ export const TransactionProfileSampleSchema = z
 export const ProfileChunkSchema = z
   .object({
     chunk_id: z.string(),
-    profiler_id: z.string(),
+    profiler_id: z.string().optional(),
     event_id: z.string().optional(),
-    environment: z.string().nullable(),
-    platform: z.string(),
-    release: z.string(),
-    version: z.string(),
+    environment: z.preprocess((value) => value ?? null, z.string().nullable()),
+    platform: z.preprocess((value) => value ?? "unknown", z.string()),
+    release: z.preprocess((value) => value ?? "unknown", z.string()),
+    version: z.preprocess((value) => value ?? "2", z.string()),
     profile: z.object({
       frames: z.array(ProfileFrameSchema),
       samples: z.array(ProfileChunkSampleSchema),
       stacks: z.array(z.array(z.number())),
-      thread_metadata: ProfileThreadMetadataSchema,
+      thread_metadata: z.preprocess(
+        (value) => value ?? {},
+        ProfileThreadMetadataSchema,
+      ),
     }),
   })
   .passthrough();
@@ -1472,13 +1956,29 @@ export const ProfileChunkSchema = z
 /**
  * Schema for profile chunks API response wrapper.
  *
- * The API returns chunks in an array wrapper, even for single chunk requests.
+ * Sentry returns a singular `chunk` wrapper for single chunk requests. The
+ * frontend also backfills profiler_id from the query because profiling-service
+ * chunks may omit it. The legacy plural `chunks` wrapper remains accepted for
+ * older fixtures and mocks.
  */
-export const ProfileChunkResponseSchema = z
-  .object({
-    chunks: z.array(ProfileChunkSchema),
-  })
-  .passthrough();
+export const ProfileChunkResponseSchema = z.union([
+  z
+    .object({
+      chunk: ProfileChunkSchema.nullable(),
+    })
+    .passthrough()
+    .transform((response) => ({
+      chunks: response.chunk ? [response.chunk] : [],
+    })),
+  z
+    .object({
+      chunks: z.array(ProfileChunkSchema),
+    })
+    .passthrough()
+    .transform((response) => ({
+      chunks: response.chunks,
+    })),
+]);
 
 const ProfileReleaseSchema = z
   .union([
@@ -1521,7 +2021,10 @@ export const TransactionProfileSchema = z
       frames: z.array(ProfileFrameSchema),
       samples: z.array(TransactionProfileSampleSchema),
       stacks: z.array(z.array(z.number())),
-      thread_metadata: ProfileThreadMetadataSchema,
+      thread_metadata: z.preprocess(
+        (value) => value ?? {},
+        ProfileThreadMetadataSchema,
+      ),
     }),
     transaction: z
       .object({
@@ -1573,3 +2076,83 @@ export const TransactionProfileSchema = z
       .optional(),
   })
   .passthrough();
+
+export const AgenticOnboardingStageSchema = z.enum([
+  "connect_mcp",
+  "analyze_project",
+  "create_project",
+  "instrument_app",
+  "plan_test_error",
+  "send_verification_error",
+  "receive_verification_error",
+  "prepare_production",
+  "check_stack_trace_quality",
+]);
+
+export const AgenticOnboardingStageStatusSchema = z.enum([
+  "active",
+  "waiting",
+  "completed",
+  "skipped",
+  "failed",
+  "bypassed",
+]);
+
+export const AgenticOnboardingStageStatusUpdateSchema = z.enum([
+  "active",
+  "waiting",
+  "completed",
+  "skipped",
+  "failed",
+]);
+
+export const AgenticOnboardingStageStateSchema = z.object({
+  stage: AgenticOnboardingStageSchema,
+  status: AgenticOnboardingStageStatusSchema.nullable(),
+  eventNote: z.string().nullable(),
+});
+
+export const AgenticOnboardingRunStatusSchema = z.enum([
+  "active",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
+export const AgenticOnboardingRunStatusUpdateSchema = z.enum([
+  "completed",
+  "failed",
+]);
+
+export const AgenticOnboardingStatusUpdateSchema = z.object({
+  schemaVersion: z.literal(1),
+  runToken: z.string().regex(/^[A-Za-z0-9]{10}$/),
+  stage: AgenticOnboardingStageSchema,
+  status: AgenticOnboardingStageStatusUpdateSchema,
+  runStatus: AgenticOnboardingRunStatusUpdateSchema.optional(),
+  eventNote: z.string().trim().min(1).max(256).optional(),
+  projectSlugs: z.array(z.string().trim().min(1)).min(1).max(100).optional(),
+  issueIds: z.array(z.string().trim().min(1)).min(1).max(100).optional(),
+});
+
+export const AgenticOnboardingRunSchema = z.object({
+  schemaVersion: z.literal(1),
+  runId: z.string(),
+  channelId: z.string(),
+  clientRunId: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  sequence: z.number().int().nonnegative(),
+  expiresAt: z.string(),
+  continueUpdates: z.boolean(),
+  runStatus: AgenticOnboardingRunStatusSchema,
+  projectSlugs: z
+    .array(z.string())
+    .nullable()
+    .transform((projectSlugs) => projectSlugs ?? []),
+  issueIds: z
+    .array(z.string())
+    .nullable()
+    .transform((issueIds) => issueIds ?? []),
+  stages: z.array(AgenticOnboardingStageStateSchema),
+});

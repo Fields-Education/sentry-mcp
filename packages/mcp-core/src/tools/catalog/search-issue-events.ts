@@ -6,10 +6,12 @@ import { ensureIssueWithinProjectConstraint } from "../../internal/tool-helpers/
 import type { ServerContext } from "../../types";
 import {
   ParamOrganizationSlug,
+  ParamPeriod,
   ParamRegionUrl,
   ParamProjectSlug,
 } from "../../schema";
 import { hasAgentProvider } from "../../internal/agents/provider-factory";
+import { withProviderFallback } from "../../internal/agents/provider-fallback";
 import { UserInputError } from "../../errors";
 import { searchIssueEventsAgent } from "../support/search-issue-events/agent";
 import { formatErrorResults } from "../support/search-events/formatters";
@@ -61,7 +63,7 @@ export default defineTool({
     "<examples>",
     "search_issue_events(issueId='MCP-41', organizationSlug='my-org', query='from last hour')",
     "search_issue_events(issueId='MCP-41', organizationSlug='my-org', query='environment:production')",
-    "search_issue_events(issueUrl='https://sentry.io/.../issues/123/', query='release:v1.0.0', statsPeriod='7d')",
+    "search_issue_events(issueUrl='https://sentry.io/.../issues/123/', query='release:v1.0.0', period='7d')",
     "</examples>",
   ].join("\n"),
   inputSchema: {
@@ -98,10 +100,7 @@ export default defineTool({
       .describe(
         "Sort field (prefix with - for descending). Default: -timestamp",
       ),
-    statsPeriod: z
-      .string()
-      .optional()
-      .describe("Initial time period hint: 1h, 24h, 7d, 14d, 30d, etc."),
+    period: ParamPeriod.optional(),
 
     // Optional context parameters
     projectSlug: ParamProjectSlug.nullable()
@@ -129,6 +128,7 @@ export default defineTool({
   },
   annotations: {
     readOnlyHint: true,
+    destructiveHint: false,
     openWorldHint: true,
   },
   async handler(params, context: ServerContext) {
@@ -178,18 +178,33 @@ export default defineTool({
 
     if (hasAgentProvider()) {
       // Agent mode: repair either natural language or already-structured params.
-      const agentResult = await searchIssueEventsAgent({
-        query: buildIssueEventSearchRepairPrompt({
-          query: params.query,
-          sort: params.sort,
-          statsPeriod: params.statsPeriod,
+      // If the optional AI provider is unavailable, execute the direct request.
+      const parsed = await withProviderFallback<
+        Awaited<ReturnType<typeof searchIssueEventsAgent>>["result"]
+      >({
+        operation: "search_issue_events.rewrite",
+        fallback: () => ({
+          query: params.query ?? "",
+          fields: RECOMMENDED_FIELDS,
+          // Treat empty string like missing so fallback matches direct mode.
+          sort: params.sort || "-timestamp",
+          timeRange: { statsPeriod: params.period ?? "14d" },
+          explanation: "",
         }),
-        organizationSlug,
-        apiService,
-        projectId,
+        run: async () =>
+          (
+            await searchIssueEventsAgent({
+              query: buildIssueEventSearchRepairPrompt({
+                query: params.query,
+                sort: params.sort,
+                statsPeriod: params.period,
+              }),
+              organizationSlug,
+              apiService,
+              projectId,
+            })
+          ).result,
       });
-
-      const parsed = agentResult.result;
 
       if (!parsed.sort) {
         throw new UserInputError(
@@ -212,8 +227,9 @@ export default defineTool({
       // Direct mode: use provided params as-is
       query = params.query ?? "";
       fields = RECOMMENDED_FIELDS;
-      sortParam = params.sort ?? "-timestamp";
-      timeParams = { statsPeriod: params.statsPeriod ?? "14d" };
+      // Empty string is allowed by the schema; treat it like missing.
+      sortParam = params.sort || "-timestamp";
+      timeParams = { statsPeriod: params.period ?? "14d" };
     }
 
     // Execute search using issue-specific endpoint

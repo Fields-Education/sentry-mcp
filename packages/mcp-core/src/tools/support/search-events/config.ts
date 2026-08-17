@@ -5,6 +5,7 @@ export const systemPrompt = `You are a Sentry query translator. You need to:
 3. Use the otelSemantics tool if you need OpenTelemetry semantic conventions
 4. Convert the natural language query to Sentry's search syntax (NOT SQL syntax)
 5. Decide which fields to return in the results
+6. For non-replay datasets, call validateSearch on the candidate request and fix failures before returning
 
 CRITICAL: Sentry does NOT use SQL syntax. Do NOT generate SQL-like queries.
 
@@ -28,7 +29,7 @@ Before constructing ANY query, you MUST verify field availability:
 2. This includes ALL fields: custom attributes, database fields, HTTP fields, AI fields, user fields, etc.
 3. Fields vary by project based on what data is being sent to Sentry
 4. Using an unverified field WILL cause your query to fail with "field not found" errors
-5. For spans, logs, and metrics, datasetAttributes can validate exact field names with attributes and can list likely fields using substringMatch/query/attributeTypes
+5. For spans, logs, and metrics, datasetAttributes can list likely fields using substringMatch/query/attributeTypes
 6. A broad datasetAttributes listing is a discovery preview and may be truncated; do not treat absence from the preview as proof that a user-supplied field is invalid
 7. Replay fields vary by project too, so use replayFields before constructing replay queries
 
@@ -38,8 +39,10 @@ TOOL USAGE GUIDELINES:
 3. Use otelSemantics tool when you need specific OpenTelemetry semantic convention attributes
 4. Use whoami tool when queries contain "me" references for user.id or user.email fields
 5. IMPORTANT: For ambiguous terms like "user agents", "browser", "client" - use the appropriate field discovery tool instead of guessing field names
-6. When the user already supplied Sentry search syntax for spans/logs/metrics, call datasetAttributes with exact attributes from the query or fields before dropping or renaming them
+6. When the user already supplied Sentry search syntax for spans/logs/metrics, call datasetAttributes with substringMatch or query filters from the request before dropping or renaming fields
 7. Use datasetAttributes substringMatch, query, and attributeTypes for targeted lookup when broad field discovery is truncated
+8. For non-replay datasets, call validateSearch after constructing the candidate request. If invalid, fix and validate again in this same pass
+9. NEVER replace a structured field:value filter with message/log.body/full-text matching. If an explicit field is unavailable on the dataset, keep it and let validation fail instead of inventing a weaker query
 
 CRITICAL - TOOL RESPONSE HANDLING:
 All tools return responses in this format: {error?: string, result?: data}
@@ -236,6 +239,7 @@ PROCESS:
 3. Use datasetAttributes or replayFields to discover available fields
 4. Use otelSemantics tool if needed for OpenTelemetry attributes
 5. Construct the final query with proper fields, sort parameters, and replay environment when needed
+6. For non-replay datasets, validateSearch the candidate and only return after it passes (or after you cannot fix it without weakening structured filters)
 
 COMMON ERRORS TO AVOID:
 - Using SQL syntax (IS NOT NULL, IS NULL, yesterday(), today(), etc.) - Use has: operator and timeRange instead
@@ -853,6 +857,8 @@ export const RECOMMENDED_FIELDS = {
       "message",
       "error.type",
       "culprit",
+      "user.email",
+      "user.id",
     ],
     description:
       "Basic error information including issue ID, title, timestamp, severity, and location",

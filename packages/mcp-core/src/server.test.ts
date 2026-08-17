@@ -1,9 +1,19 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer as ModernMcpServer } from "@modelcontextprotocol/server";
 import { type Span, setUser, startSpan } from "@sentry/core";
+import { mswServer } from "@sentry/mcp-server-mocks";
+import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { structuredResult } from "./internal/tool-helpers/results";
 import { buildServer } from "./server";
+import type { Skill } from "./skills";
+import {
+  getGeneratedTextFromStructuredContent,
+  getStructuredContent,
+  getTextContent,
+} from "./test-utils/structured-content";
 import { createExecuteTool } from "./tools/special/execute-tool";
 import type { ToolConfig } from "./tools/types";
 import type { ServerContext } from "./types";
@@ -14,6 +24,14 @@ vi.mock("@sentry/core", () => ({
   setUser: vi.fn(),
   getActiveSpan: vi.fn(),
   startSpan: vi.fn(),
+  withScope: vi.fn((callback) =>
+    callback({
+      addAttachment: vi.fn(),
+      setContext: vi.fn(),
+    }),
+  ),
+  captureException: vi.fn(),
+  captureMessage: vi.fn(),
   wrapMcpServerWithSentry: vi.fn((server) => server),
 }));
 
@@ -85,41 +103,16 @@ async function callRegisteredTool(
   }
 }
 
-function getTextContent(result: unknown): string {
-  const content = (result as { content?: Array<{ text?: string }> }).content;
-  return content?.find((item) => typeof item.text === "string")?.text ?? "";
-}
-
-function getStructuredContent<T extends Record<string, unknown>>(
-  result: unknown,
-): T {
-  const structuredContent = (result as { structuredContent?: unknown })
-    .structuredContent;
-  if (
-    !structuredContent ||
-    typeof structuredContent !== "object" ||
-    Array.isArray(structuredContent)
-  ) {
-    throw new Error(`No structured content found: ${JSON.stringify(result)}`);
-  }
-
-  return structuredContent as T;
-}
-
 const DEFAULT_DIRECT_TOOL_NAMES = [
   "analyze_issue_with_seer",
-  "execute_tool",
+  "execute_sentry_tool",
   "find_organizations",
   "find_projects",
   "get_sentry_resource",
   "search_events",
   "search_issues",
-  "search_tools",
+  "search_sentry_tools",
   "update_issue",
-].sort();
-const DEFAULT_DIRECT_TOOL_NAMES_WITH_DOCS = [
-  ...DEFAULT_DIRECT_TOOL_NAMES,
-  "search_docs",
 ].sort();
 
 describe("buildServer", () => {
@@ -155,12 +148,83 @@ describe("buildServer", () => {
     inputSchema: {},
     skills: ["inspect"],
     requiredScopes: [],
-    annotations: {},
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: true,
+    },
     handler: async () => "result",
     ...options,
   });
 
+  it("registers and executes tools with the SDK v2 server", async () => {
+    const server = buildServer({
+      context: baseContext,
+      tools: {
+        v2_tool: createMockTool("v2_tool", {
+          inputSchema: { value: z.string() },
+          handler: async ({ value }) => `v2:${value}`,
+        }),
+      },
+      sdkVersion: "v2",
+    });
+
+    expect(server).toBeInstanceOf(ModernMcpServer);
+    const registeredTools = (
+      server as unknown as {
+        _registeredTools: Record<
+          string,
+          {
+            handler: (params: Record<string, unknown>) => Promise<unknown>;
+          }
+        >;
+      }
+    )._registeredTools;
+
+    expect(registeredTools.v2_tool).toBeDefined();
+    await expect(
+      registeredTools.v2_tool?.handler({ value: "ok" }),
+    ).resolves.toMatchObject({
+      content: [{ type: "text", text: "v2:ok" }],
+    });
+  });
+
   describe("telemetry context", () => {
+    it("generates compatibility text for structured-only tool output", async () => {
+      const server = buildServer({
+        context: baseContext,
+        tools: {
+          structured_tool: createMockTool("structured_tool", {
+            outputSchema: z.object({
+              status: z.string(),
+              count: z.number(),
+            }),
+            handler: async () =>
+              structuredResult({
+                status: "ok",
+                count: 2,
+              }),
+          }),
+        },
+      });
+
+      const result = await callRegisteredTool(server, "structured_tool", {});
+      const payload = getStructuredContent<{
+        status: string;
+        count: number;
+      }>(result);
+
+      expect(payload).toMatchInlineSnapshot(`
+        {
+          "count": 2,
+          "status": "ok",
+        }
+      `);
+      expect(getTextContent(result)).toBe(
+        getGeneratedTextFromStructuredContent(result),
+      );
+    });
+
     it("sets user ID and IP address together for tool calls", async () => {
       const server = buildServer({
         context: {
@@ -170,7 +234,11 @@ describe("buildServer", () => {
         },
         tools: {
           example_tool: createMockTool("example_tool", {
-            annotations: { readOnlyHint: true },
+            annotations: {
+              readOnlyHint: true,
+              destructiveHint: false,
+              openWorldHint: true,
+            },
           }),
         },
       });
@@ -236,27 +304,6 @@ describe("buildServer", () => {
       const toolNames = getRegisteredToolNames(server);
       expect(toolNames).toContain("regular_tool");
       expect(toolNames).toContain("experimental_tool");
-    });
-
-    it("only registers use_sentry in agent mode", () => {
-      // In agent mode, only use_sentry is registered, which handles all tools internally
-      const server = buildServer({
-        context: baseContext,
-        agentMode: true,
-        experimentalMode: false,
-        tools: {
-          use_sentry: createMockTool("use_sentry", { skills: [] }),
-          experimental_tool: createMockTool("experimental_tool", {
-            experimental: true,
-          }),
-        },
-      });
-
-      // In agent mode, only use_sentry should be registered
-      const toolNames = getRegisteredToolNames(server);
-      expect(toolNames).toContain("use_sentry");
-      // experimental_tool is not registered because agent mode only registers use_sentry
-      expect(toolNames).not.toContain("experimental_tool");
     });
 
     it("does not filter tools with experimental: false", () => {
@@ -589,12 +636,13 @@ describe("buildServer", () => {
       expect(toolNames).not.toContain("whoami");
       expect(toolNames).toContain("get_sentry_resource");
       expect(toolNames).not.toContain("get_issue_details");
+      expect(toolNames).not.toContain("get_issue_breadcrumbs");
       expect(toolNames).not.toContain("get_trace_details");
       expect(toolNames).not.toContain("get_snapshot");
       expect(toolNames).not.toContain("get_snapshot_image");
       expect(toolNames).not.toContain("get_snapshot_details");
-      expect(toolNames).toContain("search_tools");
-      expect(toolNames).toContain("execute_tool");
+      expect(toolNames).toContain("search_sentry_tools");
+      expect(toolNames).toContain("execute_sentry_tool");
       expect(toolNames.length).toBeGreaterThan(0);
     });
 
@@ -610,8 +658,8 @@ describe("buildServer", () => {
       expect(toolNames).toContain("get_sentry_resource");
       expect(toolNames).not.toContain("get_issue_details");
       expect(toolNames).not.toContain("get_trace_details");
-      expect(toolNames).toContain("search_tools");
-      expect(toolNames).toContain("execute_tool");
+      expect(toolNames).toContain("search_sentry_tools");
+      expect(toolNames).toContain("execute_sentry_tool");
     });
 
     it("includes all default tools when experimentalMode is true", () => {
@@ -626,8 +674,8 @@ describe("buildServer", () => {
       expect(toolNames).toContain("get_sentry_resource");
       expect(toolNames).not.toContain("get_issue_details");
       expect(toolNames).not.toContain("get_trace_details");
-      expect(toolNames).toContain("search_tools");
-      expect(toolNames).toContain("execute_tool");
+      expect(toolNames).toContain("search_sentry_tools");
+      expect(toolNames).toContain("execute_sentry_tool");
     });
 
     it("keeps get_sentry_resource available for legacy triage and seer skills", () => {
@@ -654,10 +702,9 @@ describe("buildServer", () => {
       const toolNames = registeredTools.map((tool) => tool.name).sort();
 
       expect(toolNames).toEqual(DEFAULT_DIRECT_TOOL_NAMES);
-      expect(toolNames).toContain("search_tools");
-      expect(toolNames).toContain("execute_tool");
+      expect(toolNames).toContain("search_sentry_tools");
+      expect(toolNames).toContain("execute_sentry_tool");
       expect(toolNames).not.toContain("whoami");
-      expect(toolNames).not.toContain("use_sentry");
       expect(toolNames).not.toContain("search_docs");
       expect(toolNames).not.toContain("get_doc");
       expect(toolNames).not.toContain("get_issue_details");
@@ -665,28 +712,90 @@ describe("buildServer", () => {
       expect(toolNames).not.toContain("get_profile");
     });
 
-    it("discloses docs tools through MCP tools/list when docs skill is granted", async () => {
-      const server = buildServer({
-        context: {
-          ...baseContext,
+    it("keeps docs tools catalog-only and executable under inspect and legacy docs grants", async () => {
+      const cases: Array<{
+        grantedSkills: ReadonlySet<Skill>;
+        expectedDirectTools: string[];
+      }> = [
+        {
           grantedSkills: new Set([
             "inspect",
             "triage",
             "project-management",
             "seer",
-            "docs",
           ]),
+          expectedDirectTools: DEFAULT_DIRECT_TOOL_NAMES,
         },
-      });
+        {
+          grantedSkills: new Set(["docs"]),
+          expectedDirectTools: [
+            "execute_sentry_tool",
+            "find_organizations",
+            "find_projects",
+            "search_sentry_tools",
+          ],
+        },
+      ] as const;
 
-      const registeredTools = await listRegisteredTools(server);
-      const toolNames = registeredTools.map((tool) => tool.name).sort();
+      for (const { grantedSkills, expectedDirectTools } of cases) {
+        const listServer = buildServer({
+          context: {
+            ...baseContext,
+            grantedSkills,
+          },
+        });
+        const registeredTools = await listRegisteredTools(listServer);
+        const toolNames = registeredTools.map((tool) => tool.name).sort();
 
-      expect(toolNames).toEqual(DEFAULT_DIRECT_TOOL_NAMES_WITH_DOCS);
-      expect(toolNames).toContain("search_docs");
-      expect(toolNames).not.toContain("get_doc");
-      expect(toolNames).toContain("search_tools");
-      expect(toolNames).toContain("execute_tool");
+        expect(toolNames).toEqual(expectedDirectTools);
+        expect(toolNames).not.toContain("search_docs");
+        expect(toolNames).not.toContain("get_doc");
+        expect(toolNames).toContain("search_sentry_tools");
+        expect(toolNames).toContain("execute_sentry_tool");
+
+        const searchServer = buildServer({
+          context: {
+            ...baseContext,
+            grantedSkills,
+          },
+        });
+        const searchResult = await callRegisteredTool(
+          searchServer,
+          "search_sentry_tools",
+          {
+            query: "documentation",
+            limit: 10,
+          },
+        );
+        const payload = getStructuredContent<{
+          results: Array<{ name: string }>;
+        }>(searchResult);
+
+        const catalogToolNames = payload.results.map((tool) => tool.name);
+        expect(catalogToolNames).toContain("search_docs");
+        expect(catalogToolNames).toContain("get_doc");
+
+        const executeServer = buildServer({
+          context: {
+            ...baseContext,
+            grantedSkills,
+          },
+        });
+        const executeResult = await callRegisteredTool(
+          executeServer,
+          "execute_sentry_tool",
+          {
+            name: "get_doc",
+            arguments: {
+              path: "/product/rate-limiting.md",
+            },
+          },
+        );
+
+        expect(getTextContent(executeResult)).toContain(
+          "# Project Rate Limits and Quotas",
+        );
+      }
     });
 
     it("keeps the same direct tool surface in experimental mode", async () => {
@@ -776,8 +885,9 @@ describe("buildServer", () => {
       expect(toolNames).not.toContain("create_project");
       expect(toolNames).not.toContain("find_releases");
       expect(toolNames).not.toContain("get_event_attachment");
+      expect(toolNames).not.toContain("get_event_stacktrace");
 
-      const result = await callRegisteredTool(server, "search_tools", {
+      const result = await callRegisteredTool(server, "search_sentry_tools", {
         query: "create project",
         limit: 5,
       });
@@ -788,17 +898,6 @@ describe("buildServer", () => {
       expect(payload.results.map((tool) => tool.name)).toContain(
         "create_project",
       );
-    });
-
-    it("discloses only use_sentry through MCP tools/list in agent mode", async () => {
-      const server = buildServer({
-        context: baseContext,
-        agentMode: true,
-      });
-
-      const registeredTools = await listRegisteredTools(server);
-
-      expect(registeredTools.map((tool) => tool.name)).toEqual(["use_sentry"]);
     });
 
     it("keeps snapshot tools catalog-only while enforcing the inspect skill gate", async () => {
@@ -815,7 +914,7 @@ describe("buildServer", () => {
 
       const hiddenResult = await callRegisteredTool(
         withoutInspect,
-        "search_tools",
+        "search_sentry_tools",
         {
           query: "snapshot",
           limit: 10,
@@ -838,7 +937,7 @@ describe("buildServer", () => {
 
       const visibleResult = await callRegisteredTool(
         withInspect,
-        "search_tools",
+        "search_sentry_tools",
         {
           query: "snapshot",
           limit: 10,
@@ -853,27 +952,6 @@ describe("buildServer", () => {
       expect(catalogToolNames).toContain("get_latest_base_snapshot");
     });
 
-    it("exposes use_sentry safety annotations through tool metadata in agent mode", async () => {
-      const server = buildServer({
-        context: baseContext,
-        agentMode: true,
-      });
-
-      const registeredTools = await listRegisteredTools(server);
-      const useSentryTool = registeredTools.find(
-        (tool) => tool.name === "use_sentry",
-      );
-
-      expect(useSentryTool).toMatchObject({
-        name: "use_sentry",
-        annotations: {
-          readOnlyHint: false,
-          destructiveHint: true,
-          openWorldHint: true,
-        },
-      });
-    });
-
     it("exposes catalog tools with conservative safety annotations", async () => {
       const server = buildServer({
         context: baseContext,
@@ -881,14 +959,14 @@ describe("buildServer", () => {
 
       const registeredTools = await listRegisteredTools(server);
       const searchTools = registeredTools.find(
-        (tool) => tool.name === "search_tools",
+        (tool) => tool.name === "search_sentry_tools",
       );
       const executeTool = registeredTools.find(
-        (tool) => tool.name === "execute_tool",
+        (tool) => tool.name === "execute_sentry_tool",
       );
 
       expect(searchTools).toMatchObject({
-        name: "search_tools",
+        name: "search_sentry_tools",
         outputSchema: {
           type: "object",
           properties: {
@@ -903,7 +981,7 @@ describe("buildServer", () => {
         },
       });
       expect(executeTool).toMatchObject({
-        name: "execute_tool",
+        name: "execute_sentry_tool",
         annotations: {
           readOnlyHint: false,
           destructiveHint: true,
@@ -912,7 +990,7 @@ describe("buildServer", () => {
       });
     });
 
-    it("search_tools returns available tools with constrained schemas", async () => {
+    it("search_sentry_tools returns available tools with constrained schemas", async () => {
       const server = buildServer({
         context: {
           ...baseContext,
@@ -923,7 +1001,7 @@ describe("buildServer", () => {
         },
       });
 
-      const result = await callRegisteredTool(server, "search_tools", {
+      const result = await callRegisteredTool(server, "search_sentry_tools", {
         query: "replay",
         limit: 1,
       });
@@ -941,7 +1019,9 @@ describe("buildServer", () => {
       const firstResult = payload.results[0];
 
       expect(payload.query).toBe("replay");
-      expect(getTextContent(result)).toBe(JSON.stringify(payload, null, 2));
+      expect(getTextContent(result)).toBe(
+        getGeneratedTextFromStructuredContent(result),
+      );
       expect(getTextContent(result)).not.toContain("# Tool Search Results");
       expect(getTextContent(result)).not.toContain("```json");
       expect(firstResult?.name).toBe("get_replay_details");
@@ -959,7 +1039,7 @@ describe("buildServer", () => {
       );
     });
 
-    it("search_tools hides constraint-injected schema parameters", async () => {
+    it("search_sentry_tools hides constraint-injected schema parameters", async () => {
       const server = buildServer({
         context: {
           ...baseContext,
@@ -971,7 +1051,7 @@ describe("buildServer", () => {
         },
       });
 
-      const result = await callRegisteredTool(server, "search_tools", {
+      const result = await callRegisteredTool(server, "search_sentry_tools", {
         query: "issues",
         limit: 10,
       });
@@ -999,28 +1079,29 @@ describe("buildServer", () => {
       expect(searchIssues?.inputSchema.properties).toHaveProperty("query");
     });
 
-    it("search_tools includes catalog-only tools that are not directly registered", async () => {
+    it("search_sentry_tools includes catalog-only tools that are not directly registered", async () => {
       const server = buildServer({
         context: baseContext,
       });
 
       const toolNames = getRegisteredToolNames(server);
       expect(toolNames).not.toContain("get_issue_details");
+      expect(toolNames).not.toContain("get_event_stacktrace");
 
-      const result = await callRegisteredTool(server, "search_tools", {
-        query: "issue details",
+      const result = await callRegisteredTool(server, "search_sentry_tools", {
+        query: "event stacktrace",
         limit: 5,
       });
       const payload = getStructuredContent<{
         results: Array<{ name: string }>;
       }>(result);
 
-      expect(payload.results.map((tool) => tool.name)).toContain(
-        "get_issue_details",
-      );
+      const resultNames = payload.results.map((tool) => tool.name);
+      expect(resultNames).toContain("get_issue_details");
+      expect(resultNames).toContain("get_event_stacktrace");
     });
 
-    it("search_tools includes whoami as a catalog-only foundational tool", async () => {
+    it("search_sentry_tools includes whoami as a catalog-only foundational tool", async () => {
       const server = buildServer({
         context: {
           ...baseContext,
@@ -1031,7 +1112,7 @@ describe("buildServer", () => {
       const toolNames = getRegisteredToolNames(server);
       expect(toolNames).not.toContain("whoami");
 
-      const result = await callRegisteredTool(server, "search_tools", {
+      const result = await callRegisteredTool(server, "search_sentry_tools", {
         query: "authenticated user",
         limit: 10,
       });
@@ -1042,7 +1123,7 @@ describe("buildServer", () => {
       expect(payload.results.map((tool) => tool.name)).toContain("whoami");
     });
 
-    it("search_tools omits unavailable non-inspect tools", async () => {
+    it("search_sentry_tools omits unavailable non-inspect tools", async () => {
       const inspectSeerServer = buildServer({
         context: {
           ...baseContext,
@@ -1055,10 +1136,10 @@ describe("buildServer", () => {
         ["create_project", ["project-management"]],
         ["create_team", ["project-management"]],
         ["update_project", ["project-management"]],
+        ["add_team_to_project", ["project-management"]],
+        ["remove_team_from_project", ["project-management"]],
         ["create_dsn", ["project-management"]],
         ["find_dsns", ["project-management"]],
-        ["search_docs", ["docs"]],
-        ["get_doc", ["docs"]],
       ] as const) {
         const grantedServer = buildServer({
           context: {
@@ -1068,7 +1149,7 @@ describe("buildServer", () => {
         });
         const grantedResult = await callRegisteredTool(
           grantedServer,
-          "search_tools",
+          "search_sentry_tools",
           {
             query: toolName,
             limit: 10,
@@ -1083,7 +1164,7 @@ describe("buildServer", () => {
 
         const inspectSeerResult = await callRegisteredTool(
           inspectSeerServer,
-          "search_tools",
+          "search_sentry_tools",
           {
             query: toolName,
             limit: 10,
@@ -1098,7 +1179,7 @@ describe("buildServer", () => {
       }
     });
 
-    it("execute_tool rejects unavailable non-inspect tools", async () => {
+    it("execute_sentry_tool rejects unavailable non-inspect tools", async () => {
       const server = buildServer({
         context: {
           ...baseContext,
@@ -1106,7 +1187,7 @@ describe("buildServer", () => {
         },
       });
 
-      const result = await callRegisteredTool(server, "execute_tool", {
+      const result = await callRegisteredTool(server, "execute_sentry_tool", {
         name: "update_issue",
         arguments: {
           organizationSlug: "sentry-mcp-evals",
@@ -1121,7 +1202,7 @@ describe("buildServer", () => {
       );
     });
 
-    it("search_tools and execute_tool enforce project capabilities by default", async () => {
+    it("search_sentry_tools and execute_sentry_tool enforce project capabilities by default", async () => {
       const server = buildServer({
         context: {
           ...baseContext,
@@ -1138,7 +1219,7 @@ describe("buildServer", () => {
         },
       });
 
-      const result = await callRegisteredTool(server, "search_tools", {
+      const result = await callRegisteredTool(server, "search_sentry_tools", {
         query: "replay details",
         limit: 10,
       });
@@ -1149,12 +1230,16 @@ describe("buildServer", () => {
       expect(payload.results.map((tool) => tool.name)).not.toContain(
         "get_replay_details",
       );
-      const executeResult = await callRegisteredTool(server, "execute_tool", {
-        name: "get_replay_details",
-        arguments: {
-          replayId: "7e07485f12f9416b8b1426260799b51f",
+      const executeResult = await callRegisteredTool(
+        server,
+        "execute_sentry_tool",
+        {
+          name: "get_replay_details",
+          arguments: {
+            replayId: "7e07485f12f9416b8b1426260799b51f",
+          },
         },
-      });
+      );
 
       expect(executeResult).toMatchObject({ isError: true });
       expect(getTextContent(executeResult)).toContain(
@@ -1162,20 +1247,32 @@ describe("buildServer", () => {
       );
     });
 
-    it("execute_tool dispatches to an available tool", async () => {
+    it("execute_sentry_tool dispatches to an available tool", async () => {
       const server = buildServer({
         context: baseContext,
       });
 
-      const result = await callRegisteredTool(server, "execute_tool", {
+      const result = await callRegisteredTool(server, "execute_sentry_tool", {
         name: "find_organizations",
         arguments: {},
       });
 
-      expect(getTextContent(result)).toContain("# Organizations");
+      expect(getStructuredContent(result)).toEqual({
+        organizations: [
+          {
+            slug: "sentry-mcp-evals",
+            webUrl: "https://sentry.io/sentry-mcp-evals",
+            regionUrl: "https://us.sentry.io",
+          },
+        ],
+        hasMore: false,
+      });
+      expect(getTextContent(result)).toBe(
+        getGeneratedTextFromStructuredContent(result),
+      );
     });
 
-    it("execute_tool dispatches to a catalog-only tool", async () => {
+    it("execute_sentry_tool dispatches to a catalog-only tool", async () => {
       const server = buildServer({
         context: baseContext,
       });
@@ -1183,7 +1280,7 @@ describe("buildServer", () => {
       const toolNames = getRegisteredToolNames(server);
       expect(toolNames).not.toContain("get_issue_details");
 
-      const result = await callRegisteredTool(server, "execute_tool", {
+      const result = await callRegisteredTool(server, "execute_sentry_tool", {
         name: "get_issue_details",
         arguments: {
           organizationSlug: "sentry-mcp-evals",
@@ -1196,7 +1293,74 @@ describe("buildServer", () => {
       );
     });
 
-    it("execute_tool dispatches to catalog-only whoami", async () => {
+    it("execute_sentry_tool dispatches to catalog-only event stacktrace", async () => {
+      const server = buildServer({
+        context: baseContext,
+      });
+
+      const toolNames = getRegisteredToolNames(server);
+      expect(toolNames).not.toContain("get_event_stacktrace");
+
+      const result = await callRegisteredTool(server, "execute_sentry_tool", {
+        name: "get_event_stacktrace",
+        arguments: {
+          organizationSlug: "sentry-mcp-evals",
+          issueId: "CLOUDFLARE-MCP-41",
+        },
+      });
+
+      expect(getTextContent(result)).toContain(
+        "# Event Stacktrace in **sentry-mcp-evals**",
+      );
+    });
+
+    it("execute_sentry_tool dispatches to catalog-only issue user reports", async () => {
+      const server = buildServer({
+        context: baseContext,
+      });
+
+      const toolNames = getRegisteredToolNames(server);
+      expect(toolNames).not.toContain("get_issue_user_reports");
+
+      const result = await callRegisteredTool(server, "execute_sentry_tool", {
+        name: "get_issue_user_reports",
+        arguments: {
+          organizationSlug: "sentry-mcp-evals",
+          issueId: "CLOUDFLARE-MCP-41",
+        },
+      });
+
+      expect(getTextContent(result)).toContain(
+        "# Issue User Reports for Issue CLOUDFLARE-MCP-41 in **sentry-mcp-evals**",
+      );
+    });
+
+    it("execute_sentry_tool dispatches to catalog-only update_dsn", async () => {
+      const server = buildServer({
+        context: baseContext,
+      });
+
+      const toolNames = getRegisteredToolNames(server);
+      expect(toolNames).not.toContain("update_dsn");
+
+      const result = await callRegisteredTool(server, "execute_sentry_tool", {
+        name: "update_dsn",
+        arguments: {
+          organizationSlug: "sentry-mcp-evals",
+          projectSlug: "cloudflare-mcp",
+          keyId: "d20df0a1ab5031c7f3c7edca9c02814d",
+          rateLimitWindow: 3600,
+          rateLimitCount: 0,
+        },
+      });
+
+      expect(getTextContent(result)).toContain(
+        "# Updated DSN in **sentry-mcp-evals/cloudflare-mcp**",
+      );
+      expect(getTextContent(result)).toContain("**Rate Limit**: Disabled");
+    });
+
+    it("execute_sentry_tool dispatches to catalog-only whoami", async () => {
       const server = buildServer({
         context: {
           ...baseContext,
@@ -1207,15 +1371,108 @@ describe("buildServer", () => {
       const toolNames = getRegisteredToolNames(server);
       expect(toolNames).not.toContain("whoami");
 
-      const result = await callRegisteredTool(server, "execute_tool", {
+      const result = await callRegisteredTool(server, "execute_sentry_tool", {
         name: "whoami",
         arguments: {},
       });
 
-      expect(getTextContent(result)).toContain("You are authenticated as");
+      const payload = getStructuredContent<{
+        user: {
+          id: string;
+          name: string | null;
+          email: string;
+        };
+        sessionConstraints: null;
+      }>(result);
+
+      expect(payload).toMatchInlineSnapshot(`
+        {
+          "sessionConstraints": null,
+          "user": {
+            "email": "test@example.com",
+            "id": "123456",
+            "name": "Test User",
+          },
+        }
+      `);
+      expect(getTextContent(result)).toBe(
+        getGeneratedTextFromStructuredContent(result),
+      );
     });
 
-    it("execute_tool passes effective arguments to a catalog tool", async () => {
+    it("execute_sentry_tool dispatches structured catalog results", async () => {
+      mswServer.use(
+        http.get(
+          "https://sentry.io/api/0/organizations/test-org/ai-conversations/",
+          ({ request }) => {
+            const url = new URL(request.url);
+            expect(url.searchParams.get("query")).toBe("checkout");
+            expect(url.searchParams.get("statsPeriod")).toBe("7d");
+            expect(url.searchParams.get("per_page")).toBe("10");
+            return HttpResponse.json([
+              {
+                conversationId: "conv-123",
+                title: "Checkout worker timeouts",
+                flow: ["triage-agent"],
+                errors: 1,
+                llmCalls: 2,
+                toolCalls: 1,
+                toolErrors: 0,
+                totalTokens: 1200,
+                totalCost: 0.012,
+                startTimestamp: 1713805400000,
+                endTimestamp: 1713805415000,
+                traceCount: 1,
+                traceIds: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+                firstInput: "What failed in checkout?",
+                lastOutput: "The checkout worker is timing out.",
+                user: {
+                  id: "1",
+                  email: "dev@example.com",
+                  username: "dev",
+                  ip_address: "127.0.0.1",
+                },
+                toolNames: ["search_events"],
+              },
+            ]);
+          },
+        ),
+      );
+      const server = buildServer({
+        context: {
+          ...baseContext,
+          grantedSkills: new Set(["inspect"]),
+        },
+      });
+
+      const result = await callRegisteredTool(server, "execute_sentry_tool", {
+        name: "search_ai_conversations",
+        arguments: {
+          organizationSlug: "test-org",
+          query: "checkout",
+          period: "7d",
+          limit: 10,
+        },
+      });
+      const payload = getStructuredContent<{
+        conversations: Array<{
+          conversationId: string;
+          sampleTraceIds: string[];
+        }>;
+      }>(result);
+
+      expect(payload.conversations).toMatchObject([
+        {
+          conversationId: "conv-123",
+          sampleTraceIds: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+        },
+      ]);
+      expect(getTextContent(result)).toBe(
+        getGeneratedTextFromStructuredContent(result),
+      );
+    });
+
+    it("execute_sentry_tool passes effective arguments to a catalog tool", async () => {
       const handler = vi.fn(async (params: unknown) => {
         const parsed = params as {
           organizationSlug: string;
@@ -1233,7 +1490,7 @@ describe("buildServer", () => {
         },
         handler,
       });
-      registry.execute_tool = createExecuteTool(() => registry);
+      registry.execute_sentry_tool = createExecuteTool(() => registry);
       const server = buildServer({
         context: {
           ...baseContext,
@@ -1245,7 +1502,7 @@ describe("buildServer", () => {
         tools: registry,
       });
 
-      const result = await callRegisteredTool(server, "execute_tool", {
+      const result = await callRegisteredTool(server, "execute_sentry_tool", {
         name: "fake_catalog_tool",
         arguments: {
           filter: "handled",
@@ -1280,20 +1537,20 @@ describe("buildServer", () => {
       expect(startSpan).not.toHaveBeenCalled();
     });
 
-    it("marks the catalog tool span as errored when execute_tool validation fails", async () => {
+    it("marks the catalog tool span as errored when execute_sentry_tool validation fails", async () => {
       const registry: Record<string, ToolConfig> = {};
       registry.fake_catalog_tool = createMockTool("fake_catalog_tool", {
         inputSchema: {
           requiredValue: z.string(),
         },
       });
-      registry.execute_tool = createExecuteTool(() => registry);
+      registry.execute_sentry_tool = createExecuteTool(() => registry);
       const server = buildServer({
         context: baseContext,
         tools: registry,
       });
 
-      const result = await callRegisteredTool(server, "execute_tool", {
+      const result = await callRegisteredTool(server, "execute_sentry_tool", {
         name: "fake_catalog_tool",
         arguments: {},
       });
@@ -1312,10 +1569,11 @@ describe("buildServer", () => {
       );
       const span = startedSpans[0];
       expect(span?.setStatus).toHaveBeenCalledWith({ code: 2 });
-      expect(span?.recordException).toHaveBeenCalledWith(expect.any(Error));
+      // Expected validation failures mark the span failed without recording an exception.
+      expect(span?.recordException).not.toHaveBeenCalled();
     });
 
-    it("execute_tool injects constrained arguments for catalog-only tools", async () => {
+    it("execute_sentry_tool injects constrained arguments for catalog-only tools", async () => {
       const server = buildServer({
         context: {
           ...baseContext,
@@ -1327,7 +1585,7 @@ describe("buildServer", () => {
         },
       });
 
-      const result = await callRegisteredTool(server, "execute_tool", {
+      const result = await callRegisteredTool(server, "execute_sentry_tool", {
         name: "get_issue_details",
         arguments: {
           issueId: "CLOUDFLARE-MCP-41",
@@ -1339,7 +1597,7 @@ describe("buildServer", () => {
       );
     });
 
-    it("exposes catalog-only tool safety annotations through search_tools", async () => {
+    it("exposes catalog-only tool safety annotations through search_sentry_tools", async () => {
       const server = buildServer({
         context: baseContext,
       });
@@ -1347,7 +1605,7 @@ describe("buildServer", () => {
       const registeredToolNames = getRegisteredToolNames(server);
       expect(registeredToolNames).not.toContain("get_profile_details");
 
-      const result = await callRegisteredTool(server, "search_tools", {
+      const result = await callRegisteredTool(server, "search_sentry_tools", {
         query: "profile details",
         limit: 5,
       });
@@ -1381,7 +1639,7 @@ describe("buildServer", () => {
         },
       });
 
-      const result = await callRegisteredTool(server, "search_tools", {
+      const result = await callRegisteredTool(server, "search_sentry_tools", {
         query: "replay details",
         limit: 1,
       });

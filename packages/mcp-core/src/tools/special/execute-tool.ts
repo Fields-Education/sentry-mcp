@@ -1,6 +1,7 @@
 import { type Span, type SpanAttributeValue, startSpan } from "@sentry/core";
 import { z } from "zod";
 import { defineTool } from "../../internal/tool-helpers/define";
+import { isExpectedToolError } from "../../internal/error-handling";
 import { UserInputError } from "../../errors";
 import { ALL_SKILLS } from "../../skills";
 import type { ServerContext } from "../../types";
@@ -61,7 +62,11 @@ async function executeCatalogToolWithSpan({
         return output;
       } catch (error) {
         span.setStatus({ code: 2 });
-        span.recordException(error);
+        // Expected failures (validation, AI provider outages) still fail the
+        // span, but skip exception recording to avoid Sentry noise.
+        if (!isExpectedToolError(error)) {
+          span.recordException(error);
+        }
         throw error;
       }
     },
@@ -70,23 +75,23 @@ async function executeCatalogToolWithSpan({
 
 export function createExecuteTool(getTools: () => ToolRegistry) {
   return defineTool({
-    name: "execute_tool",
+    name: "execute_sentry_tool",
     skills: ALL_SKILLS,
     requiredScopes: [],
     description: [
-      "Execute an available Sentry MCP tool discovered through search_tools.",
+      "Execute an available Sentry MCP tool discovered through search_sentry_tools.",
       "",
       "Use this tool when you need to:",
-      "- Call a Sentry operation returned by search_tools",
+      "- Call a Sentry operation returned by search_sentry_tools",
       "- Execute a tool by name using arguments that match its returned schema",
       "",
       "<examples>",
-      "execute_tool(name='find_projects', arguments={ organizationSlug: 'my-org' })",
-      "execute_tool(name='whoami', arguments={})",
+      "execute_sentry_tool(name='find_projects', arguments={ organizationSlug: 'my-org' })",
+      "execute_sentry_tool(name='whoami', arguments={})",
       "</examples>",
       "",
       "<hints>",
-      "- Use search_tools first if you are not sure which name or arguments to pass.",
+      "- Use search_sentry_tools first if you are not sure which name or arguments to pass.",
       "- Arguments are validated against the target tool's schema before execution.",
       "- Active organization, project, and region constraints are injected automatically.",
       "</hints>",
@@ -98,10 +103,10 @@ export function createExecuteTool(getTools: () => ToolRegistry) {
         .min(1)
         .describe("The name of the available tool to execute."),
       arguments: z
-        .record(z.unknown())
+        .record(z.string(), z.unknown())
         .default({})
         .describe(
-          "Arguments for the target tool, matching the schema returned by search_tools.",
+          "Arguments for the target tool, matching the schema returned by search_sentry_tools.",
         ),
     },
     annotations: {
@@ -122,7 +127,7 @@ export function createExecuteTool(getTools: () => ToolRegistry) {
 
       if (!match) {
         throw new UserInputError(
-          `Tool "${params.name}" is not available in this session. Use search_tools to find an executable tool.`,
+          `Tool "${params.name}" is not available in this session. Use search_sentry_tools to find an executable tool.`,
         );
       }
 

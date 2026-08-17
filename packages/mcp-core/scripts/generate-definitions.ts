@@ -9,7 +9,6 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { type ZodTypeAny, z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,7 +32,12 @@ function zodFieldMapToJsonSchema(
 ): unknown {
   if (!fieldMap || Object.keys(fieldMap).length === 0) return {};
   const obj = z.object(fieldMap);
-  return zodToJsonSchema(obj, { $refStrategy: "none" });
+  const { $schema: _, ...jsonSchema } = z.toJSONSchema(obj, {
+    io: "input",
+    target: "draft-7",
+    unrepresentable: "any",
+  });
+  return jsonSchema;
 }
 
 // Plugin variants whose agent frontmatter gets synced by this script.
@@ -73,7 +77,9 @@ type DefinitionTool = {
         directToolNames?: ReadonlySet<string>;
       }) => string);
   inputSchema: Record<string, ZodTypeAny>;
+  outputSchema?: ZodTypeAny;
   skills: string[];
+  includeInSkillDefinitions?: boolean;
   requiredScopes: string[];
   experimental?: boolean;
   hideInExperimentalMode?: boolean;
@@ -81,7 +87,7 @@ type DefinitionTool = {
 
 type ToolSurface = "direct" | "catalog";
 
-function isEnabledByDefaultSkills(tool: DefinitionTool): boolean {
+function isEnabledByDefaultSkills(tool: { skills: string[] }): boolean {
   const defaultSkills = skillsModule.DEFAULT_SKILLS as readonly string[];
   return (
     Array.isArray(tool.skills) &&
@@ -159,6 +165,15 @@ function generateToolDefinitions({
       }),
       // Export full JSON Schema under inputSchema for external docs
       inputSchema: jsonSchema,
+      outputSchema: t.outputSchema
+        ? (({ $schema: _, ...jsonSchema }) => jsonSchema)(
+            z.toJSONSchema(t.outputSchema, {
+              io: "output",
+              target: "draft-7",
+              unrepresentable: "any",
+            }),
+          )
+        : undefined,
       // Preserve tool access requirements for UIs/docs
       requiredScopes: t.requiredScopes,
       // Preserve skill catalog membership and call surface for UIs/docs.
@@ -178,6 +193,7 @@ async function generateSkillDefinitions() {
         name: string;
         description: string;
         defaultEnabled: boolean;
+        deprecated?: boolean;
         order: number;
         toolCount?: number;
       }>
@@ -238,6 +254,7 @@ async function generateSkillDefinitions() {
       const t = tool as DefinitionTool;
       return (
         isSkillDefinitionTool(t) &&
+        t.includeInSkillDefinitions !== false &&
         Array.isArray(t.skills) &&
         t.skills.includes(skill.id)
       );
@@ -392,7 +409,7 @@ async function main() {
 
     // Sync allowedTools in agent frontmatter with the direct MCP surface that
     // is available under the default OAuth grant. Optional-skill tools remain
-    // available through search_tools/execute_tool when the user grants them,
+    // available through search_sentry_tools/execute_sentry_tool when the user grants them,
     // without advertising direct calls that many sessions cannot execute.
     const directTools = tools.filter((tool) => tool.surface === "direct");
     const experimentalDirectTools = experimentalTools.filter(
