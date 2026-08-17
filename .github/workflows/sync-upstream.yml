@@ -44,13 +44,13 @@ jobs:
         id: check
         run: |
           UPSTREAM_COMMITS=$(git rev-list HEAD..upstream/main --count)
-          echo "upstream_commits=$UPSTREAM_COMMITS" >> $GITHUB_OUTPUT
+          echo "upstream_commits=$UPSTREAM_COMMITS" >> "$GITHUB_OUTPUT"
           if [ "$UPSTREAM_COMMITS" -gt 0 ]; then
             echo "Found $UPSTREAM_COMMITS new commits from upstream"
-            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
           else
             echo "No new commits from upstream"
-            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Rebase onto upstream
@@ -63,29 +63,38 @@ jobs:
           # Rebase our fork commits on top of upstream/main.
           # This keeps upstream commit SHAs intact so GitHub shows 0 behind.
           if git rebase upstream/main; then
-            echo "rebase_success=true" >> $GITHUB_OUTPUT
+            echo "rebase_success=true" >> "$GITHUB_OUTPUT"
             echo "Rebase successful!"
 
             # Ensure upstream workflows stay disabled on our fork
-            WORKFLOWS_CHANGED=false
-            for wf in deploy.yml release.yml warden.yml test.yml smoke-tests.yml token-cost.yml eval.yml merge-jobs.yml; do
+            FORK_CHANGES=false
+            for wf in deploy.yml release.yml warden.yml test.yml smoke-tests.yml token-cost.yml eval.yml merge-jobs.yml mcp-server-package.yml; do
               if [ -f ".github/workflows/$wf" ]; then
                 mv ".github/workflows/$wf" ".github/workflows/$wf.disabled"
                 git add ".github/workflows/$wf.disabled"
                 git rm ".github/workflows/$wf" 2>/dev/null || true
-                WORKFLOWS_CHANGED=true
+                FORK_CHANGES=true
               fi
             done
 
-            if [ "$WORKFLOWS_CHANGED" = true ]; then
-              git commit -m "chore: keep sentry workflows disabled"
+            # Keep the Fields package on the same release as the shared source
+            UPSTREAM_VERSION=$(node -p "require('./packages/mcp-cloudflare/package.json').version")
+            FIELDS_VERSION=$(node -p "require('./packages/mcp-cloudflare-fields/package.json').version")
+            if [ "$FIELDS_VERSION" != "$UPSTREAM_VERSION" ]; then
+              npm pkg set "version=$UPSTREAM_VERSION" --prefix packages/mcp-cloudflare-fields
+              git add packages/mcp-cloudflare-fields/package.json
+              FORK_CHANGES=true
+            fi
+
+            if [ "$FORK_CHANGES" = true ]; then
+              git commit -m "chore: keep fork configuration in sync"
             fi
 
             # Force push since rebase rewrites our fork commits
             git push origin main --force-with-lease
             echo "Successfully rebased onto upstream"
           else
-            echo "rebase_success=false" >> $GITHUB_OUTPUT
+            echo "rebase_success=false" >> "$GITHUB_OUTPUT"
             echo "Rebase failed - conflicts detected"
             git rebase --abort || true
           fi
@@ -94,7 +103,7 @@ jobs:
         if: steps.check.outputs.has_changes == 'true' && steps.rebase.outputs.rebase_success == 'false'
         run: |
           curl -fsSL https://opencode.ai/install | bash
-          echo "$HOME/.opencode/bin" >> $GITHUB_PATH
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
       - name: Use OpenCode to resolve conflicts
         if: steps.check.outputs.has_changes == 'true' && steps.rebase.outputs.rebase_success == 'false'
@@ -126,6 +135,7 @@ jobs:
           3. Now apply our fork-specific customizations. Key context:
              - This is the Fields Education fork deployed to Cloudflare
              - `packages/mcp-cloudflare-fields/` is OUR package - check origin/main for its contents
+             - Keep its version and shared dependencies aligned with `packages/mcp-cloudflare/package.json`
              - `.github/workflows/deploy-fields.yml` is OUR deploy workflow
              - `.github/workflows/sync-upstream.yml` is OUR sync workflow
 
@@ -138,7 +148,7 @@ jobs:
           5. IMPORTANT - Keep ALL upstream Sentry workflows DISABLED:
              - Rename any of these to `<name>.disabled` if they appear as active .yml files:
                deploy.yml, release.yml, warden.yml, test.yml, smoke-tests.yml,
-               token-cost.yml, eval.yml, merge-jobs.yml
+               token-cost.yml, eval.yml, merge-jobs.yml, mcp-server-package.yml
              - Our `.disabled` suffix prevents them from running on the fork
 
           6. Verify the result:
@@ -157,6 +167,6 @@ jobs:
           )
 
           opencode run \
-            --model opencode/claude-opus-4-5 \
+            --model opencode/claude-opus-5 \
             --print-logs \
             "$PROMPT"

@@ -3,7 +3,7 @@
  * Uses separate resources for complete isolation from production
  *
  * Required secrets (same as production - set via `wrangler secret put <NAME> --config wrangler.canary.jsonc`):
- *   - SENTRY_CLIENT_ID, SENTRY_CLIENT_SECRET, COOKIE_SECRET, OPENAI_API_KEY, SENTRY_DSN, SENTRY_HOST
+ *   - SENTRY_CLIENT_ID, SENTRY_CLIENT_SECRET, COOKIE_SECRET, OPENROUTER_API_KEY, SENTRY_DSN, SENTRY_HOST
  */
 {
   "$schema": "node_modules/wrangler/config-schema.json",

@@ -73,14 +73,23 @@ describe("cli/finalize", () => {
     expect(cfg.agentProvider).toBe("azure-openai");
   });
 
+  it("accepts openrouter as a valid explicit provider", () => {
+    const cfg = finalize({
+      accessToken: "tok",
+      agentProvider: "openrouter",
+      unknownArgs: [],
+    });
+    expect(cfg.agentProvider).toBe("openrouter");
+  });
+
   it("rejects invalid explicit provider values", () => {
     expect(() =>
       finalize({
         accessToken: "tok",
-        agentProvider: "openrouter",
+        agentProvider: "bad-provider",
         unknownArgs: [],
       }),
-    ).toThrow(/Must be "openai", "azure-openai", or "anthropic"/);
+    ).toThrow(/Must be "openai", "azure-openai", "anthropic", or "openrouter"/);
   });
 
   it("throws on non-https URL", () => {
@@ -159,6 +168,15 @@ describe("cli/finalize", () => {
     expect(cfg.finalSkills.has("docs")).toBe(false);
   });
 
+  it("allows explicit legacy docs skill grants", () => {
+    const cfg = finalize({
+      accessToken: "tok",
+      skills: "docs",
+      unknownArgs: [],
+    });
+    expect(cfg.finalSkills).toEqual(new Set(["docs"]));
+  });
+
   it("throws on legacy preprod skill in stdio", () => {
     expect(() =>
       finalize({
@@ -179,33 +197,59 @@ describe("cli/finalize", () => {
     ).toThrow(/Invalid skills provided/);
   });
 
-  it("grants all skills when no skills specified", () => {
+  it("grants all active skills when no skills specified", () => {
     const cfg = finalize({
       accessToken: "tok",
       unknownArgs: [],
     });
-    expect(cfg.finalSkills.size).toBe(5);
+    expect(cfg.finalSkills.size).toBe(4);
     expect(cfg.finalSkills.has("inspect")).toBe(true);
     expect(cfg.finalSkills.has("triage")).toBe(true);
     expect(cfg.finalSkills.has("project-management")).toBe(true);
     expect(cfg.finalSkills.has("seer")).toBe(true);
-    expect(cfg.finalSkills.has("docs")).toBe(true);
+    expect(cfg.finalSkills.has("docs")).toBe(false);
     expect(cfg.finalSkills.has("preprod")).toBe(false);
   });
 
+  it("grants all active skills with --all-skills", () => {
+    const cfg = finalize({
+      accessToken: "tok",
+      allSkills: true,
+      unknownArgs: [],
+    });
+    expect(cfg.finalSkills.size).toBe(4);
+    expect(cfg.finalSkills.has("inspect")).toBe(true);
+    expect(cfg.finalSkills.has("triage")).toBe(true);
+    expect(cfg.finalSkills.has("project-management")).toBe(true);
+    expect(cfg.finalSkills.has("seer")).toBe(true);
+    expect(cfg.finalSkills.has("docs")).toBe(false);
+    expect(cfg.finalSkills.has("preprod")).toBe(false);
+  });
+
+  it("rejects combining --all-skills with --skills", () => {
+    expect(() =>
+      finalize({
+        accessToken: "tok",
+        allSkills: true,
+        skills: "inspect",
+        unknownArgs: [],
+      }),
+    ).toThrow(/--all-skills cannot be combined with --skills/);
+  });
+
   // --disable-skills tests
-  it("removes disabled skills from default all-skills set", () => {
+  it("removes disabled skills from default active-skills set", () => {
     const cfg = finalize({
       accessToken: "tok",
       disableSkills: "seer",
       unknownArgs: [],
     });
     expect(cfg.finalSkills.has("seer")).toBe(false);
-    expect(cfg.finalSkills.size).toBe(4);
+    expect(cfg.finalSkills.size).toBe(3);
     expect(cfg.finalSkills.has("inspect")).toBe(true);
     expect(cfg.finalSkills.has("triage")).toBe(true);
     expect(cfg.finalSkills.has("project-management")).toBe(true);
-    expect(cfg.finalSkills.has("docs")).toBe(true);
+    expect(cfg.finalSkills.has("docs")).toBe(false);
     expect(cfg.finalSkills.has("preprod")).toBe(false);
   });
 

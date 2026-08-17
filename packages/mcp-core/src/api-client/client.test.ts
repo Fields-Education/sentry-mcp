@@ -1,8 +1,8 @@
-import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+import { mswServer, teamFixture } from "@sentry/mcp-server-mocks";
 import { http, HttpResponse } from "msw";
-import { mswServer } from "@sentry/mcp-server-mocks";
-import { SentryApiService } from "./client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfigurationError } from "../errors";
+import { SentryApiService } from "./client";
 
 describe("getIssueUrl", () => {
   it("should work with sentry.io", () => {
@@ -327,6 +327,86 @@ describe("getEventsExplorerUrl", () => {
       expect(result).toContain("mode=aggregate");
     });
   });
+
+  describe("logs dataset", () => {
+    it("should build a sample Logs Explorer URL scoped to all projects", () => {
+      const apiService = new SentryApiService({ host: "sentry.io" });
+      const result = apiService.getEventsExplorerUrl(
+        "sentry-mcp",
+        "severity:error",
+        undefined,
+        "logs",
+        ["timestamp", "message", "severity"],
+        "-timestamp",
+        undefined,
+        undefined,
+        "7d",
+      );
+      const url = new URL(result);
+
+      expect(url.pathname).toBe("/explore/logs/");
+      expect(url.searchParams.get("logsQuery")).toBe("severity:error");
+      expect(url.searchParams.getAll("logsFields")).toEqual([
+        "timestamp",
+        "message",
+        "severity",
+      ]);
+      expect(url.searchParams.get("logsSortBys")).toBe("-timestamp");
+      expect(url.searchParams.get("mode")).toBe("samples");
+      expect(url.searchParams.get("project")).toBe("-1");
+      expect(url.searchParams.get("statsPeriod")).toBe("7d");
+      expect(url.searchParams.has("query")).toBe(false);
+      expect(url.searchParams.has("field")).toBe(false);
+      expect(url.searchParams.has("sort")).toBe(false);
+    });
+
+    it("should preserve explicit project and absolute time scope", () => {
+      const apiService = new SentryApiService({ host: "sentry.io" });
+      const result = apiService.getEventsExplorerUrl(
+        "sentry-mcp",
+        "service:api",
+        "123456",
+        "logs",
+        ["timestamp", "message"],
+        "-timestamp",
+        undefined,
+        undefined,
+        "7d",
+        "2025-07-29T07:00:00",
+        "2025-07-31T06:59:59",
+      );
+      const url = new URL(result);
+
+      expect(url.searchParams.get("project")).toBe("123456");
+      expect(url.searchParams.get("start")).toBe("2025-07-29T07:00:00");
+      expect(url.searchParams.get("end")).toBe("2025-07-31T06:59:59");
+      expect(url.searchParams.has("statsPeriod")).toBe(false);
+    });
+
+    it("should build an aggregate Logs Explorer URL", () => {
+      const apiService = new SentryApiService({ host: "sentry.io" });
+      const result = apiService.getEventsExplorerUrl(
+        "sentry-mcp",
+        "severity:error",
+        undefined,
+        "logs",
+        ["service", "count()"],
+        "-count()",
+        ["count()"],
+        ["service"],
+      );
+      const url = new URL(result);
+
+      expect(url.searchParams.get("mode")).toBe("aggregate");
+      expect(url.searchParams.getAll("aggregateField")).toEqual([
+        JSON.stringify({ groupBy: "service" }),
+        JSON.stringify({ yAxes: ["count()"] }),
+      ]);
+      expect(url.searchParams.get("logsAggregateSortBys")).toBe("-count()");
+      expect(url.searchParams.has("logsFields")).toBe(false);
+      expect(url.searchParams.has("logsSortBys")).toBe(false);
+    });
+  });
 });
 
 describe("monitor time parameters", () => {
@@ -446,6 +526,49 @@ describe("monitor time parameters", () => {
       "Cannot use both statsPeriod and start/end parameters",
     );
     expect(requestReceived).toBe(false);
+  });
+});
+
+describe("getIssue", () => {
+  it("uses the numeric issue ID when Sentry returns a null shortId", async () => {
+    mswServer.use(
+      http.get(
+        "https://sentry.io/api/0/organizations/my-org/issues/123456/",
+        () =>
+          HttpResponse.json({
+            id: "123456",
+            shortId: null,
+            title: "TypeError: Cannot read properties of undefined",
+            firstSeen: "2026-07-27T00:00:00Z",
+            lastSeen: "2026-07-28T00:00:00Z",
+            count: "1",
+            userCount: 1,
+            permalink: "https://sentry.io/issues/123456/",
+            project: {
+              id: "1",
+              name: "test-project",
+              slug: "test-project",
+              platform: "javascript",
+            },
+            platform: "javascript",
+            status: "unresolved",
+            culprit: "app/example.ts",
+            type: "error",
+          }),
+      ),
+    );
+
+    const apiService = new SentryApiService({
+      host: "sentry.io",
+      accessToken: "test-token",
+    });
+
+    const issue = await apiService.getIssue({
+      organizationSlug: "my-org",
+      issueId: "123456",
+    });
+
+    expect(issue.shortId).toBe("123456");
   });
 });
 
@@ -641,6 +764,7 @@ describe("request headers", () => {
       clientId: "abc123",
       clientName: "Claude Code",
       clientFamily: "claude-code",
+      utmSource: "plugin",
     });
 
     await apiService.getAuthenticatedUser();
@@ -652,6 +776,7 @@ describe("request headers", () => {
     expect(requestInit.headers["X-Sentry-MCP-Client-Family"]).toBe(
       "claude-code",
     );
+    expect(requestInit.headers["X-Sentry-MCP-Utm-Source"]).toBe("plugin");
   });
 
   it("should not send MCP client headers when clientId and clientName are not set", async () => {
@@ -681,6 +806,7 @@ describe("request headers", () => {
     expect(requestInit.headers["X-Sentry-MCP-Client-Id"]).toBeUndefined();
     expect(requestInit.headers["X-Sentry-MCP-Client-Name"]).toBeUndefined();
     expect(requestInit.headers["X-Sentry-MCP-Client-Family"]).toBeUndefined();
+    expect(requestInit.headers["X-Sentry-MCP-Utm-Source"]).toBeUndefined();
   });
 });
 
@@ -1058,11 +1184,11 @@ describe("API query builders", () => {
       });
 
       expect(params.toString()).toMatchInlineSnapshot(
-        `"per_page=50&query=level%3Aerror&dataset=errors&statsPeriod=24h&project=backend&sort=-count&field=title&field=project&field=count%28%29"`,
+        `"per_page=50&query=level%3Aerror&dataset=errors&statsPeriod=24h&project=backend&sort=-count%28%29&field=title&field=project&field=count%28%29&referrer=api.mcp.search-events"`,
       );
     });
 
-    it("should transform aggregate sort parameters correctly", () => {
+    it("should pass aggregate sort parameters through unchanged", () => {
       const apiService = new SentryApiService({ host: "sentry.io" });
 
       // @ts-expect-error - accessing private method for testing
@@ -1073,10 +1199,10 @@ describe("API query builders", () => {
         sort: "-count(span.duration)",
       });
 
-      expect(params.get("sort")).toBe("-count_span_duration");
+      expect(params.get("sort")).toBe("-count(span.duration)");
     });
 
-    it("should handle empty aggregate functions in sort", () => {
+    it("should pass empty aggregate functions in sort through unchanged", () => {
       const apiService = new SentryApiService({ host: "sentry.io" });
 
       // @ts-expect-error - accessing private method for testing
@@ -1087,10 +1213,10 @@ describe("API query builders", () => {
         sort: "-count()",
       });
 
-      expect(params.get("sort")).toBe("-count");
+      expect(params.get("sort")).toBe("-count()");
     });
 
-    it("should safely handle malformed sort parameters", () => {
+    it("should pass malformed sort parameters through unchanged", () => {
       const apiService = new SentryApiService({ host: "sentry.io" });
 
       // @ts-expect-error - accessing private method for testing
@@ -1101,11 +1227,11 @@ describe("API query builders", () => {
         sort: "-count(((",
       });
 
-      // Should not crash and should return the original sort if malformed
+      // Should not crash and should return the original sort
       expect(params.get("sort")).toBe("-count(((");
     });
 
-    it("should preserve raw sort parameters for tracemetrics", () => {
+    it("should preserve sort parameters for tracemetrics", () => {
       const apiService = new SentryApiService({ host: "sentry.io" });
 
       // @ts-expect-error - accessing private method for testing
@@ -1143,7 +1269,7 @@ describe("API query builders", () => {
       });
 
       expect(params.toString()).toMatchInlineSnapshot(
-        `"per_page=20&query=span.op%3Adb&dataset=spans&statsPeriod=1h&project=frontend&sampling=NORMAL&sort=-span.duration&field=span.op&field=span.description&field=span.duration"`,
+        `"per_page=20&query=span.op%3Adb&dataset=spans&statsPeriod=1h&project=frontend&sampling=NORMAL&sort=-span.duration&field=span.op&field=span.description&field=span.duration&referrer=api.mcp.search-events"`,
       );
     });
 
@@ -1160,14 +1286,14 @@ describe("API query builders", () => {
       });
 
       expect(params.toString()).toMatchInlineSnapshot(
-        `"per_page=30&query=severity%3Aerror&dataset=logs&sort=-timestamp&field=timestamp&field=message&field=severity"`,
+        `"per_page=30&query=severity%3Aerror&dataset=logs&sort=-timestamp&field=timestamp&field=message&field=severity&referrer=api.mcp.search-events"`,
       );
 
       // Verify sampling is not added for logs
       expect(params.has("sampling")).toBe(false);
     });
 
-    it("should transform complex aggregate sorts with dots", () => {
+    it("should pass aggregate sorts with dots through unchanged", () => {
       const apiService = new SentryApiService({ host: "sentry.io" });
 
       // @ts-expect-error - accessing private method for testing
@@ -1179,7 +1305,7 @@ describe("API query builders", () => {
         sort: "-avg(span.self_time)",
       });
 
-      expect(params.get("sort")).toBe("-avg_span_self_time");
+      expect(params.get("sort")).toBe("-avg(span.self_time)");
     });
   });
 
@@ -1214,7 +1340,11 @@ describe("API query builders", () => {
         expect.any(Object),
       );
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("sort=-count"),
+        expect.stringContaining("sort=-count%28%29"),
+        expect.any(Object),
+      );
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("referrer=api.mcp.search-events"),
         expect.any(Object),
       );
     });
@@ -1249,6 +1379,10 @@ describe("API query builders", () => {
       );
       expect(globalThis.fetch).toHaveBeenCalledWith(
         expect.stringContaining("sampling=NORMAL"),
+        expect.any(Object),
+      );
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("referrer=api.mcp.search-events"),
         expect.any(Object),
       );
     });
@@ -1334,29 +1468,6 @@ describe("API query builders", () => {
 
       globalThis.fetch = vi.fn().mockImplementation((url: string) => {
         urls.push(url);
-        const requestUrl = new URL(url);
-        const attributeType = requestUrl.searchParams.get("attributeType");
-        const body =
-          attributeType === "boolean"
-            ? [
-                {
-                  key: "tags[enabled,boolean]",
-                  name: "enabled",
-                  attributeType: "boolean",
-                  attributeSource: { source_type: "user" },
-                },
-              ]
-            : [
-                {
-                  key: "tags[type]",
-                  name: "type",
-                  attributeType: "string",
-                  attributeSource: {
-                    source_type: "sentry",
-                    is_transformed_alias: true,
-                  },
-                },
-              ];
 
         return Promise.resolve({
           ok: true,
@@ -1364,7 +1475,37 @@ describe("API query builders", () => {
             get: (key: string) =>
               key === "content-type" ? "application/json" : null,
           },
-          json: () => Promise.resolve(body),
+          json: () =>
+            Promise.resolve([
+              {
+                key: "tags[type]",
+                name: "type",
+                attributeType: "string",
+                attributeSource: {
+                  source_type: "sentry",
+                  is_transformed_alias: true,
+                },
+              },
+              {
+                key: "tags[enabled,boolean]",
+                name: "enabled",
+                attributeType: "boolean",
+                attributeSource: { source_type: "user" },
+              },
+              {
+                key: "tags[count,number]",
+                name: "count",
+                attributeType: "number",
+                attributeSource: { source_type: "user" },
+              },
+              {
+                key: "tags[secondary]",
+                name: "secondary",
+                attributeType: "string",
+                attributeSource: { source_type: "user" },
+                secondaryAliases: ["secondary.alias"],
+              },
+            ]),
         });
       });
 
@@ -1394,22 +1535,25 @@ describe("API query builders", () => {
           type: "boolean",
           attributeSource: { source_type: "user" },
         },
+        {
+          key: "tags[secondary]",
+          name: "secondary",
+          type: "string",
+          attributeSource: { source_type: "user" },
+          secondaryAliases: ["secondary.alias"],
+        },
       ]);
-      expect(urls).toHaveLength(2);
-      for (const url of urls) {
-        const params = new URL(url).searchParams;
-        expect(params.get("itemType")).toBe("spans");
-        expect(params.get("project")).toBe("123");
-        expect(params.get("statsPeriod")).toBe("7d");
-        expect(params.get("substringMatch")).toBe("tags[");
-        expect(params.get("query")).toBe('transaction:"VPN connections"');
-      }
-      expect(
-        urls.map((url) => new URL(url).searchParams.get("attributeType")),
-      ).toEqual(["string", "boolean"]);
+      expect(urls).toHaveLength(1);
+      const params = new URL(urls[0]!).searchParams;
+      expect(params.get("itemType")).toBe("spans");
+      expect(params.get("project")).toBe("123");
+      expect(params.get("statsPeriod")).toBe("7d");
+      expect(params.get("substringMatch")).toBe("tags[");
+      expect(params.get("query")).toBe('transaction:"VPN connections"');
+      expect(params.get("attributeType")).toBeNull();
     });
 
-    it("should validate exact trace item attributes", async () => {
+    it("should validate events requests via the validate endpoint", async () => {
       const apiService = new SentryApiService({
         host: "sentry.io",
         accessToken: "test-token",
@@ -1423,46 +1567,110 @@ describe("API query builders", () => {
           requestUrl = url;
           requestOptions = options;
           return Promise.resolve({
-            ok: true,
+            ok: false,
+            status: 400,
             headers: {
               get: (key: string) =>
                 key === "content-type" ? "application/json" : null,
             },
             json: () =>
               Promise.resolve({
-                attributes: {
-                  "tags[type]": { valid: true, type: "string" },
-                  "tags[missing]": {
+                valid: false,
+                projects: [{ valid: true, error: null }],
+                dataset: [{ name: "spans", valid: true, error: null }],
+                environment: [
+                  {
                     valid: false,
-                    error: "Unknown attribute: tags[missing]",
+                    error: "Unknown environments selected",
                   },
+                ],
+                field: [
+                  {
+                    name: "tags[type]",
+                    valid: true,
+                    attrType: "string",
+                    error: null,
+                  },
+                  {
+                    name: "tags[missing]",
+                    valid: false,
+                    attrType: null,
+                    error: "Unknown attribute",
+                  },
+                ],
+                query: {
+                  valid: false,
+                  error: "Invalid syntax",
+                  fields: [
+                    {
+                      name: "transaction",
+                      valid: true,
+                      attrType: "string",
+                      error: null,
+                    },
+                  ],
                 },
+                orderby: [
+                  {
+                    name: "-span.duration",
+                    valid: false,
+                    attrType: null,
+                    error: "Orderby must also be a selected field",
+                  },
+                ],
               }),
           });
         });
 
-      const result = await apiService.validateTraceItemAttributes({
+      const result = await apiService.validateEvents({
         organizationSlug: "test-org",
-        itemType: "spans",
-        attributes: ["tags[type]", "tags[missing]"],
+        dataset: "spans",
+        fields: ["tags[type]", "tags[missing]"],
+        query: 'transaction:"VPN connections"',
+        orderby: ["-span.duration"],
+        environment: ["production", "staging"],
         project: "123",
         statsPeriod: "7d",
       });
 
       expect(result).toEqual({
-        "tags[type]": { valid: true, type: "string" },
-        "tags[missing]": {
+        valid: false,
+        projects: [{ valid: true }],
+        dataset: [{ name: "spans", valid: true }],
+        environment: [{ valid: false, error: "Unknown environments selected" }],
+        field: [
+          { name: "tags[type]", valid: true, type: "string" },
+          {
+            name: "tags[missing]",
+            valid: false,
+            error: "Unknown attribute",
+          },
+        ],
+        query: {
           valid: false,
-          error: "Unknown attribute: tags[missing]",
+          error: "Invalid syntax",
+          fields: [{ name: "transaction", valid: true, type: "string" }],
         },
+        orderby: [
+          {
+            name: "-span.duration",
+            valid: false,
+            error: "Orderby must also be a selected field",
+          },
+        ],
       });
       expect(requestUrl).toContain(
-        "/api/0/organizations/test-org/trace-items/attributes/validate/?itemType=spans&project=123&statsPeriod=7d",
+        "/api/0/organizations/test-org/events/validate/?",
       );
-      expect(requestOptions?.method).toBe("POST");
-      expect(JSON.parse(String(requestOptions?.body))).toEqual({
-        attributes: ["tags[type]", "tags[missing]"],
-      });
+      const params = new URL(String(requestUrl)).searchParams;
+      expect(params.get("dataset")).toBe("spans");
+      expect(params.get("project")).toBe("123");
+      expect(params.get("statsPeriod")).toBe("7d");
+      expect(params.get("query")).toBe('transaction:"VPN connections"');
+      expect(params.getAll("field")).toEqual(["tags[type]", "tags[missing]"]);
+      expect(params.getAll("orderby")).toEqual(["-span.duration"]);
+      expect(params.getAll("environment")).toEqual(["production", "staging"]);
+      expect(requestOptions?.method).toBeUndefined();
     });
   });
 
@@ -1520,21 +1728,19 @@ describe("API query builders", () => {
       });
     });
 
-    describe("buildEapUrl", () => {
+    describe("spans explorer URLs", () => {
       it("should build correct URL for spans dataset with aggregate fields", () => {
         const apiService = new SentryApiService({ host: "sentry.io" });
-
-        // @ts-expect-error - accessing private method for testing
-        const url = apiService.buildEapUrl({
-          organizationSlug: "my-org",
-          query: "is_transaction:True",
-          dataset: "spans",
-          projectId: "123456",
-          fields: ["span.description", "count()"],
-          sort: "-count()",
-          aggregateFunctions: ["count()"],
-          groupByFields: ["span.description"],
-        });
+        const url = apiService.getEventsExplorerUrl(
+          "my-org",
+          "is_transaction:True",
+          "123456",
+          "spans",
+          ["span.description", "count()"],
+          "-count()",
+          ["count()"],
+          ["span.description"],
+        );
 
         expect(url).toContain("https://my-org.sentry.io/explore/traces/");
         expect(url).toContain("mode=aggregate");
@@ -1551,17 +1757,16 @@ describe("API query builders", () => {
 
       it("should not include empty groupBy in aggregateField", () => {
         const apiService = new SentryApiService({ host: "sentry.io" });
-
-        // @ts-expect-error - accessing private method for testing
-        const url = apiService.buildEapUrl({
-          organizationSlug: "my-org",
-          query: "span.op:db",
-          dataset: "spans",
-          fields: ["count()"],
-          sort: "-count()",
-          aggregateFunctions: ["count()"],
-          groupByFields: [],
-        });
+        const url = apiService.getEventsExplorerUrl(
+          "my-org",
+          "span.op:db",
+          undefined,
+          "spans",
+          ["count()"],
+          "-count()",
+          ["count()"],
+          [],
+        );
 
         expect(url).toContain("mode=aggregate");
         expect(url).toContain(
@@ -1572,17 +1777,16 @@ describe("API query builders", () => {
 
       it("should handle multiple groupBy fields", () => {
         const apiService = new SentryApiService({ host: "sentry.io" });
-
-        // @ts-expect-error - accessing private method for testing
-        const url = apiService.buildEapUrl({
-          organizationSlug: "my-org",
-          query: "",
-          dataset: "spans",
-          fields: ["span.op", "span.description", "count()"],
-          sort: "-count()",
-          aggregateFunctions: ["count()"],
-          groupByFields: ["span.op", "span.description"],
-        });
+        const url = apiService.getEventsExplorerUrl(
+          "my-org",
+          "",
+          undefined,
+          "spans",
+          ["span.op", "span.description", "count()"],
+          "-count()",
+          ["count()"],
+          ["span.op", "span.description"],
+        );
 
         expect(url).toContain(
           `aggregateField=%7B%22groupBy%22%3A%22span.op%22%7D`,
@@ -1597,15 +1801,14 @@ describe("API query builders", () => {
 
       it("should handle non-aggregate queries", () => {
         const apiService = new SentryApiService({ host: "sentry.io" });
-
-        // @ts-expect-error - accessing private method for testing
-        const url = apiService.buildEapUrl({
-          organizationSlug: "my-org",
-          query: "span.op:http",
-          dataset: "spans",
-          fields: ["span.op", "span.description", "span.duration"],
-          sort: "-span.duration",
-        });
+        const url = apiService.getEventsExplorerUrl(
+          "my-org",
+          "span.op:http",
+          undefined,
+          "spans",
+          ["span.op", "span.description", "span.duration"],
+          "-span.duration",
+        );
 
         expect(url).not.toContain("mode=aggregate");
         expect(url).not.toContain("aggregateField");
@@ -1615,31 +1818,15 @@ describe("API query builders", () => {
         expect(url).toContain("sort=-span.duration");
       });
 
-      it("should use correct path for logs dataset", () => {
-        const apiService = new SentryApiService({ host: "sentry.io" });
-
-        // @ts-expect-error - accessing private method for testing
-        const url = apiService.buildEapUrl({
-          organizationSlug: "my-org",
-          query: "severity:error",
-          dataset: "logs",
-          fields: ["timestamp", "message"],
-        });
-
-        expect(url).toContain("/explore/logs/");
-        expect(url).not.toContain("/explore/traces/");
-      });
-
       it("should handle self-hosted URLs correctly", () => {
         const apiService = new SentryApiService({ host: "sentry.example.com" });
-
-        // @ts-expect-error - accessing private method for testing
-        const url = apiService.buildEapUrl({
-          organizationSlug: "my-org",
-          query: "",
-          dataset: "spans",
-          fields: ["span.op"],
-        });
+        const url = apiService.getEventsExplorerUrl(
+          "my-org",
+          "",
+          undefined,
+          "spans",
+          ["span.op"],
+        );
 
         expect(url).toMatchInlineSnapshot(
           `"https://sentry.example.com/organizations/my-org/explore/traces/?query=&field=span.op&statsPeriod=24h&table=span"`,
@@ -1804,6 +1991,55 @@ describe("API query builders", () => {
       expect(repos[0].name).toBe("getsentry/sentry");
     });
 
+    it("should paginate repos", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          headers: new Headers({
+            "content-type": "application/json",
+            link: '<https://sentry.io/api/0/organizations/test-org/repos/?cursor=cursor-2>; rel="next"; results="true"; cursor="cursor-2"',
+          }),
+          json: () =>
+            Promise.resolve([
+              {
+                id: "101",
+                name: "getsentry/sentry",
+                provider: { id: "integrations:github", name: "GitHub" },
+                status: "active",
+              },
+            ]),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          headers: new Headers({
+            "content-type": "application/json",
+          }),
+          json: () =>
+            Promise.resolve([
+              {
+                id: "102",
+                name: "getsentry/sentry-javascript",
+                provider: { id: "integrations:github", name: "GitHub" },
+                status: "active",
+              },
+            ]),
+        });
+      globalThis.fetch = fetchMock;
+
+      const repos = await apiService.listRepos({
+        organizationSlug: "test-org",
+      });
+
+      expect(repos.map((repo) => repo.name)).toEqual([
+        "getsentry/sentry",
+        "getsentry/sentry-javascript",
+      ]);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[0][0]).toContain("per_page=100");
+      expect(fetchMock.mock.calls[1][0]).toContain("cursor=cursor-2");
+    });
+
     it("should include query parameter when provided", async () => {
       globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
@@ -1851,7 +2087,7 @@ describe("API query builders", () => {
     });
   });
 
-  describe("linkProjectRepo", () => {
+  describe("linkProjectRepository", () => {
     let apiService: SentryApiService;
 
     beforeEach(() => {
@@ -1865,7 +2101,7 @@ describe("API query builders", () => {
       vi.restoreAllMocks();
     });
 
-    it("should POST to the repo endpoint with repositoryId", async () => {
+    it("should POST to the code mappings bulk endpoint", async () => {
       globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         headers: {
@@ -1874,32 +2110,48 @@ describe("API query builders", () => {
         },
         json: () =>
           Promise.resolve({
-            id: "1",
-            projectId: "456",
-            repositoryId: "101",
-            source: "scm_onboarding",
-            created: true,
+            created: 1,
+            updated: 0,
+            errors: 0,
+            mappings: [
+              {
+                stackRoot: "",
+                sourceRoot: "",
+                status: "created",
+              },
+            ],
           }),
       });
 
-      const result = await apiService.linkProjectRepo({
+      const result = await apiService.linkProjectRepository({
         organizationSlug: "test-org",
         projectSlug: "my-project",
-        repositoryId: 101,
+        repository: "getsentry/sentry",
+        provider: "github",
       });
 
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/projects/test-org/my-project/repo/"),
+        expect.stringContaining("/organizations/test-org/code-mappings/bulk/"),
         expect.objectContaining({
           method: "POST",
-          body: JSON.stringify({ repositoryId: 101 }),
+          body: JSON.stringify({
+            project: "my-project",
+            repository: "getsentry/sentry",
+            provider: "github",
+            mappings: [
+              {
+                stackRoot: "",
+                sourceRoot: "",
+              },
+            ],
+          }),
         }),
       );
-      expect(result.created).toBe(true);
-      expect(result.repositoryId).toBe("101");
+      expect(result.created).toBe(1);
+      expect(result.mappings[0]!.status).toBe("created");
     });
 
-    it("should handle idempotent response", async () => {
+    it("should handle updated mappings response", async () => {
       globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         headers: {
@@ -1908,22 +2160,173 @@ describe("API query builders", () => {
         },
         json: () =>
           Promise.resolve({
-            id: "1",
-            projectId: "456",
-            repositoryId: "101",
-            source: "manual",
-            created: false,
+            created: 0,
+            updated: 1,
+            errors: 0,
+            mappings: [
+              {
+                stackRoot: "",
+                sourceRoot: "",
+                status: "updated",
+              },
+            ],
           }),
       });
 
-      const result = await apiService.linkProjectRepo({
+      const result = await apiService.linkProjectRepository({
         organizationSlug: "test-org",
         projectSlug: "my-project",
-        repositoryId: 101,
+        repository: "getsentry/sentry",
       });
 
-      expect(result.created).toBe(false);
-      expect(result.source).toBe("manual");
+      expect(result.updated).toBe(1);
+      expect(result.mappings[0]!.status).toBe("updated");
+    });
+  });
+
+  describe("listProjectTeams", () => {
+    let apiService: SentryApiService;
+
+    beforeEach(() => {
+      apiService = new SentryApiService({
+        host: "sentry.io",
+        accessToken: "test-token",
+      });
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("follows pagination cursors", async () => {
+      const backendTeam = {
+        ...teamFixture,
+        id: "4509109078196224",
+        slug: "backend",
+        name: "Backend",
+      };
+      globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+        const parsedUrl = new URL(url);
+        const isNextPage =
+          parsedUrl.searchParams.get("cursor") === "team-cursor";
+
+        return Promise.resolve({
+          ok: true,
+          headers: {
+            get: (key: string) => {
+              if (key === "content-type") {
+                return "application/json";
+              }
+              if (key === "link" && !isNextPage) {
+                return '<https://sentry.io/api/0/projects/test-org/my-project/teams/?cursor=team-cursor>; rel="next"; results="true"; cursor="team-cursor"';
+              }
+              return null;
+            },
+          },
+          json: () =>
+            Promise.resolve(isNextPage ? [backendTeam] : [teamFixture]),
+        });
+      });
+
+      const teams = await apiService.listProjectTeams({
+        organizationSlug: "test-org",
+        projectSlug: "my-project",
+      });
+
+      expect(teams.map((team) => team.slug)).toEqual(["the-goats", "backend"]);
+    });
+  });
+
+  describe("project identifier request shape regressions", () => {
+    let apiService: SentryApiService;
+
+    beforeEach(() => {
+      apiService = new SentryApiService({
+        host: "sentry.io",
+        accessToken: "test-token",
+      });
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("preserves replay project slugs in path parameters", async () => {
+      let requestUrl: string | undefined;
+      globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+        requestUrl = url;
+        return Promise.resolve({
+          ok: true,
+          headers: {
+            get: (key: string) =>
+              key === "content-type" ? "application/json" : null,
+          },
+          json: () => Promise.resolve([["segment-1"]]),
+        });
+      });
+
+      await apiService.getReplayRecordingSegments({
+        organizationSlug: "test-org",
+        projectSlugOrId: "frontend",
+        replayId: "replay-123",
+      });
+
+      expect(requestUrl).toContain(
+        "/projects/test-org/frontend/replays/replay-123/recording-segments/",
+      );
+      expect(requestUrl).not.toContain("NaN");
+    });
+
+    it("uses projectSlug for release deploy slug filters", async () => {
+      let requestUrl: string | undefined;
+      globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+        requestUrl = url;
+        return Promise.resolve({
+          ok: true,
+          headers: {
+            get: (key: string) =>
+              key === "content-type" ? "application/json" : null,
+          },
+          json: () => Promise.resolve([]),
+        });
+      });
+
+      await apiService.listReleaseDeploys({
+        organizationSlug: "test-org",
+        releaseVersion: "frontend@1.0.0",
+        projectSlugOrId: "frontend",
+      });
+
+      const params = new URL(String(requestUrl)).searchParams;
+      expect(params.get("projectSlug")).toBe("frontend");
+      expect(params.get("project")).toBeNull();
+      expect(requestUrl).not.toContain("NaN");
+    });
+
+    it("uses project for release deploy numeric ID filters", async () => {
+      let requestUrl: string | undefined;
+      globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+        requestUrl = url;
+        return Promise.resolve({
+          ok: true,
+          headers: {
+            get: (key: string) =>
+              key === "content-type" ? "application/json" : null,
+          },
+          json: () => Promise.resolve([]),
+        });
+      });
+
+      await apiService.listReleaseDeploys({
+        organizationSlug: "test-org",
+        releaseVersion: "frontend@1.0.0",
+        projectSlugOrId: "12345",
+      });
+
+      const params = new URL(String(requestUrl)).searchParams;
+      expect(params.get("project")).toBe("12345");
+      expect(params.get("projectSlug")).toBeNull();
+      expect(requestUrl).not.toContain("NaN");
     });
   });
 });

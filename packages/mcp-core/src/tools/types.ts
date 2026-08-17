@@ -10,7 +10,16 @@ import type { Skill } from "../skills";
 import type { ProjectCapabilities, ServerContext } from "../types";
 
 export type ToolContent = TextContent | ImageContent | EmbeddedResource;
-export type ToolOutput = string | ToolContent[] | CallToolResult;
+export interface StructuredToolOutput<
+  TStructuredContent extends Record<string, unknown> = Record<string, unknown>,
+> {
+  structuredContent: TStructuredContent;
+}
+export type ToolOutput =
+  | string
+  | ToolContent[]
+  | CallToolResult
+  | StructuredToolOutput;
 /**
  * Keeps schema-inferred handler params at tool definition sites while allowing
  * heterogeneous tool registries to store many concrete handler signatures.
@@ -76,16 +85,21 @@ export interface ToolConfig<
   description: ToolDescription;
   inputSchema: TSchema;
   skills: Skill[]; // Which skill categories this tool belongs to
+  includeInSkillDefinitions?: boolean; // Whether generated skill prompts advertise this tool
   requiredScopes: Scope[]; // LEGACY: Which API scopes needed (deprecated, for backward compatibility)
   experimental?: boolean; // Mark tool as experimental (only shown in experimental mode)
   hideInExperimentalMode?: boolean; // Hide tool when experimental mode is active (for tools replaced by unified tools)
   requiredCapabilities?: (keyof ProjectCapabilities)[]; // Project capabilities required for this tool
   outputSchema?: z.ZodType;
   annotations: {
-    readOnlyHint?: boolean;
-    destructiveHint?: boolean;
+    // readOnlyHint, destructiveHint, and openWorldHint are required so every
+    // tool declares its safety posture explicitly. Filters and confirmation
+    // gates rely on these; an undefined hint is a silent gap. Enforced further
+    // by tools.test.ts (see "complete MCP safety annotations").
+    readOnlyHint: boolean;
+    destructiveHint: boolean;
     idempotentHint?: boolean;
-    openWorldHint?: boolean;
+    openWorldHint: boolean;
   };
   handler: ToolHandler<TSchema>;
 }

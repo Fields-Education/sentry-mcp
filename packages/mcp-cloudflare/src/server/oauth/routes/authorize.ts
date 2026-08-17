@@ -2,10 +2,17 @@ import { Hono } from "hono";
 import * as Sentry from "@sentry/cloudflare";
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import {
+  getRememberedSkillsForClient,
   renderApprovalDialog,
   parseRedirectApproval,
 } from "../../lib/approval-dialog";
+import { redirectUriHasUserInfo } from "../../lib/html-utils";
+import { isRegisteredRedirectUri } from "../../lib/redirect-uri";
 import { resolveClientFamilyFromName } from "../../lib/client-family";
+import {
+  CLIENT_REGISTRATION_METHOD_ATTRIBUTE,
+  getClientRegistrationMethodTelemetry,
+} from "../telemetry";
 import type { Env } from "../../types";
 import { SENTRY_AUTH_URL } from "../constants";
 import {
@@ -30,24 +37,27 @@ async function redirectToUpstream(
   env: Env,
   request: Request,
   oauthReqInfo: AuthRequest | AuthRequestWithSkills,
-  headers: Record<string, string> = {},
+  headers: HeadersInit = {},
   stateOverride?: string,
 ) {
+  const responseHeaders = new Headers(headers);
+  responseHeaders.set(
+    "location",
+    getUpstreamAuthorizeUrl({
+      upstream_url: new URL(
+        SENTRY_AUTH_URL,
+        `https://${env.SENTRY_HOST || "sentry.io"}`,
+      ).href,
+      scope: Object.keys(SCOPES).join(" "),
+      client_id: env.SENTRY_CLIENT_ID,
+      redirect_uri: new URL("/oauth/callback", request.url).href,
+      state: stateOverride ?? btoa(JSON.stringify(oauthReqInfo)),
+    }),
+  );
+
   return new Response(null, {
     status: 302,
-    headers: {
-      ...headers,
-      location: getUpstreamAuthorizeUrl({
-        upstream_url: new URL(
-          SENTRY_AUTH_URL,
-          `https://${env.SENTRY_HOST || "sentry.io"}`,
-        ).href,
-        scope: Object.keys(SCOPES).join(" "),
-        client_id: env.SENTRY_CLIENT_ID,
-        redirect_uri: new URL("/oauth/callback", request.url).href,
-        state: stateOverride ?? btoa(JSON.stringify(oauthReqInfo)),
-      }),
-    },
+    headers: responseHeaders,
   });
 }
 
@@ -102,6 +112,15 @@ export default new Hono<{ Bindings: Env }>()
       return c.text("Invalid request", 400);
     }
 
+    // Reject redirect URIs with userinfo components
+    if (redirectUriHasUserInfo(oauthReqInfo.redirectUri)) {
+      logWarn("Rejected redirect URI with userinfo component", {
+        loggerScope: ["cloudflare", "oauth", "authorize"],
+        extra: { clientId, redirectUri: oauthReqInfo.redirectUri },
+      });
+      return c.text("Invalid redirect URI", 400);
+    }
+
     // Validate resource parameter per RFC 8707
     const requestUrl = new URL(c.req.url);
     const resourceParams = requestUrl.searchParams.getAll("resource");
@@ -128,6 +147,7 @@ export default new Hono<{ Bindings: Env }>()
         return createResourceValidationError(
           oauthReqInfo.redirectUri,
           oauthReqInfo.state ?? undefined,
+          c.req.url,
         );
       }
 
@@ -162,6 +182,11 @@ export default new Hono<{ Bindings: Env }>()
     // }
 
     const client = await c.env.OAUTH_PROVIDER.lookupClient(clientId);
+    const defaultSkills = await getRememberedSkillsForClient(
+      c.req.raw.headers.get("Cookie"),
+      clientId,
+      c.env.COOKIE_SECRET,
+    );
     const response = await renderApprovalDialog(c.req.raw, {
       client,
       server: {
@@ -171,11 +196,19 @@ export default new Hono<{ Bindings: Env }>()
       redirectUri: oauthReqInfoWithResource.redirectUri,
       state: { oauthReqInfo: oauthReqInfoWithResource },
       cookieSecret: c.env.COOKIE_SECRET,
+      defaultSkills,
     });
 
+    const registrationMethodTelemetry =
+      getClientRegistrationMethodTelemetry(clientId);
+    Sentry.getActiveSpan()?.setAttribute(
+      CLIENT_REGISTRATION_METHOD_ATTRIBUTE,
+      registrationMethodTelemetry[CLIENT_REGISTRATION_METHOD_ATTRIBUTE],
+    );
     Sentry.metrics.count("app.oauth.consent_prompted", 1, {
       attributes: {
         "app.client.family": resolveClientFamilyFromName(client?.clientName),
+        ...registrationMethodTelemetry,
       },
     });
 
@@ -213,15 +246,28 @@ export default new Hono<{ Bindings: Env }>()
       skills,
     };
 
+    // Reject redirect URIs with userinfo components)
+    if (redirectUriHasUserInfo(oauthReqWithSkills.redirectUri)) {
+      logWarn("Rejected redirect URI with userinfo component", {
+        loggerScope: ["cloudflare", "oauth", "authorize"],
+        extra: {
+          clientId: oauthReqWithSkills.clientId,
+          redirectUri: oauthReqWithSkills.redirectUri,
+        },
+      });
+      return c.text("Invalid redirect URI", 400);
+    }
+
     // Validate redirectUri first to prevent open redirects from error responses
     let client = null;
     try {
       client = await c.env.OAUTH_PROVIDER.lookupClient(
         oauthReqWithSkills.clientId,
       );
-      const uriIsAllowed =
-        Array.isArray(client?.redirectUris) &&
-        client.redirectUris.includes(oauthReqWithSkills.redirectUri);
+      const uriIsAllowed = isRegisteredRedirectUri(
+        oauthReqWithSkills.redirectUri,
+        client?.redirectUris,
+      );
       if (!uriIsAllowed) {
         logWarn("Redirect URI not registered for client", {
           loggerScope: ["cloudflare", "oauth", "authorize"],
@@ -259,6 +305,7 @@ export default new Hono<{ Bindings: Env }>()
       return createResourceValidationError(
         oauthReqWithSkills.redirectUri,
         oauthReqWithSkills.state,
+        c.req.url,
       );
     }
 
@@ -271,9 +318,17 @@ export default new Hono<{ Bindings: Env }>()
     };
     const signedState = await signState(payload, c.env.COOKIE_SECRET);
 
+    const registrationMethodTelemetry = getClientRegistrationMethodTelemetry(
+      oauthReqWithSkills.clientId,
+    );
+    Sentry.getActiveSpan()?.setAttribute(
+      CLIENT_REGISTRATION_METHOD_ATTRIBUTE,
+      registrationMethodTelemetry[CLIENT_REGISTRATION_METHOD_ATTRIBUTE],
+    );
     Sentry.metrics.count("app.oauth.consent_granted", 1, {
       attributes: {
         "app.client.family": resolveClientFamilyFromName(client?.clientName),
+        ...registrationMethodTelemetry,
       },
     });
 

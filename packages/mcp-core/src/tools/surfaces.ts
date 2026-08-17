@@ -8,11 +8,11 @@
  */
 
 export const CATALOG_INFRASTRUCTURE_TOOL_NAMES = [
-  "search_tools",
-  "execute_tool",
+  "search_sentry_tools",
+  "execute_sentry_tool",
 ] as const;
 
-export const WRAPPER_TOOL_NAMES = ["use_sentry"] as const;
+export const WRAPPER_TOOL_NAMES = [] as const;
 
 export const TOP_LEVEL_TOOL_NAMES = [
   "find_organizations",
@@ -20,14 +20,13 @@ export const TOP_LEVEL_TOOL_NAMES = [
   "update_issue",
   "search_events",
   "analyze_issue_with_seer",
-  "search_docs",
   "search_issues",
   "get_sentry_resource",
   ...CATALOG_INFRASTRUCTURE_TOOL_NAMES,
 ] as const;
 
 // The experimental direct surface is intentionally aligned with the default
-// surface now that search_tools and execute_tool are primary primitives.
+// surface now that search_sentry_tools and execute_sentry_tool are primary primitives.
 export const EXPERIMENTAL_TOP_LEVEL_TOOL_NAMES = TOP_LEVEL_TOOL_NAMES;
 
 const topLevelToolNames = new Set<string>(TOP_LEVEL_TOOL_NAMES);

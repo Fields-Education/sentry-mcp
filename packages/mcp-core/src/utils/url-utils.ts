@@ -1,9 +1,9 @@
+import type { SentryProtocol } from "../types";
 import {
+  type EventsDataset,
   isMetricsDataset,
   isProfilesDataset,
-  type EventsDataset,
 } from "./events-datasets";
-import type { SentryProtocol } from "../types";
 
 /**
  * Determines if a Sentry instance is SaaS or self-hosted based on the host.
@@ -42,6 +42,11 @@ export interface ProfilesExplorerUrlOptions {
   fields?: string[];
   aggregateFunctions?: string[];
   groupByFields?: string[];
+}
+
+export interface DashboardUrlOptions {
+  projectId?: string | number | null;
+  statsPeriod?: string | null;
 }
 
 function deriveSelectedFields(
@@ -344,6 +349,40 @@ export function getIssueUrl(
 }
 
 /**
+ * Generates a Sentry dashboard URL.
+ * @param host The Sentry host (may include regional subdomain for API access)
+ * @param organizationSlug Organization identifier
+ * @param dashboardId Dashboard ID
+ * @param options Optional dashboard view query parameters
+ * @param protocol Protocol to use when building the web URL
+ * @returns The complete dashboard URL
+ */
+export function getDashboardUrl(
+  host: string,
+  organizationSlug: string,
+  dashboardId: string,
+  options: DashboardUrlOptions = {},
+  protocol: SentryProtocol = "https",
+): string {
+  const encodedDashboardId = encodeURIComponent(dashboardId);
+  const params = new URLSearchParams();
+  if (options.projectId !== null && options.projectId !== undefined) {
+    params.set("project", String(options.projectId));
+  }
+  if (options.statsPeriod) {
+    params.set("statsPeriod", options.statsPeriod);
+  }
+
+  const queryString = params.toString();
+  return `${getSentryWebBaseUrl(
+    host,
+    organizationSlug,
+    `/dashboard/${encodedDashboardId}/`,
+    protocol,
+  )}${queryString ? `?${queryString}` : ""}`;
+}
+
+/**
  * Generates a Sentry preprod snapshot URL.
  * @param host The Sentry host (may include regional subdomain for API access)
  * @param organizationSlug Organization identifier
@@ -397,6 +436,27 @@ export function getMonitorUrl(
  * @param releaseVersion Release version identifier
  * @returns The complete release URL
  */
+/**
+ * Generates a Sentry uptime monitor URL.
+ *
+ * Uses the monitors UI path (`/monitors/{id}/`), which is the current home for
+ * uptime detectors in Sentry.
+ */
+export function getUptimeMonitorUrl(
+  host: string,
+  organizationSlug: string,
+  uptimeMonitorId: string | number,
+  protocol: SentryProtocol = "https",
+): string {
+  const encodedId = encodeURIComponent(String(uptimeMonitorId));
+  return getSentryWebBaseUrl(
+    host,
+    organizationSlug,
+    `/monitors/${encodedId}/`,
+    protocol,
+  );
+}
+
 export function getReleaseUrl(
   host: string,
   organizationSlug: string,
@@ -567,9 +627,91 @@ export function getAIConversationUrl(
   return getSentryWebBaseUrl(
     host,
     organizationSlug,
-    `/explore/conversations/${conversationId}/`,
+    `/explore/conversations/${encodeURIComponent(conversationId)}/`,
     protocol,
   );
+}
+
+/**
+ * Extract a single non-negated AI conversation ID from a Sentry search query
+ * that filters on `gen_ai.conversation.id`. Returns undefined when the query
+ * does not contain exactly one such filter or contains a negated filter.
+ */
+export function extractConversationIdFromSearchQuery(
+  query: string | undefined | null,
+): string | undefined {
+  if (!query) {
+    return undefined;
+  }
+
+  if (
+    /!gen_ai\.conversation\.id:|\bNOT\s+(?:\(\s*)?gen_ai\.conversation\.id:/i.test(
+      query,
+    )
+  ) {
+    return undefined;
+  }
+
+  const pattern = /gen_ai\.conversation\.id:(?:"([^"]+)"|([^\s)]+))/g;
+  const matches = [...query.matchAll(pattern)];
+  if (matches.length !== 1) {
+    return undefined;
+  }
+
+  const conversationId = matches[0][1] ?? matches[0][2];
+  if (conversationId.startsWith("[")) {
+    return undefined;
+  }
+
+  return conversationId;
+}
+
+/**
+ * Generates a Sentry AI conversations list URL with optional search filters.
+ */
+export function getAIConversationsUrl(
+  host: string,
+  organizationSlug: string,
+  options: {
+    query?: string;
+    project?: string[];
+    environment?: string | string[];
+    statsPeriod?: string;
+    start?: string;
+    end?: string;
+  } = {},
+  protocol: SentryProtocol = "https",
+): string {
+  const urlParams = new URLSearchParams();
+
+  if (options.query) {
+    urlParams.set("query", options.query);
+  }
+  for (const projectId of options.project ?? []) {
+    urlParams.append("project", projectId);
+  }
+  const environments = Array.isArray(options.environment)
+    ? options.environment
+    : options.environment
+      ? [options.environment]
+      : [];
+  for (const environmentName of environments) {
+    urlParams.append("environment", environmentName);
+  }
+  if (options.start && options.end) {
+    urlParams.set("start", options.start);
+    urlParams.set("end", options.end);
+  } else if (options.statsPeriod) {
+    urlParams.set("statsPeriod", options.statsPeriod);
+  }
+  const baseUrl = getSentryWebBaseUrl(
+    host,
+    organizationSlug,
+    "/explore/conversations/",
+    protocol,
+  );
+  const queryString = urlParams.toString();
+  return queryString ? `${baseUrl}?${queryString}` : baseUrl;
 }
 
 export function getProfileUrl(
