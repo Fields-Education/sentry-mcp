@@ -1037,9 +1037,7 @@ describe("oauth authorize routes", () => {
         const location = response.headers.get("location");
         expect(location).toBeTruthy();
         const locationUrl = new URL(location!);
-        expect(locationUrl.searchParams.get("error")).not.toBe(
-          "invalid_target",
-        );
+        expect(locationUrl.searchParams.get("error")).not.toBe("invalid_target");
         expect(location).toContain("sentry.io");
       });
 

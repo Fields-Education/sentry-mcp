@@ -59,6 +59,7 @@ describe("seer-utils", () => {
       expect(getHumanInterventionGuidance("processing")).toBe("");
     });
   });
+
   describe("isSeerSupportedIssue", () => {
     it("rejects metric category issues", () => {
       expect(
