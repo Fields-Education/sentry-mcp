@@ -90,6 +90,7 @@ function isAllowedBySkills({
   tool: ToolConfig<any>;
   context: ServerContext;
 }): boolean {
+
   const grantedSkills: Set<Skill> | undefined = context.grantedSkills
     ? new Set<Skill>(context.grantedSkills)
     : undefined;
@@ -200,6 +201,7 @@ export function getToolsForMcpRegistration({
     experimentalMode,
     useDefaultSurfacePolicy,
   });
+
 
   return availableTools.filter(({ isTopLevel }) => isTopLevel);
 }

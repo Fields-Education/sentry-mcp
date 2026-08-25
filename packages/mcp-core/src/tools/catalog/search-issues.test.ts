@@ -674,8 +674,9 @@ describe("search_issues", () => {
   });
 
   it("should handle all sort options", async () => {
-    const sortOptions: Array<"date" | "freq" | "new" | "user" | "recommended"> =
-      ["date", "freq", "new", "user", "recommended"];
+    const sortOptions: Array<
+      "date" | "freq" | "new" | "user" | "recommended"
+    > = ["date", "freq", "new", "user", "recommended"];
 
     for (const sortOption of sortOptions) {
       mockGenerateText.mockResolvedValue(mockAIResponse("", sortOption));
