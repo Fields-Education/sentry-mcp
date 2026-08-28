@@ -6,7 +6,9 @@
       "**",
       "!**/worker-configuration.d.ts",
       "!**/tsconfig*.json",
-      "!**/packages/mcp-server-mocks/src/fixtures"
+      "!**/packages/mcp-server-mocks/src/fixtures",
+      "!**/packages/mcp-cloudflare-fields/src",
+      "!**/packages/mcp-cloudflare-fields/public"
     ]
   },
   "vcs": {
