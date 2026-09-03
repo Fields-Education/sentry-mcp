@@ -13,12 +13,29 @@ mcp-cloudflare-fields/
 ├── vite.config.ts    → symlink to ../mcp-cloudflare/vite.config.ts
 ├── tsconfig*.json    → symlinks to ../mcp-cloudflare/
 ├── package.json      # Unique - different name
+├── index.html        # Unique - upstream shell without Sentry's Plausible tag
 ├── wrangler.jsonc    # Unique - Fields worker config
 ├── wrangler.canary.jsonc  # Unique - Canary config
 └── wrangler.test.jsonc  # Unique - test config for shared upstream tests
 ```
 
 This means upstream changes to `mcp-cloudflare` automatically apply here.
+
+The non-symlinked files must be reviewed on every upstream sync, because upstream
+edits to `mcp-cloudflare/index.html` or `mcp-cloudflare/wrangler.jsonc` do **not**
+propagate automatically.
+
+### Known drift from upstream
+
+- **`MCP_CACHE` KV binding is missing.** Upstream added a `MCP_CACHE` namespace
+  used to cache org/project constraint verification. The code fails open (a
+  warning is logged and verification falls back to a live API call), so the
+  worker still functions, but every constrained `/mcp/<org>` request pays the
+  extra round trip. Fix by creating the namespace and adding the binding to
+  `wrangler.jsonc` and `wrangler.canary.jsonc`.
+- **Single `MCP_RATE_LIMITER` binding.** Upstream split this into
+  `MCP_IP_RATE_LIMITER` and `MCP_USER_RATE_LIMITER`. The server still honours the
+  legacy binding for both checks, so no action is required.
 
 ## Setup
 
@@ -75,17 +92,15 @@ wrangler secret put SENTRY_HOST --config wrangler.canary.jsonc
 
 Add these secrets/variables to your fork:
 
-**Secrets** (already have):
+All of the following are read as **secrets** by `.github/workflows/deploy-fields.yml`:
+
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
-
-**Variables** (new):
 - `CLOUDFLARE_SUBDOMAIN` - Your workers.dev subdomain
-- `SENTRY_ORG_FIELDS` - Org slug on s.fields.app (for source maps)
-- `SENTRY_PROJECT_FIELDS` - Project slug on s.fields.app (for source maps)
-
-**Secrets** (new):
 - `SENTRY_AUTH_TOKEN` - Auth token from s.fields.app (for source maps)
+- `SENTRY_ORG` - Org slug on s.fields.app (for source maps)
+- `SENTRY_PROJECT` - Project slug on s.fields.app (for source maps)
+- `SENTRY_HOST_FIELDS` - `s.fields.app`, used to build `SENTRY_URL`
 
 ## Local Development
 
@@ -115,17 +130,21 @@ pnpm deploy
 
 ## Syncing with Upstream
 
+`.github/workflows/sync-upstream.yml` runs daily (and on `workflow_dispatch`) and
+rebases the fork onto `upstream/main` so GitHub reports 0 commits behind. When the
+rebase conflicts, it opens a PR with the conflicts resolved instead.
+
+Manually:
+
 ```bash
 # Add upstream remote (one-time)
 git remote add upstream https://github.com/getsentry/sentry-mcp.git
 
-# Fetch and merge
-git fetch upstream
-git merge upstream/main
-
-# Resolve any conflicts in:
-# - .github/workflows/deploy-fields.yml (your file, shouldn't conflict)
-# - packages/mcp-cloudflare-fields/ configs (your files, shouldn't conflict)
+# Rebase (not merge - merging leaves the fork "behind" upstream)
+git fetch upstream main
+git rebase upstream/main
 ```
 
-The symlinks ensure source code changes from upstream automatically apply.
+The symlinks ensure source code changes from upstream automatically apply. The
+files listed as "Unique" above, plus the `*.yml.disabled` workflows, are the only
+things a sync needs to reconcile by hand.
