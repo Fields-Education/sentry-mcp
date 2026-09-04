@@ -1,0 +1,30 @@
+{
+  "$schema": "../../node_modules/@biomejs/biome/configuration_schema.json",
+  // Fields fork: this package is a thin deployment wrapper around
+  // packages/mcp-cloudflare. Everything listed below is a symlink into that
+  // package, so the root config already lints and formats those files under
+  // their real path.
+  //
+  // Excluding them here matters for two reasons:
+  //  1. `biome lint` on a symlinked path bypasses the root a11y overrides,
+  //     which are keyed to packages/mcp-cloudflare/src/client/**.
+  //  2. `biome format --write` on a symlinked path writes *through* the
+  //     symlink and reformats the upstream file, creating fork drift.
+  //
+  // `files.includes` replaces rather than merges with the root config, so the
+  // root's own exclusions are repeated here.
+  "root": false,
+  "extends": "//",
+  "files": {
+    "includes": [
+      "**",
+      "!**/worker-configuration.d.ts",
+      "!**/tsconfig*.json",
+      "!src",
+      "!public",
+      "!components.json",
+      "!vite.config.ts",
+      "!vitest.config.ts"
+    ]
+  }
+}
