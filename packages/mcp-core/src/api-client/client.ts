@@ -30,9 +30,15 @@ import {
   isSentryHost,
   type TraceMetricIdentifier,
 } from "../utils/url-utils";
+import { retryWithBackoff } from "../internal/fetch-utils";
 import { USER_AGENT } from "../version";
 import { apiPath } from "./api-path";
-import { ApiNotFoundError, ApiValidationError, createApiError } from "./errors";
+import {
+  ApiNotFoundError,
+  ApiServerError,
+  ApiValidationError,
+  createApiError,
+} from "./errors";
 import {
   AgenticOnboardingRunSchema,
   AIConversationDetailsResponseSchema,
@@ -88,7 +94,6 @@ import {
   UptimeCheckListSchema,
   UptimeMonitorListSchema,
   UptimeMonitorSchema,
-  UserRegionsSchema,
   UserReportListSchema,
   UserSchema,
 } from "./schema";
@@ -256,6 +261,26 @@ type RequestOptions = {
   host?: string;
   allowStatuses?: number[];
 };
+
+/**
+ * Automatic retry policy for transient upstream gateway failures (502/503/504).
+ *
+ * Sentry's edge intermittently returns short-lived gateway errors (e.g.
+ * "upstream connect error or disconnect/reset before headers") that clear on a
+ * retry. We retry only idempotent GET requests so an automatic retry can never
+ * replay a mutation, and keep the budget small so a still-failing tool call
+ * resolves quickly under the Cloudflare Workers request lifetime.
+ */
+const RETRYABLE_REQUEST_MAX_RETRIES = 2;
+const RETRYABLE_REQUEST_INITIAL_DELAY_MS = 250;
+
+/**
+ * Default cap for returning attachment bytes inline over the MCP transport.
+ * A 30 MB attachment takes ~80 MB in memory once base64-encoded and serialized,
+ * which fits the Cloudflare Worker's 128 MB isolate with room for the rest of the
+ * request; above it, getEventAttachment returns a reference instead of the bytes.
+ */
+export const DEFAULT_MAX_INLINE_ATTACHMENT_BYTES = 30 * 1024 * 1024;
 
 export type TraceItemType = "spans" | "logs" | "tracemetrics";
 
@@ -673,6 +698,42 @@ export class SentryApiService {
   }
 
   /**
+   * Makes an authenticated request to the Sentry API, transparently retrying
+   * transient upstream gateway failures (502/503/504).
+   *
+   * Retries are limited to idempotent GET requests so an automatic retry can
+   * never replay a mutation, and are gated on `ApiServerError.isGatewayError()`
+   * so persistent 500s, 4xx client errors, and network/configuration errors
+   * fail fast without waiting. Callers that opt a 5xx into `allowStatuses`
+   * receive the raw response from `requestOnce` and are never retried.
+   *
+   * @param path API endpoint path (without /api/0 prefix)
+   * @param options Fetch options
+   * @param requestOptions Additional request configuration
+   * @returns Promise resolving to Response object
+   * @throws {ApiError} Enhanced API errors with user-friendly messages
+   * @throws {Error} Network or parsing errors
+   */
+  private async request(
+    path: string,
+    options: RequestInit = {},
+    requestOptions: { host?: string; allowStatuses?: number[] } = {},
+  ): Promise<Response> {
+    const method = (options.method ?? "GET").toUpperCase();
+    const isIdempotent = method === "GET";
+
+    return retryWithBackoff(
+      () => this.requestOnce(path, options, requestOptions),
+      {
+        maxRetries: isIdempotent ? RETRYABLE_REQUEST_MAX_RETRIES : 0,
+        initialDelay: RETRYABLE_REQUEST_INITIAL_DELAY_MS,
+        shouldRetry: (error) =>
+          error instanceof ApiServerError && error.isGatewayError(),
+      },
+    );
+  }
+
+  /**
    * Internal method for making authenticated requests to Sentry API.
    *
    * Handles:
@@ -688,7 +749,7 @@ export class SentryApiService {
    * @throws {ApiError} Enhanced API errors with user-friendly messages
    * @throws {Error} Network or parsing errors
    */
-  private async request(
+  private async requestOnce(
     path: string,
     options: RequestInit = {},
     { host, allowStatuses }: { host?: string; allowStatuses?: number[] } = {},
@@ -1532,13 +1593,11 @@ export class SentryApiService {
   /**
    * Lists all organizations accessible to the authenticated user.
    *
-   * Automatically handles multi-region queries by fetching from all
-   * available regions and combining results.
+   * Queries the `/organizations/` endpoint on the root host.
    *
    * @param params Query parameters
    * @param params.query Search query to filter organizations by name/slug
    * @param params.limit Maximum number of organizations to return (defaults to 25)
-   * @param opts Request options
    * @returns Array of organizations across all accessible regions
    *
    * @example
@@ -1550,10 +1609,10 @@ export class SentryApiService {
    * });
    * ```
    */
-  async listOrganizations(
-    params?: { query?: string; limit?: number },
-    opts?: RequestOptions,
-  ): Promise<OrganizationList> {
+  async listOrganizations(params?: {
+    query?: string;
+    limit?: number;
+  }): Promise<OrganizationList> {
     const limit = params?.limit ?? 25;
 
     // Build query parameters
@@ -1565,50 +1624,14 @@ export class SentryApiService {
     const queryString = queryParams.toString();
     const path = `/organizations/?${queryString}`;
 
-    // For self-hosted instances, the regions endpoint doesn't exist
-    if (!this.isSaas()) {
-      const body = await this.requestJSON(path, undefined, opts);
-      return OrganizationListSchema.parse(body);
+    let host = undefined;
+    // For SaaS, always use the main sentry.io host, not regional hosts
+    if (this.isSaas()) {
+      host = "sentry.io";
     }
 
-    // For SaaS, try to use regions endpoint first
-    try {
-      // TODO: Sentry is currently not returning all orgs without hitting region endpoints
-      // The regions endpoint only exists on the main API server, not on regional endpoints
-      const regionsBody = await this.requestJSON(
-        "/users/me/regions/",
-        undefined,
-        {}, // Don't pass opts to ensure we use the main host
-      );
-      const regionData = UserRegionsSchema.parse(regionsBody);
-
-      const allOrganizations = (
-        await Promise.all(
-          regionData.regions.map(async (region) =>
-            this.requestJSON(path, undefined, {
-              ...opts,
-              host: new URL(region.url).host,
-            }),
-          ),
-        )
-      )
-        .map((data) => OrganizationListSchema.parse(data))
-        .reduce((acc, curr) => acc.concat(curr), []);
-
-      // Apply the limit after combining results from all regions
-      return allOrganizations.slice(0, limit);
-    } catch (error) {
-      // If regions endpoint fails (e.g., older self-hosted versions identifying as sentry.io),
-      // fall back to direct organizations endpoint
-      if (error instanceof ApiNotFoundError) {
-        // logger.info("Regions endpoint not found, falling back to direct organizations endpoint");
-        const body = await this.requestJSON(path, undefined, opts);
-        return OrganizationListSchema.parse(body);
-      }
-
-      // Re-throw other errors
-      throw error;
-    }
+    const body = await this.requestJSON(path, undefined, { host });
+    return OrganizationListSchema.parse(body);
   }
 
   /**
@@ -3649,7 +3672,8 @@ export class SentryApiService {
     opts?: RequestOptions,
   ): Promise<Event> {
     const body = await this.requestJSON(
-      apiPath`/organizations/${organizationSlug}/issues/${issueId}/events/${eventId}/`,
+      apiPath`/organizations/${organizationSlug}/issues/${issueId}/events/${eventId}/` +
+        `?llmFormat=markdown`,
       undefined,
       opts,
     );
@@ -3877,18 +3901,32 @@ export class SentryApiService {
       projectSlug,
       eventId,
       attachmentId,
+      maxInlineBytes = DEFAULT_MAX_INLINE_ATTACHMENT_BYTES,
     }: {
       organizationSlug: string;
       projectSlug: string;
       eventId: string;
       attachmentId: string;
+      /**
+       * Attachments larger than this (by metadata `size`) skip download —
+       * `getEventAttachment` returns `bytes: null`. Defaults to
+       * {@link DEFAULT_MAX_INLINE_ATTACHMENT_BYTES}.
+       */
+      maxInlineBytes?: number;
     },
     opts?: RequestOptions,
   ): Promise<{
     attachment: EventAttachment;
+    /** Authenticated API download URL (requires credentials). */
     downloadUrl: string;
+    /**
+     * Presigned URL that downloads the file directly without credentials, or
+     * `null` when unavailable. Only set on the skipped-download path.
+     */
+    directDownloadUrl: string | null;
     filename: string;
-    blob: Blob;
+    /** Raw file bytes, or `null` when the download was skipped. */
+    bytes: Uint8Array | null;
     contentType: string;
   }> {
     // Get the attachment metadata first
@@ -3907,12 +3945,31 @@ export class SentryApiService {
       );
     }
 
-    // Download the actual file content
-    const downloadUrl =
+    const downloadPath =
       apiPath`/projects/${organizationSlug}/${projectSlug}/events/${eventId}/attachments/${attachmentId}/` +
       `?download=1`;
+
+    // Skip the download for oversized attachments — buffering and base64
+    // encoding them can exhaust the worker's memory. Decide from the metadata
+    // size so we never issue the request.
+    if (attachment.size > maxInlineBytes) {
+      const directDownloadUrl = await this.resolveDirectDownloadUrl(
+        downloadPath,
+        opts,
+      );
+      return {
+        attachment,
+        downloadUrl: `${this.apiPrefix}${downloadPath}`,
+        directDownloadUrl,
+        filename: attachment.name,
+        bytes: null,
+        contentType: attachment.mimetype || "application/octet-stream",
+      };
+    }
+
+    // Download the actual file content
     const downloadResponse = await this.request(
-      downloadUrl,
+      downloadPath,
       { method: "GET" },
       opts,
     );
@@ -3925,13 +3982,45 @@ export class SentryApiService {
       attachment.mimetype ||
       "application/octet-stream";
 
+    // Read the body once as bytes; arrayBuffer() avoids the extra copy that
+    // blob() + blob.arrayBuffer() would hold at the same time.
+    const bytes = new Uint8Array(await downloadResponse.arrayBuffer());
+
     return {
       attachment,
       downloadUrl: downloadResponse.url,
+      directDownloadUrl: null,
       filename: attachment.name,
-      blob: await downloadResponse.blob(),
+      bytes,
       contentType,
     };
+  }
+
+  /**
+   * Probe the download endpoint for a presigned URL without buffering the file.
+   *
+   * Objectstore attachments redirect to a presigned URL (returned here); legacy
+   * ones stream a 200 with no redirect, so there is no direct URL. The body is
+   * discarded either way — we only need the URL.
+   */
+  private async resolveDirectDownloadUrl(
+    downloadPath: string,
+    opts?: RequestOptions,
+  ): Promise<string | null> {
+    try {
+      const response = await this.request(
+        downloadPath,
+        { method: "GET" },
+        opts,
+      );
+      const directUrl = response.redirected ? response.url : null;
+      // Don't await cancel(): we already have the URL, and awaiting it can
+      // stall on some runtimes.
+      void response.body?.cancel().catch(() => {});
+      return directUrl;
+    } catch {
+      return null;
+    }
   }
 
   async getReplayDetails(
@@ -4479,7 +4568,8 @@ export class SentryApiService {
     opts?: RequestOptions,
   ): Promise<AutofixRunState> {
     const body = await this.requestJSON(
-      apiPath`/organizations/${organizationSlug}/issues/${issueId}/autofix/`,
+      apiPath`/organizations/${organizationSlug}/issues/${issueId}/autofix/` +
+        `?llmFormat=markdown`,
       undefined,
       opts,
     );
@@ -4636,7 +4726,7 @@ export class SentryApiService {
       }
 
       const response = await this.request(
-        apiPath`/organizations/${organizationSlug}/ai-conversations/${conversationId}/` +
+        apiPath`/organizations/${organizationSlug}/agents/conversations/${conversationId}/` +
           `?${queryParams.toString()}`,
         undefined,
         opts,
@@ -4718,7 +4808,7 @@ export class SentryApiService {
     }
 
     const response = await this.request(
-      apiPath`/organizations/${organizationSlug}/ai-conversations/` +
+      apiPath`/organizations/${organizationSlug}/agents/conversations/` +
         `?${queryParams.toString()}`,
       undefined,
       opts,

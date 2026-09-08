@@ -17,6 +17,7 @@ import {
 import { createExecuteTool } from "./tools/special/execute-tool";
 import type { ToolConfig } from "./tools/types";
 import type { ServerContext } from "./types";
+import { LIB_VERSION } from "./version";
 
 // Mock the Sentry core module
 vi.mock("@sentry/core", () => ({
@@ -1101,6 +1102,24 @@ describe("buildServer", () => {
       expect(resultNames).toContain("get_event_stacktrace");
     });
 
+    it("search_sentry_tools prefers agent conversation tools for legacy AI conversation phrasing", async () => {
+      const server = buildServer({
+        context: baseContext,
+      });
+
+      const result = await callRegisteredTool(server, "search_sentry_tools", {
+        query: "ai conversations",
+        limit: 5,
+      });
+      const payload = getStructuredContent<{
+        results: Array<{ name: string }>;
+      }>(result);
+      const resultNames = payload.results.map((tool) => tool.name);
+
+      expect(resultNames[0]).toBe("search_agent_conversations");
+      expect(resultNames).toContain("search_ai_conversations");
+    });
+
     it("search_sentry_tools includes whoami as a catalog-only foundational tool", async () => {
       const server = buildServer({
         context: {
@@ -1121,6 +1140,43 @@ describe("buildServer", () => {
       }>(result);
 
       expect(payload.results.map((tool) => tool.name)).toContain("whoami");
+    });
+
+    it("discovers and executes Sentry MCP server information from the catalog", async () => {
+      const searchServer = buildServer({
+        context: baseContext,
+      });
+
+      const toolNames = getRegisteredToolNames(searchServer);
+      expect(toolNames).not.toContain("get_sentry_mcp_info");
+
+      const searchResult = await callRegisteredTool(
+        searchServer,
+        "search_sentry_tools",
+        {
+          query: "server version",
+          limit: 8,
+        },
+      );
+      const searchPayload = getStructuredContent<{
+        results: Array<{ name: string }>;
+      }>(searchResult);
+      expect(searchPayload.results[0]?.name).toBe("get_sentry_mcp_info");
+
+      const executeServer = buildServer({
+        context: baseContext,
+      });
+      const executeResult = await callRegisteredTool(
+        executeServer,
+        "execute_sentry_tool",
+        {
+          name: "get_sentry_mcp_info",
+          arguments: {},
+        },
+      );
+      expect(getStructuredContent(executeResult)).toEqual({
+        version: LIB_VERSION,
+      });
     });
 
     it("search_sentry_tools omits unavailable non-inspect tools", async () => {
@@ -1403,7 +1459,7 @@ describe("buildServer", () => {
     it("execute_sentry_tool dispatches structured catalog results", async () => {
       mswServer.use(
         http.get(
-          "https://sentry.io/api/0/organizations/test-org/ai-conversations/",
+          "https://sentry.io/api/0/organizations/test-org/agents/conversations/",
           ({ request }) => {
             const url = new URL(request.url);
             expect(url.searchParams.get("query")).toBe("checkout");
@@ -1446,7 +1502,7 @@ describe("buildServer", () => {
       });
 
       const result = await callRegisteredTool(server, "execute_sentry_tool", {
-        name: "search_ai_conversations",
+        name: "search_agent_conversations",
         arguments: {
           organizationSlug: "test-org",
           query: "checkout",
@@ -1470,6 +1526,71 @@ describe("buildServer", () => {
       expect(getTextContent(result)).toBe(
         getGeneratedTextFromStructuredContent(result),
       );
+    });
+
+    it("execute_sentry_tool keeps deprecated agent conversation aliases callable", async () => {
+      mswServer.use(
+        http.get(
+          "https://sentry.io/api/0/organizations/test-org/agents/conversations/",
+          () => HttpResponse.json([]),
+        ),
+        http.get(
+          "https://sentry.io/api/0/organizations/test-org/agents/conversations/conv-123/",
+          () =>
+            HttpResponse.json({
+              conversationId: "conv-123",
+              title: null,
+              spans: [],
+            }),
+        ),
+      );
+      const server = buildServer({
+        context: {
+          ...baseContext,
+          grantedSkills: new Set(["inspect"]),
+        },
+      });
+
+      const searchResult = await callRegisteredTool(
+        server,
+        "execute_sentry_tool",
+        {
+          name: "search_ai_conversations",
+          arguments: {
+            organizationSlug: "test-org",
+            period: "30d",
+            limit: 10,
+          },
+        },
+      );
+      const searchPayload = getStructuredContent<{ count: number }>(
+        searchResult,
+      );
+
+      expect(searchPayload.count).toBe(0);
+
+      const detailsServer = buildServer({
+        context: {
+          ...baseContext,
+          grantedSkills: new Set(["inspect"]),
+        },
+      });
+      const detailsResult = await callRegisteredTool(
+        detailsServer,
+        "execute_sentry_tool",
+        {
+          name: "get_ai_conversation_details",
+          arguments: {
+            organizationSlug: "test-org",
+            conversationId: "conv-123",
+          },
+        },
+      );
+      const detailsPayload = getStructuredContent<{ conversationId: string }>(
+        detailsResult,
+      );
+
+      expect(detailsPayload.conversationId).toBe("conv-123");
     });
 
     it("execute_sentry_tool passes effective arguments to a catalog tool", async () => {
