@@ -58,7 +58,10 @@
   },
   "overrides": [
     {
-      "includes": ["packages/mcp-cloudflare/src/client/**/*.tsx"],
+      "includes": [
+        "packages/mcp-cloudflare/src/client/**/*.tsx",
+        "packages/mcp-cloudflare-fields/src/client/**/*.tsx"
+      ],
       "linter": {
         "rules": {
           "a11y": {
