@@ -5,8 +5,10 @@ server. Each spec should live in a single Markdown file under `docs/specs/`.
 
 ## Specs
 
-- [AI Conversations](ai-conversations.md)
+- [Agent Conversations](ai-conversations.md)
+- [Alert Inspection and Editing](alert-rules.md)
 - [Embedded Agent OpenAI Routing](embedded-agent-openai-routing.md)
+- [External Issue Linking](issue-linking.md)
 - [Project Management Tools](project-management.md)
 - [Remembered OAuth Skill Defaults](remembered-oauth-skills.md)
 - [Search Events](search-events.md)

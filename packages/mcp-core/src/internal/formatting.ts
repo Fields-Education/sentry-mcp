@@ -21,6 +21,7 @@ import type {
 import { ThreadsEntrySchema } from "../api-client";
 import type {
   AutofixRunState,
+  CommitterList,
   Event,
   ExternalIssueList,
   GenericEvent,
@@ -42,6 +43,7 @@ import {
   getAutofixArtifactSummaries,
   getStatusDisplayName,
   isTerminalStatus,
+  wrapSeerContent,
 } from "./tool-helpers/seer";
 import { formatToolCallInstruction } from "./tool-helpers/tool-call-formatting";
 import { isPlainObject } from "./type-guards";
@@ -177,6 +179,42 @@ export function formatFrameHeader(
       return `    at ${func} (${location}${line}${col})`;
     }
   }
+}
+
+/**
+ * Whether the shared formatter covers this event type, and so whether its body should be used
+ * instead of the local rendering.
+ *
+ * "default" is an error event without exception data, "generic" a performance regression or
+ * metric issue, "csp" a Content Security Policy violation. Anything else (a transaction, most
+ * notably) keeps the local path, which renders things the shared body does not carry such as
+ * the fetched performance trace.
+ */
+/**
+ * Whether to read the issue's metadata instead of its top level fields. Performance issues can
+ * have various categories such as 'db_query', but the issueType starts with 'performance_'.
+ *
+ * It matters which side of this an issue falls on: metadata.value is a query pattern for a
+ * performance issue and the exception message for an error, so reading it unconditionally
+ * misnames the error text.
+ */
+export function isPerformanceIssueType(issue: {
+  issueType?: string | null;
+  issueCategory?: string | null;
+}): boolean {
+  return (
+    issue.issueType?.startsWith("performance_") === true ||
+    issue.issueCategory === "performance"
+  );
+}
+
+export function usesSharedFormatterBody(event: { type?: unknown }): boolean {
+  return (
+    event.type === "error" ||
+    event.type === "default" ||
+    event.type === "generic" ||
+    event.type === "csp"
+  );
 }
 
 /**
@@ -1916,17 +1954,24 @@ function formatSeerSummary(autofixState: AutofixRunState | undefined): string {
     parts.push("");
   }
 
-  // Summarize from the run's artifacts: the solution if available, otherwise
-  // the root cause if it has been identified.
-  const { rootCause, solution } = getAutofixArtifactSummaries(autofix);
-  if (solution) {
-    parts.push("**Summary:**");
-    parts.push(solution);
-  } else if (rootCause) {
-    parts.push("**Root Cause Identified:**");
-    parts.push(rootCause);
-  } else if (!isTerminalStatus(autofix.status)) {
-    parts.push("Analysis has started but no results yet.");
+  // Prefer the shared formatter's analysis for the body when the endpoint provides it, but
+  // keep the status handling around it: a run that failed or needs input must say so either
+  // way. Seer content is LLM-generated, so wrap it in the untrusted-data boundary.
+  if (autofixState.formatted?.content) {
+    parts.push(wrapSeerContent(autofixState.formatted.content, autofix.run_id));
+  } else {
+    // Summarize from the run's artifacts: the solution if available, otherwise
+    // the root cause if it has been identified.
+    const { rootCause, solution } = getAutofixArtifactSummaries(autofix);
+    if (solution) {
+      parts.push("**Summary:**");
+      parts.push(solution);
+    } else if (rootCause) {
+      parts.push("**Root Cause Identified:**");
+      parts.push(rootCause);
+    } else if (!isTerminalStatus(autofix.status)) {
+      parts.push("Analysis has started but no results yet.");
+    }
   }
 
   if (autofix.status === "error") {
@@ -1938,6 +1983,22 @@ function formatSeerSummary(autofixState: AutofixRunState | undefined): string {
   }
 
   return `${parts.join("\n")}\n\n`;
+}
+
+/** Projects the suspect commit consistently for structured and markdown issue details. */
+export function getSuspectCommit(committers: CommitterList | undefined) {
+  // The endpoint currently returns the issue's latest suspect commit, grouped by author.
+  const committer = committers?.[0];
+  const commit = committer?.commits[0];
+  if (!commit) {
+    return null;
+  }
+  return {
+    id: String(commit.id),
+    message: commit.message,
+    author: committer.author?.name ?? committer.author?.email,
+    suspectCommitType: commit.suspectCommitType,
+  };
 }
 
 /**
@@ -1958,6 +2019,7 @@ export function formatIssueOutput({
   relatedReplayIds,
   aiConversations,
   codeLocation,
+  committers,
   experimentalMode,
   availableToolNames,
   directToolNames,
@@ -1972,17 +2034,14 @@ export function formatIssueOutput({
   relatedReplayIds?: string[];
   aiConversations?: AIConversationReference[];
   codeLocation?: CodeLocation;
+  committers?: CommitterList;
   experimentalMode?: boolean;
   availableToolNames?: ReadonlySet<string>;
   directToolNames?: ReadonlySet<string>;
 }) {
   let output = `# Issue ${issue.shortId} in **${organizationSlug}**\n\n`;
 
-  // Check if this is a performance issue based on issueCategory or issueType
-  // Performance issues can have various categories like 'db_query' but issueType starts with 'performance_'
-  const isPerformanceIssue =
-    issue.issueType?.startsWith("performance_") ||
-    issue.issueCategory === "performance";
+  const isPerformanceIssue = isPerformanceIssueType(issue);
 
   if (isPerformanceIssue && issue.metadata) {
     // For performance issues, use metadata for better context
@@ -2051,6 +2110,22 @@ export function formatIssueOutput({
     output += formatCodeLocation(codeLocation);
   }
 
+  const suspectCommit = getSuspectCommit(committers);
+  if (suspectCommit) {
+    output += "## Suspect Commit\n\n";
+    output += `**SHA**: \`${suspectCommit.id}\`\n`;
+    if (suspectCommit.message) {
+      output += `**Message**: ${suspectCommit.message}\n`;
+    }
+    if (suspectCommit.author) {
+      output += `**Author**: ${suspectCommit.author}\n`;
+    }
+    if (suspectCommit.suspectCommitType) {
+      output += `**Source**: ${suspectCommit.suspectCommitType}\n`;
+    }
+    output += "\n";
+  }
+
   output += "## Event Details\n\n";
 
   // Check if this is an unsupported event type
@@ -2110,15 +2185,8 @@ export function formatIssueOutput({
 
   output += `**Event ID**: ${event.id}\n`;
   output += `**Type**: ${event.type}\n`;
-  // "default" type represents error events without exception data
-  // "generic" type represents performance regressions and metric-based issues
-  // "csp" type represents Content Security Policy violations
-  if (
-    event.type === "error" ||
-    event.type === "default" ||
-    event.type === "generic" ||
-    event.type === "csp"
-  ) {
+  const isSharedFormatterType = usesSharedFormatterBody(event);
+  if (isSharedFormatterType) {
     const typedEvent = event as
       | z.infer<typeof ErrorEventSchema>
       | z.infer<typeof DefaultEventSchema>
@@ -2132,17 +2200,40 @@ export function formatIssueOutput({
     output += `**Message**:\n${event.message}\n`;
   }
   output += "\n";
-  output += formatEventOutput(event, {
-    performanceTrace,
-    replaySummary: {
+  // only a markdown body belongs in this output; a json body is for structuredContent, and
+  // pasting it here would put a serialized object in the middle of the prose
+  if (
+    isSharedFormatterType &&
+    event.formatted?.format === "markdown" &&
+    event.formatted.content
+  ) {
+    // the shared formatter body doesn't include the replay note — add it here to match formatEventOutput
+    output += formatIssueReplayOutput({
       apiService,
       organizationSlug,
+      event,
       relatedReplayIds,
       experimentalMode: experimentalMode ?? false,
       availableToolNames,
       directToolNames,
-    },
-  });
+    });
+    const formattedContent = event.formatted.content;
+    output += formattedContent.endsWith("\n")
+      ? formattedContent
+      : `${formattedContent}\n`;
+  } else {
+    output += formatEventOutput(event, {
+      performanceTrace,
+      replaySummary: {
+        apiService,
+        organizationSlug,
+        relatedReplayIds,
+        experimentalMode: experimentalMode ?? false,
+        availableToolNames,
+        directToolNames,
+      },
+    });
+  }
 
   // Add Seer context if available
   if (autofixState) {
@@ -2307,13 +2398,13 @@ function formatAIConversationResponseNote({
     const spanSuffix = conversation.spanId
       ? ` Matching span: \`${conversation.spanId}\`.`
       : "";
-    return `- AI conversation found in this trace: \`${conversation.conversationId}\`.${spanSuffix}\n${instructions.map((instruction) => `- ${instruction}`).join("\n")}\n`;
+    return `- Agent conversation found in this trace: \`${conversation.conversationId}\`.${spanSuffix}\n${instructions.map((instruction) => `- ${instruction}`).join("\n")}\n`;
   }
 
   const conversationIds = aiConversations
     .map((conversation) => `\`${conversation.conversationId}\``)
     .join(", ");
-  return `- Multiple AI conversations were found in this trace: ${conversationIds}.\n${instructions.map((instruction) => `- ${instruction}`).join("\n")}\n`;
+  return `- Multiple agent conversations were found in this trace: ${conversationIds}.\n${instructions.map((instruction) => `- ${instruction}`).join("\n")}\n`;
 }
 
 const MAX_DISPLAY_REPLAYS = 5;
@@ -2407,7 +2498,7 @@ function formatIssueReplayOutput({
   return `${lines.join("\n")}\n\n`;
 }
 
-function getReplayIdFromEvent(event: Event): string | null {
+export function getReplayIdFromEvent(event: Event): string | null {
   const replayContext = event.contexts?.replay as
     | Record<string, unknown>
     | undefined;
@@ -2422,7 +2513,7 @@ function getReplayIdFromEvent(event: Event): string | null {
   return normalizeReplayId(replayContextId ?? replayTagId);
 }
 
-function dedupeReplayIds(replayIds: string[]): string[] {
+export function dedupeReplayIds(replayIds: string[]): string[] {
   const normalizedReplayIds: string[] = [];
   const seenReplayIds = new Set<string>();
 
