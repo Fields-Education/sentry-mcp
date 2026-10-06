@@ -607,10 +607,10 @@ importers:
         version: 1.2.3(@types/react@19.1.8)(react@19.2.8)
       '@sentry/cloudflare':
         specifier: 'catalog:'
-        version: 11.0.0-rc.0(@cloudflare/workers-types@4.20260405.1)(wrangler@4.80.0(@cloudflare/workers-types@4.20260405.1)(@types/node@24.13.5))
+        version: 11.1.0(@cloudflare/workers-types@4.20260405.1)(wrangler@4.80.0(@cloudflare/workers-types@4.20260405.1)(@types/node@24.13.5))
       '@sentry/react':
         specifier: 'catalog:'
-        version: 11.0.0-rc.0(react-router@7.18.1(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react@19.2.8)
+        version: 11.1.0(react-router@7.18.1(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react@19.2.8)
       agents:
         specifier: 'catalog:'
         version: 0.20.1(@ai-sdk/react@3.0.232(react@19.2.8)(zod@4.4.3))(@babel/runtime@7.28.4)(@cloudflare/workers-types@4.20260405.1)(@modelcontextprotocol/client@2.0.0)(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(@modelcontextprotocol/server@2.0.0)(ai@6.0.64(zod@4.4.3))(chat@4.40.0(ai@6.0.64(zod@4.4.3))(zod@4.4.3))(react@19.2.8)(rolldown@1.2.9)(vite@6.3.5(@types/node@24.13.5)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.23.13)(yaml@2.9.0))(zod@4.4.3)
