@@ -9,7 +9,11 @@
     "apps/cli-docs/**",
     "**/worker-configuration.d.ts",
     "**/tsconfig*.json",
-    "packages/mcp-server-mocks/src/fixtures/**"
+    "packages/mcp-server-mocks/src/fixtures/**",
+    // Fields fork: `src`/`public` are symlinks to packages/mcp-cloudflare,
+    // which is already linted. Avoid duplicate (and misattributed) reports.
+    "packages/mcp-cloudflare-fields/src/**",
+    "packages/mcp-cloudflare-fields/public/**"
   ],
   "rules": {
     "no-unused-vars": "off",
