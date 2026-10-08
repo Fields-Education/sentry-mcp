@@ -9,7 +9,10 @@
     "apps/cli-docs/**",
     "**/worker-configuration.d.ts",
     "**/tsconfig*.json",
-    "packages/mcp-server-mocks/src/fixtures/**"
+    "packages/mcp-server-mocks/src/fixtures/**",
+    // Fields fork: packages/mcp-cloudflare-fields/src is a symlink to
+    // packages/mcp-cloudflare/src, so linting it just duplicates that package.
+    "packages/mcp-cloudflare-fields/src/**"
   ],
   "rules": {
     "no-unused-vars": "off",
