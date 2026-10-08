@@ -326,6 +326,173 @@ describe("search_events", () => {
     expect(result).toContain("**Peak**: 8");
   });
 
+  it("marks incomplete buckets and reports ingestion delay", async () => {
+    const output = {
+      dataset: "errors" as const,
+      query: "",
+      fields: [] as string[],
+      sort: "-timestamp",
+      environment: null,
+      timeSeries: { yAxis: "count()", interval: "1h" },
+      timeRange: { statsPeriod: "24h" },
+      explanation: "",
+    };
+    mockGenerateText.mockResolvedValueOnce({
+      text: JSON.stringify(output),
+      experimental_output: output,
+      finishReason: "stop" as const,
+      usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+      warnings: [] as const,
+    } as any);
+
+    mswServer.use(
+      http.get(
+        "https://sentry.io/api/0/organizations/test-org/events-timeseries/",
+        () =>
+          HttpResponse.json({
+            timeSeries: [
+              {
+                yAxis: "count()",
+                values: [
+                  {
+                    timestamp: 1757548800000,
+                    value: 10,
+                    incomplete: true,
+                    incompleteReason: "OUTSIDE_RETENTION",
+                  },
+                  { timestamp: 1757552400000, value: 8, incomplete: false },
+                  {
+                    timestamp: 1757556000000,
+                    value: 9,
+                    incomplete: true,
+                    incompleteReason: "NOT_ELAPSED",
+                  },
+                ],
+                meta: {
+                  interval: 3600000,
+                  valueType: "integer",
+                  valueUnit: null,
+                },
+              },
+            ],
+            meta: {
+              dataset: "errors",
+              start: 1757462400000,
+              end: 1757548800000,
+              ingestion: {
+                status: "healthy",
+                delaySeconds: 95,
+                completeThrough: 1757556600000,
+              },
+            },
+          }),
+      ),
+    );
+
+    const result = await searchEvents.handler(
+      {
+        organizationSlug: "test-org",
+        regionUrl: null,
+        projectSlug: null,
+        dataset: "errors",
+        query: "errors per hour",
+        fields: null,
+        sort: null,
+        period: "24h",
+        limit: 10,
+        includeExplanation: false,
+      },
+      {
+        accessToken: "test-token",
+        userId: "user-123",
+        clientId: "client-123",
+        grantedSkills: new Set(),
+        constraints: {},
+        sentryHost: "sentry.io",
+      },
+    );
+
+    // The still-filling bucket can't be the peak yet. The retention-partial
+    // bucket is final, so it still counts and wins here.
+    expect(result).toContain("**Peak**: 10 at 2025-09-11 00:00");
+    expect(result).toContain("**Total**: 27 (so far)");
+    expect(result).toContain("| 2025-09-11 00:00 | 10 † |");
+    expect(result).toContain("| 2025-09-11 02:00 | 9 * |");
+    expect(result).toContain("Incomplete bucket: data is still arriving");
+    expect(result).toContain(
+      "Partial bucket: it starts before the retention window",
+    );
+    expect(result).toContain(
+      "**Ingestion**: healthy (~1m 35s behind, data complete through 2025-09-11 02:10 UTC)",
+    );
+  });
+
+  it("omits the retention footnote when its buckets are cut from the table", async () => {
+    const output = {
+      dataset: "errors" as const,
+      query: "",
+      fields: [] as string[],
+      sort: "-timestamp",
+      environment: null,
+      timeSeries: { yAxis: "count()", interval: "1d" },
+      timeRange: { statsPeriod: "100d" },
+      explanation: "",
+    };
+    mockGenerateText.mockResolvedValueOnce({
+      text: JSON.stringify(output),
+      experimental_output: output,
+      finishReason: "stop" as const,
+      usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+      warnings: [] as const,
+    } as any);
+
+    // 60 daily buckets: the first is outside retention, but only the latest
+    // 48 rows are rendered, so no † row is visible.
+    const day = 86400000;
+    const values = Array.from({ length: 60 }, (_, i) => ({
+      timestamp: 1752364800000 + i * day,
+      value: i + 1,
+      incomplete: i === 0,
+      ...(i === 0 ? { incompleteReason: "OUTSIDE_RETENTION" } : {}),
+    }));
+    mswServer.use(
+      http.get(
+        "https://sentry.io/api/0/organizations/test-org/events-timeseries/",
+        () =>
+          HttpResponse.json({
+            timeSeries: [{ yAxis: "count()", values, meta: { interval: day } }],
+          }),
+      ),
+    );
+
+    const result = await searchEvents.handler(
+      {
+        organizationSlug: "test-org",
+        regionUrl: null,
+        projectSlug: null,
+        dataset: "errors",
+        query: "errors per day",
+        fields: null,
+        sort: null,
+        period: "100d",
+        limit: 10,
+        includeExplanation: false,
+      },
+      {
+        accessToken: "test-token",
+        userId: "user-123",
+        clientId: "client-123",
+        grantedSkills: new Set(),
+        constraints: {},
+        sentryHost: "sentry.io",
+      },
+    );
+
+    expect(result).toContain("## Buckets (most recent 48 of 60)");
+    expect(result).not.toContain("†");
+    expect(result).not.toContain("so far");
+  });
+
   it("should handle spans dataset queries", async () => {
     // Mock AI response for spans dataset
     mockGenerateText.mockResolvedValueOnce(
