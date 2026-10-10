@@ -11,6 +11,7 @@
     "packages/cli/CHANGELOG.md",
     "packages/cli/AGENTS.md",
     "packages/mcp-server-mocks/src/fixtures/**",
+    "packages/mcp-cloudflare-fields/**",
     "**/worker-configuration.d.ts",
     "**/tsconfig*.json"
   ]

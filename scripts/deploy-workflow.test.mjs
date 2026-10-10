@@ -3,12 +3,12 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const workflow = readFileSync(
-  new URL("../.github/workflows/deploy.yml", import.meta.url),
+  new URL("../.github/disabled-workflows/deploy.yml", import.meta.url),
   "utf8",
 );
 const recovery = readFileSync(
   new URL(
-    "../.github/workflows/recover-cloudflare-deployment.yml",
+    "../.github/disabled-workflows/recover-cloudflare-deployment.yml",
     import.meta.url,
   ),
   "utf8",

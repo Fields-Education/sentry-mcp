@@ -75,7 +75,7 @@ GitHub Actions workflow runs on every PR and push to main:
 - 📊 **Job Summary:** Detailed per-tool breakdown in Actions tab
 - 📦 **Artifact:** `token-stats-{sha}.json` stored for 90 days
 
-**Workflow:** `.github/workflows/token-cost.yml`
+**Workflow:** `.github/disabled-workflows/token-cost.yml`
 
 ## Understanding the Results
 
@@ -123,6 +123,6 @@ tsx measure-token-cost.ts --help       # Show help
 ## References
 
 - Script: `packages/mcp-core/scripts/measure-token-cost.ts`
-- Workflow: `.github/workflows/token-cost.yml`
+- Workflow: `.github/disabled-workflows/token-cost.yml`
 - Tool limits: See "Tool Count Limits" in
   [../contributing/adding-tools.md](../contributing/adding-tools.md)

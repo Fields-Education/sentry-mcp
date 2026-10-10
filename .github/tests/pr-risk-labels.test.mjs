@@ -7,7 +7,7 @@ import test from "node:test";
 
 // Execute the actual workflow script so the tests cannot drift from production.
 const workflow = readFileSync(
-  new URL("../workflows/pr-risk-jev.yml", import.meta.url),
+  new URL("../disabled-workflows/pr-risk-jev.yml", import.meta.url),
   "utf8",
 );
 const script = workflow.match(/^ {10}script: \|\n((?: {12}.*\n|\n)+)/m)?.[1];
