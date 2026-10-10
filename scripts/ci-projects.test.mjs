@@ -163,7 +163,7 @@ describe("workspace CI selection", () => {
 
   it("keeps a stable CI status and one dynamic job per package", () => {
     const workflow = readFileSync(
-      resolve(root, ".github/workflows/test.yml"),
+      resolve(root, ".github/disabled-workflows/test.yml"),
       "utf8",
     );
     assert.match(workflow, /merge_group:/);
