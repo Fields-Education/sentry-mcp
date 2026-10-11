@@ -1,18 +1,19 @@
 import { z } from "zod";
-import { setTag } from "@sentry/core";
-import { defineTool } from "../../internal/tool-helpers/define";
-import { apiServiceFromContext } from "../../internal/tool-helpers/api";
-import { structuredResult } from "../../internal/tool-helpers/results";
-import { logIssue } from "../../telem/logging";
-import { UserInputError } from "../../errors";
-import type { ServerContext } from "../../types";
+import { ApiClientError } from "../../api-client";
 import type { Project } from "../../api-client/index";
+import { UserInputError } from "../../errors";
+import { apiServiceFromContext } from "../../internal/tool-helpers/api";
+import { defineTool } from "../../internal/tool-helpers/define";
+import { structuredResult } from "../../internal/tool-helpers/results";
 import {
   ParamOrganizationSlug,
-  ParamRegionUrl,
-  ParamProjectSlug,
   ParamPlatform,
+  ParamProjectSlug,
+  ParamRegionUrl,
 } from "../../schema";
+import { logIssue } from "../../telem/logging";
+import { setTargetTagsAndAttributes } from "../../telem/scope";
+import type { ServerContext } from "../../types";
 
 export const updateProjectOutputSchema = z.object({
   project: z.object({
@@ -89,8 +90,7 @@ export default defineTool({
     });
     const organizationSlug = params.organizationSlug;
 
-    setTag("organization.slug", organizationSlug);
-    setTag("project.slug", params.projectSlug);
+    setTargetTagsAndAttributes(params);
 
     const hasProjectUpdates = params.name || params.slug || params.platform;
     if (!hasProjectUpdates) {
@@ -115,6 +115,9 @@ export default defineTool({
         platform: params.platform,
       });
     } catch (err) {
+      if (err instanceof ApiClientError) {
+        throw err;
+      }
       logIssue(err);
       throw new Error(
         `Failed to update project ${params.projectSlug}: ${err instanceof Error ? err.message : "Unknown error"}`,

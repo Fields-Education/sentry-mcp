@@ -1,24 +1,23 @@
-import { setTag } from "@sentry/core";
-import { defineTool } from "../../internal/tool-helpers/define";
-import { apiServiceFromContext } from "../../internal/tool-helpers/api";
-import { hasAgentProvider } from "../../internal/agents/provider-factory";
-import { formatToolCallInstruction } from "../../internal/tool-helpers/tool-call-formatting";
-import {
-  addAIConversationSuggestedActions,
-  formatAIConversationActionInstructions,
-  type AIConversationReference,
-} from "../../internal/tool-helpers/ai-conversation-actions";
-import { resolveRegionUrlForOrganization } from "../../internal/tool-helpers/resolve-region-url";
 import type { SentryApiService, Trace, TraceSpan } from "../../api-client";
 import { UserInputError } from "../../errors";
-import type { ServerContext } from "../../types";
-import { formatSemanticSpanDisplay } from "../support/traces/semantic-display.js";
+import { hasAgentProvider } from "../../internal/agents/provider-factory";
+import {
+  type AIConversationReference,
+  formatAIConversationActionInstructions,
+} from "../../internal/tool-helpers/ai-conversation-actions";
+import { apiServiceFromContext } from "../../internal/tool-helpers/api";
+import { defineTool } from "../../internal/tool-helpers/define";
+import { resolveRegionUrlForOrganization } from "../../internal/tool-helpers/resolve-region-url";
+import { formatToolCallInstruction } from "../../internal/tool-helpers/tool-call-formatting";
 import {
   ParamOrganizationSlug,
   ParamRegionUrl,
   ParamSpanId,
   ParamTraceId,
 } from "../../schema";
+import { setTargetTagsAndAttributes } from "../../telem/scope";
+import type { ServerContext } from "../../types";
+import { formatSemanticSpanDisplay } from "../support/traces/semantic-display.js";
 
 // Constants for span filtering and tree rendering
 const MAX_TRACE_FETCH_LIMIT = 1000;
@@ -75,8 +74,8 @@ export default defineTool({
     "- Want an overview first, then a guided pivot into additional spans or events",
     "",
     "DO NOT USE for:",
-    "- General searching for traces (use search_events with trace queries)",
-    "- Complete span enumeration or branch-by-branch reconstruction (use search_events scoped to the trace)",
+    "- General searching for traces (use search_traces)",
+    "- Complete span enumeration or branch-by-branch reconstruction (use search_traces scoped to the trace)",
     "",
     "TRIGGER PATTERNS:",
     "- 'Show me trace abc123' → use get_trace_details",
@@ -99,7 +98,7 @@ export default defineTool({
     "- Trace IDs are 32-character hexadecimal strings",
     "- This returns a condensed trace overview, not a full span dump",
     "- Provide `spanId` to focus on a single span within the trace",
-    "- If the response says it shows a subset of spans, use search_events to inspect the rest of the trace",
+    "- If the response says it shows a subset of spans, use search_traces to inspect the rest of the trace",
     "</hints>",
   ].join("\n"),
   inputSchema: {
@@ -131,15 +130,12 @@ export default defineTool({
       regionUrl: regionUrl ?? undefined,
     });
 
-    setTag("organization.slug", params.organizationSlug);
-    setTag("trace.id", params.traceId);
-    if (params.spanId) {
-      setTag("trace.span_id", params.spanId);
-    }
-
-    if (context.constraints.projectSlug) {
-      setTag("project.slug", context.constraints.projectSlug);
-    }
+    setTargetTagsAndAttributes({
+      organizationSlug: params.organizationSlug,
+      projectSlug: context.constraints.projectSlug,
+      traceId: params.traceId,
+      spanId: params.spanId,
+    });
 
     // Get trace metadata for overview
     const traceMeta = await apiService.getTraceMeta({
@@ -191,14 +187,7 @@ export default defineTool({
       directToolNames: context.directToolNames,
       aiConversations,
     });
-    return addAIConversationSuggestedActions({
-      markdown,
-      organizationSlug: params.organizationSlug,
-      aiConversations,
-      experimentalMode: context.experimentalMode ?? false,
-      availableToolNames: context.availableToolNames,
-      directToolNames: context.directToolNames,
-    });
+    return markdown;
   },
 });
 
@@ -1213,7 +1202,7 @@ function formatAIConversationSection({
     directToolNames,
   });
 
-  const lines = ["## AI Conversations", ""];
+  const lines = ["## Agent Conversations", ""];
   if (aiConversations.length === 1) {
     const [conversation] = aiConversations;
     lines.push(`**Conversation ID**: \`${conversation.conversationId}\``);
@@ -1255,15 +1244,17 @@ function buildTraceNextSteps({
 }): string[] {
   const formatSearchStep = ({
     label,
+    toolName,
     arguments: args,
     fallbackInstruction,
   }: {
     label: string;
+    toolName: "search_traces" | "search_errors" | "search_logs";
     arguments: Record<string, string>;
     fallbackInstruction: string;
   }) =>
     `- **${label}**: ${formatToolCallInstruction({
-      toolName: "search_events",
+      toolName,
       arguments: {
         organizationSlug,
         ...args,
@@ -1282,6 +1273,7 @@ function buildTraceNextSteps({
     return [
       formatSearchStep({
         label: "Search spans",
+        toolName: "search_traces",
         arguments: {
           query: spanQuery,
         },
@@ -1289,6 +1281,7 @@ function buildTraceNextSteps({
       }),
       formatSearchStep({
         label: "Search errors",
+        toolName: "search_errors",
         arguments: {
           query: `show error events from trace ${traceId}`,
         },
@@ -1296,6 +1289,7 @@ function buildTraceNextSteps({
       }),
       formatSearchStep({
         label: "Search logs",
+        toolName: "search_logs",
         arguments: {
           query: `show logs from trace ${traceId}`,
         },
@@ -1307,24 +1301,24 @@ function buildTraceNextSteps({
   return [
     formatSearchStep({
       label: "Search spans",
+      toolName: "search_traces",
       arguments: {
-        dataset: "spans",
         query: `trace:${traceId}`,
       },
       fallbackInstruction: "Span search is not available in this session",
     }),
     formatSearchStep({
       label: "Search errors",
+      toolName: "search_errors",
       arguments: {
-        dataset: "errors",
         query: `trace:${traceId}`,
       },
       fallbackInstruction: "Error search is not available in this session",
     }),
     formatSearchStep({
       label: "Search logs",
+      toolName: "search_logs",
       arguments: {
-        dataset: "logs",
         query: `trace:${traceId}`,
       },
       fallbackInstruction: "Log search is not available in this session",

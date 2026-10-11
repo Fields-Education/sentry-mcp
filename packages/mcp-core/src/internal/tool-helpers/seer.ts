@@ -42,7 +42,7 @@ export function getSeerUnsupportedIssueMessage(
     "**Suggested alternatives:**",
     "- Use `get_issue_details` or `get_sentry_resource` to inspect the metric alert rule and threshold details",
     "- Use `search_issues` to find related error issues that may explain the metric spike",
-    "- Use `search_events` to query the underlying metric data",
+    "- Use `search_metrics` (or `search_traces` for span-based alerts) to query the underlying data",
   ].join("\n");
 }
 
@@ -114,6 +114,20 @@ function wrapSeerAnalysisOutput({
   ].filter(Boolean);
 
   return `<seer_analysis ${attrs.join(" ")}>\n${output.trimEnd()}\n</seer_analysis>\n`;
+}
+
+/**
+ * Wraps shared-formatter Seer analysis content in the provenance boundary,
+ * mirroring the tags getOutputForAutofixRun applies to MCP-rendered output.
+ * Seer content is LLM-generated, so it must be marked as untrusted data.
+ */
+export function wrapSeerContent(content: string, runId?: number): string {
+  return wrapSeerAnalysisOutput({
+    output: content,
+    runId,
+    step: "analysis",
+    includeProvenanceTags: true,
+  });
 }
 
 // Artifact data shapes from getsentry/sentry's

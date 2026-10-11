@@ -1,4 +1,4 @@
-import { getActiveSpan, setTag } from "@sentry/core";
+import { getActiveSpan, setAttributes, setTags } from "@sentry/core";
 import { z } from "zod";
 import type { SentryApiService } from "../../api-client";
 import { UserInputError } from "../../errors";
@@ -14,9 +14,10 @@ import {
   resolveScopedProjectSlug,
 } from "../../internal/url-scope";
 import { ParamOrganizationSlug } from "../../schema";
+import { setTargetTagsAndAttributes } from "../../telem/scope";
 import type { ServerContext } from "../../types";
 import { isNumericId } from "../../utils/slug-validation";
-import getAIConversationDetails from "./get-ai-conversation-details";
+import getAIConversationDetails from "./get-agent-conversation-details";
 import getIssueDetails from "./get-issue-details";
 import getMonitorDetails from "./get-monitor-details";
 import getProfileDetails from "./get-profile-details";
@@ -57,7 +58,7 @@ export interface ResolvedResourceParams {
   // Trace/Span params
   traceId?: string;
   spanId?: string;
-  // AI conversation params
+  // agent conversation params
   conversationId?: string;
   // Profile params
   projectSlugOrId?: string;
@@ -195,12 +196,12 @@ function resolveFromParsedUrl(
   if (detectedType === "unknown") {
     if (parsed.transaction) {
       throw new UserInputError(
-        `Detected a performance summary URL for transaction "${parsed.transaction}". Use \`search_events\` to find traces and performance data for this transaction.`,
+        `Detected a performance summary URL for transaction "${parsed.transaction}". Use \`search_traces\` to find traces and performance data for this transaction.`,
       );
     }
     throw new UserInputError(
       "Could not determine resource type from URL. " +
-        "Supported URL patterns: issues, events, traces, AI conversations, profiles, replays, monitors, and releases.",
+        "Supported URL patterns: issues, events, traces, agent conversations, profiles, replays, monitors, and releases.",
     );
   }
 
@@ -270,7 +271,7 @@ function resolveFromParsedUrl(
     case "ai_conversation":
       if (!parsed.conversationId) {
         throw new UserInputError(
-          "Could not extract AI conversation ID from URL.",
+          "Could not extract agent conversation ID from URL.",
         );
       }
       return {
@@ -443,8 +444,8 @@ export default defineTool({
       purpose: "for full-resolution image bytes",
     });
     const supportedResources = monitorResourcesAvailable
-      ? "issues, events, traces, spans, AI conversations, replays, monitors, preprod snapshots, and snapshot images."
-      : "issues, events, traces, spans, AI conversations, replays, preprod snapshots, and snapshot images.";
+      ? "issues, events, traces, spans, agent conversations, replays, monitors, preprod snapshots, and snapshot images."
+      : "issues, events, traces, spans, agent conversations, replays, preprod snapshots, and snapshot images.";
     const resourceIds = [
       ...(monitorResourcesAvailable ? ["- monitor: <monitorSlug>"] : []),
       "- snapshot: <snapshotId>",
@@ -457,7 +458,7 @@ export default defineTool({
       `Supports ${supportedResources}`,
       "Trace lookups return a condensed overview by default.",
       "",
-      "AI Conversations: A conversation is a set of spans sharing the same gen_ai.conversation.id. Use resourceType='ai_conversation' with a conversation ID, or pass a Sentry conversation URL, to fetch the transcript/details. To discover or list conversations, use search_ai_conversations. Conversations are NOT issues — do not use search_issues for conversation queries.",
+      "Agent Conversations: A conversation is a set of spans sharing the same gen_ai.conversation.id. Use resourceType='ai_conversation' with a conversation ID, or pass a Sentry conversation URL, to fetch the transcript/details. To discover or list conversations, use search_agent_conversations. Conversations are NOT issues — do not use search_issues for conversation queries.",
       "",
       "For preprod snapshot URLs (matching 'sentry.io/preprod/snapshots/'):",
       "- Without ?selectedSnapshot=: returns the snapshot diff summary (changed, added, removed images)",
@@ -505,7 +506,7 @@ export default defineTool({
       .trim()
       .optional()
       .describe(
-        "Resource identifier: issue shortId (e.g., 'PROJECT-123'), event ID, trace ID, AI conversation ID, replay ID, monitor slug when inspect monitor tools are available, or snapshot artifact ID. Required when not using a URL.",
+        "Resource identifier: issue shortId (e.g., 'PROJECT-123'), event ID, trace ID, agent conversation ID, replay ID, monitor slug when inspect monitor tools are available, or snapshot artifact ID. Required when not using a URL.",
       ),
 
     organizationSlug: ParamOrganizationSlug.optional(),
@@ -527,11 +528,13 @@ export default defineTool({
       projectSlug: context.constraints.projectSlug,
     });
 
-    setTag("resource.type", resolved.type);
-    setTag("organization.slug", resolved.organizationSlug);
-    if (resolved.spanId) {
-      setTag("trace.span_id", resolved.spanId);
-    }
+    const resourceContext = { "resource.type": resolved.type };
+    setTags(resourceContext);
+    setAttributes(resourceContext);
+    setTargetTagsAndAttributes({
+      organizationSlug: resolved.organizationSlug,
+      spanId: resolved.spanId,
+    });
 
     getActiveSpan()?.setAttribute("app.resource.type", resolved.type);
 

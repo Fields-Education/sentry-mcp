@@ -1,4 +1,3 @@
-import { setTag } from "@sentry/core";
 import { z } from "zod";
 import { ApiNotFoundError } from "../../api-client";
 import { apiServiceFromContext } from "../../internal/tool-helpers/api";
@@ -11,6 +10,7 @@ import {
   ParamOrganizationSlug,
   ParamRegionUrl,
 } from "../../schema";
+import { setTargetTagsAndAttributes } from "../../telem/scope";
 import type { ServerContext } from "../../types";
 import { fetchAndFormatEventStacktrace } from "../support/event-stacktrace";
 
@@ -60,8 +60,7 @@ export default defineTool({
       regionUrl: params.regionUrl ?? undefined,
     });
 
-    setTag("organization.slug", params.organizationSlug);
-    setTag("issue.id", params.issueId);
+    setTargetTagsAndAttributes(params);
 
     try {
       await ensureIssueWithinProjectConstraint({
