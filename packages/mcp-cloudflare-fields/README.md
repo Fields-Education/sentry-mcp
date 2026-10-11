@@ -28,12 +28,22 @@ This means upstream changes to `mcp-cloudflare` automatically apply here.
 cd packages/mcp-cloudflare-fields
 
 # Production
-wrangler kv:namespace create OAUTH_KV
+wrangler kv namespace create OAUTH_KV
 # Note the ID and update wrangler.jsonc
 
 # Canary
-wrangler kv:namespace create OAUTH_KV_CANARY
+wrangler kv namespace create OAUTH_KV_CANARY
 # Note the ID and update wrangler.canary.jsonc
+```
+
+Upstream also binds `MCP_CACHE`, a KV namespace used to cache per-user
+organization/project access verification. It is currently commented out in both
+wrangler configs, so constraint verification fails open and re-checks Sentry on
+every MCP request. To enable it:
+
+```bash
+wrangler kv namespace create MCP_CACHE
+# Uncomment the MCP_CACHE binding in wrangler.jsonc with the returned ID
 ```
 
 ### 2. Create OAuth App on s.fields.app
@@ -75,17 +85,16 @@ wrangler secret put SENTRY_HOST --config wrangler.canary.jsonc
 
 Add these secrets/variables to your fork:
 
-**Secrets** (already have):
-- `CLOUDFLARE_API_TOKEN`
-- `CLOUDFLARE_ACCOUNT_ID`
+`.github/workflows/deploy-fields.yml` reads all of these from repository
+**secrets**:
 
-**Variables** (new):
-- `CLOUDFLARE_SUBDOMAIN` - Your workers.dev subdomain
-- `SENTRY_ORG_FIELDS` - Org slug on s.fields.app (for source maps)
-- `SENTRY_PROJECT_FIELDS` - Project slug on s.fields.app (for source maps)
-
-**Secrets** (new):
-- `SENTRY_AUTH_TOKEN` - Auth token from s.fields.app (for source maps)
+- `CLOUDFLARE_API_TOKEN` - Cloudflare API token with Workers deploy scope
+- `CLOUDFLARE_ACCOUNT_ID` - Cloudflare account ID
+- `CLOUDFLARE_SUBDOMAIN` - Your `workers.dev` subdomain (used by smoke tests)
+- `SENTRY_AUTH_TOKEN` - Auth token from s.fields.app (for source map upload)
+- `SENTRY_ORG` - Org slug on s.fields.app (for source maps)
+- `SENTRY_PROJECT` - Project slug on s.fields.app (for source maps)
+- `SENTRY_HOST_FIELDS` - Sentry hostname, e.g. `s.fields.app` (for source maps)
 
 ## Local Development
 
@@ -115,17 +124,19 @@ pnpm deploy
 
 ## Syncing with Upstream
 
+`.github/workflows/sync-upstream.yml` rebases `main` onto `upstream/main` on a
+schedule so that upstream commit SHAs stay in our history. Manual equivalent:
+
 ```bash
 # Add upstream remote (one-time)
 git remote add upstream https://github.com/getsentry/sentry-mcp.git
 
-# Fetch and merge
-git fetch upstream
-git merge upstream/main
-
-# Resolve any conflicts in:
-# - .github/workflows/deploy-fields.yml (your file, shouldn't conflict)
-# - packages/mcp-cloudflare-fields/ configs (your files, shouldn't conflict)
+git fetch upstream main
+git rebase upstream/main
 ```
 
-The symlinks ensure source code changes from upstream automatically apply.
+The symlinks ensure source code changes from upstream automatically apply. The
+non-symlinked files in this package (`package.json`, `index.html`,
+`.env.example`, `wrangler*.jsonc`) must be diffed against their
+`packages/mcp-cloudflare/` counterparts after a sync so new bindings, build
+markers, and dependency changes are carried forward.

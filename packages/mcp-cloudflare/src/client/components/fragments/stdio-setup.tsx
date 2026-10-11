@@ -1,8 +1,8 @@
-import CodeSnippet from "../ui/code-snippet";
 import skillDefinitions from "@sentry/mcp-core/skillDefinitions";
 import { NPM_PACKAGE_NAME, SCOPES } from "../../../constants";
-import { Prose } from "../ui/prose";
 import { Link } from "../ui/base";
+import CodeSnippet from "../ui/code-snippet";
+import { Prose } from "../ui/prose";
 import InstallTabs, { Tab } from "./install-tabs";
 
 const mcpServerName = import.meta.env.DEV ? "sentry-dev" : "sentry";
@@ -46,8 +46,9 @@ export default function StdioSetup() {
           scopes:
         </p>
         <p>
-          <strong>AI-powered search:</strong> If you want the
-          <code>search_events</code> and <code>search_issues</code> tools to
+          <strong>AI-powered search:</strong> If you want the event search tools
+          (<code>search_errors</code>, <code>search_traces</code>,{" "}
+          <code>search_logs</code>, and so on) and <code>search_issues</code> to
           translate natural language queries, add an
           <code>OPENAI_API_KEY</code> next to your Sentry token. The rest of the
           MCP server works without it, so you can skip this step if you do not
@@ -113,7 +114,8 @@ export default function StdioSetup() {
               </dt>
               <dd className="text-slate-300">
                 Optional for the standard tools, but required for the AI-powered
-                search tools (<code>search_events</code> /{" "}
+                search tools (<code>search_errors</code>,{" "}
+                <code>search_traces</code>, <code>search_logs</code>, etc. and{" "}
                 <code>search_issues</code>). When unset, those tools stay hidden
                 but everything else works as usual.
               </dd>
@@ -180,16 +182,17 @@ export default function StdioSetup() {
   );
 }
 
+import { AmpInstructions } from "./instructions/amp";
 // Import IDE instruction components
 import { ClaudeCodeInstructions } from "./instructions/claude-code";
-import { CursorInstructions } from "./instructions/cursor";
-import { VSCodeInstructions } from "./instructions/vscode";
 import { CodexCLIInstructions } from "./instructions/codex-cli";
-import { AmpInstructions } from "./instructions/amp";
+import { CursorInstructions } from "./instructions/cursor";
+import { FxInstructions } from "./instructions/fx";
 import { GeminiInstructions } from "./instructions/gemini";
 import { OpenCodeInstructions } from "./instructions/opencode";
+import { PiInstructions } from "./instructions/pi";
+import { VSCodeInstructions } from "./instructions/vscode";
 import { WarpInstructions } from "./instructions/warp";
-import { WindsurfInstructions } from "./instructions/windsurf";
 import { ZedInstructions } from "./instructions/zed";
 
 interface StdioSetupTabsProps {
@@ -203,24 +206,25 @@ export function StdioSetupTabs({
 }: StdioSetupTabsProps) {
   return (
     <InstallTabs selectedTab={selectedIde} onTabChange={onIdeChange}>
+      {/* Keep the primary IDEs first, then alphabetize within each group. */}
       <Tab id="claude-code" title="Claude Code">
         <ClaudeCodeInstructions transport="stdio" />
-      </Tab>
-
-      <Tab id="cursor" title="Cursor">
-        <CursorInstructions transport="stdio" />
-      </Tab>
-
-      <Tab id="vscode" title="VSCode">
-        <VSCodeInstructions transport="stdio" />
       </Tab>
 
       <Tab id="codex-cli" title="Codex">
         <CodexCLIInstructions transport="stdio" />
       </Tab>
 
+      <Tab id="cursor" title="Cursor">
+        <CursorInstructions transport="stdio" />
+      </Tab>
+
       <Tab id="amp" title="Amp">
         <AmpInstructions transport="stdio" />
+      </Tab>
+
+      <Tab id="fx" title="fx">
+        <FxInstructions transport="stdio" />
       </Tab>
 
       <Tab id="gemini" title="Gemini CLI">
@@ -231,12 +235,16 @@ export function StdioSetupTabs({
         <OpenCodeInstructions transport="stdio" />
       </Tab>
 
-      <Tab id="warp" title="Warp">
-        <WarpInstructions transport="stdio" />
+      <Tab id="pi" title="Pi">
+        <PiInstructions transport="stdio" />
       </Tab>
 
-      <Tab id="windsurf" title="Windsurf">
-        <WindsurfInstructions transport="stdio" />
+      <Tab id="vscode" title="VSCode">
+        <VSCodeInstructions transport="stdio" />
+      </Tab>
+
+      <Tab id="warp" title="Warp">
+        <WarpInstructions transport="stdio" />
       </Tab>
 
       <Tab id="zed" title="Zed">

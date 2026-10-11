@@ -52,9 +52,18 @@
         }
       },
       {
-        "name": "MCP_RATE_LIMITER",
+        "name": "MCP_IP_RATE_LIMITER",
         "type": "ratelimit",
         "namespace_id": "3003",
+        "simple": {
+          "limit": 600,
+          "period": 60
+        }
+      },
+      {
+        "name": "MCP_USER_RATE_LIMITER",
+        "type": "ratelimit",
+        "namespace_id": "3004",
         "simple": {
           "limit": 600,
           "period": 60
@@ -67,6 +76,11 @@
       "binding": "OAUTH_KV",
       "id": "457468efd8d04a168cbf90bb1cc60e01"
     }
+    // Upstream also binds MCP_CACHE for the constraint-verification cache.
+    // Create one on the Fields Cloudflare account and uncomment to enable it:
+    //   wrangler kv namespace create MCP_CACHE
+    // Until then constraint verification fails open and re-checks every request.
+    // ,{ "binding": "MCP_CACHE", "id": "<fields-mcp-cache-id>" }
   ],
   "ai": {
     "binding": "AI"

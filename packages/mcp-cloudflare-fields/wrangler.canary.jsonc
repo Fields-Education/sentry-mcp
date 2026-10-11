@@ -44,6 +44,24 @@
           "limit": 20,
           "period": 60
         }
+      },
+      {
+        "name": "MCP_IP_RATE_LIMITER",
+        "type": "ratelimit",
+        "namespace_id": "4003",
+        "simple": {
+          "limit": 300,
+          "period": 60
+        }
+      },
+      {
+        "name": "MCP_USER_RATE_LIMITER",
+        "type": "ratelimit",
+        "namespace_id": "4004",
+        "simple": {
+          "limit": 60,
+          "period": 60
+        }
       }
     ]
   },
@@ -52,6 +70,8 @@
       "binding": "OAUTH_KV",
       "id": "d12c8b4e92fc439e9a03316270e5e5dc"
     }
+    // See wrangler.jsonc: MCP_CACHE requires a Fields-owned KV namespace.
+    // ,{ "binding": "MCP_CACHE", "id": "<fields-mcp-cache-canary-id>" }
   ],
   "ai": {
     "binding": "AI"

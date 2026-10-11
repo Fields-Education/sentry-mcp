@@ -35,6 +35,10 @@
  * }
  * ```
  */
+import type {
+  SentryIssueIdentity,
+  SentryNamedResource,
+} from "@sentry/toolkit-core/resource-identity";
 import { z } from "zod";
 
 /**
@@ -56,15 +60,6 @@ export const UserSchema = z
     email: z.string(),
   })
   .passthrough();
-
-export const UserRegionsSchema = z.object({
-  regions: z.array(
-    z.object({
-      name: z.string(),
-      url: z.string().url(),
-    }),
-  ),
-});
 
 /**
  * Schema for Sentry organization API responses.
@@ -93,8 +88,11 @@ export const OrganizationSchema = z
         organizationUrl: z.string().url(),
       })
       .optional(),
+    // Only returned by the organization details endpoint, not the list endpoint.
+    features: z.array(z.string()).optional(),
+    hideAiFeatures: z.boolean().optional(),
   })
-  .passthrough();
+  .passthrough() satisfies z.ZodType<SentryNamedResource>;
 
 export const OrganizationListSchema = z.array(OrganizationSchema);
 
@@ -104,7 +102,7 @@ export const TeamSchema = z
     slug: z.string(),
     name: z.string(),
   })
-  .passthrough();
+  .passthrough() satisfies z.ZodType<SentryNamedResource>;
 
 export const TeamListSchema = z.array(TeamSchema);
 
@@ -119,7 +117,7 @@ export const ProjectSchema = z
     hasLogs: z.boolean().optional(),
     firstTransactionEvent: z.boolean().optional(),
   })
-  .passthrough();
+  .passthrough() satisfies z.ZodType<SentryNamedResource>;
 
 export const ProjectListSchema = z.array(ProjectSchema);
 
@@ -301,6 +299,73 @@ export const IssueAlertRuleSchema = z
   .passthrough();
 
 export const IssueAlertRuleListSchema = z.array(IssueAlertRuleSchema);
+
+export const AlertRuleProjectScopeSchema = z.object({
+  projectIds: z.array(z.string()),
+  includesAllProjects: z.boolean(),
+});
+
+export const AlertActionOptionSchema = z.object({
+  type: z.string(),
+  handlerGroup: z.string(),
+  configSchema: z.record(z.string(), z.unknown()),
+  dataSchema: z.record(z.string(), z.unknown()),
+  integrations: z
+    .array(
+      z.object({
+        id: z.string(),
+        name: z.string(),
+        services: z
+          .array(z.object({ id: z.string(), name: z.string() }))
+          .optional(),
+      }),
+    )
+    .optional(),
+  services: z
+    .array(z.object({ slug: z.string(), name: z.string() }))
+    .optional(),
+  sentryApp: z
+    .object({
+      id: z.string(),
+      name: z.string(),
+      installationId: z.string(),
+      installationUuid: z.string(),
+      status: z.string(),
+      settings: z.record(z.string(), z.unknown()).optional(),
+      title: z.string().optional(),
+    })
+    .optional(),
+});
+
+export const AlertConditionOptionSchema = z.object({
+  type: z.string(),
+  handlerGroup: z.string(),
+  handlerSubgroup: z.string().optional(),
+  comparisonJsonSchema: z.record(z.string(), z.unknown()),
+});
+
+// Source: workflow_engine/endpoints/serializers/detector_serializer.py.
+// Configuration and data sources vary by detector type; preserve their native fields.
+export const DetectorSchema = z
+  .object({
+    id: z.string(),
+    projectId: z.string().nullable(),
+    name: z.string(),
+    type: z.string(),
+    enabled: z.boolean(),
+    config: z.record(z.string(), z.unknown()),
+    conditionGroup: AlertRuleComponentSchema.nullable(),
+    dataSources: z.array(AlertRuleComponentSchema).nullable(),
+    workflowIds: z.array(z.string()).nullable(),
+    description: z.string().nullable().optional(),
+    owner: z.unknown().optional(),
+    createdBy: z.string().nullable().optional(),
+    dateCreated: z.string(),
+    dateUpdated: z.string(),
+    alertRuleId: z.number().nullable().optional(),
+    ruleId: z.number().nullable().optional(),
+  })
+  .passthrough();
 
 export const MetricAlertRuleSchema = z
   .object({
@@ -736,6 +801,7 @@ export const CommitSchema = z
     message: z.string().nullable().optional(),
     dateCreated: z.string().datetime().nullable().optional(),
     pullRequest: z.record(z.string(), z.unknown()).nullable().optional(),
+    // The event committers endpoint populates this; release commits usually return an empty string.
     suspectCommitType: z.string().optional(),
     author: ApiActorSchema.nullable().optional(),
     repository: z
@@ -749,6 +815,17 @@ export const CommitSchema = z
   .passthrough();
 
 export const CommitListSchema = z.array(CommitSchema);
+
+export const CommitterSchema = z
+  .object({
+    author: ApiActorSchema.nullable().optional(),
+    commits: CommitListSchema,
+  })
+  .passthrough();
+
+export const CommittersResponseSchema = z.object({
+  committers: z.array(CommitterSchema),
+});
 
 export const IssueActivitySchema = z
   .object({
@@ -857,7 +934,7 @@ export const IssueSchema = z
   .passthrough()
   .transform((issue) =>
     Object.assign(issue, { shortId: issue.shortId ?? String(issue.id) }),
-  );
+  ) satisfies z.ZodType<SentryIssueIdentity>;
 
 export const IssueListSchema = z.array(IssueSchema);
 
@@ -1060,7 +1137,8 @@ const BaseEventSchema = z.object({
     .optional(),
   // "context" (singular) is the legacy "extra" field for arbitrary user-defined data
   // This is different from "contexts" (plural) which are structured contexts
-  context: z.record(z.string(), z.unknown()).optional(),
+  // Sentry preserves null when the event's extra data is explicitly null.
+  context: z.record(z.string(), z.unknown()).nullable().optional(),
   sdk: z
     .object({
       name: z.string().nullable().optional(),
@@ -1104,6 +1182,8 @@ const BaseEventSchema = z.object({
   _meta: z.unknown().optional(),
   // dateReceived is when the server received the event (may not be present in all contexts)
   dateReceived: z.string().datetime().nullish(),
+  // shared-formatter output, present when the event endpoint is called with ?llmFormat
+  formatted: z.object({ format: z.string(), content: z.string() }).optional(),
 });
 
 export const ErrorEventSchema = BaseEventSchema.omit({
@@ -1338,7 +1418,78 @@ export const AutofixRunStateSchema = z.object({
     })
     .passthrough()
     .nullable(),
+  // shared-formatter output, present when the autofix endpoint is called with ?llmFormat
+  formatted: z.object({ format: z.string(), content: z.string() }).optional(),
 });
+
+/**
+ * Schemas for Seer's search agent, which translates natural language into
+ * Sentry search queries.
+ *
+ * Upstream source of truth in getsentry/sentry:
+ * - `src/sentry/seer/endpoints/search_agent_start.py`
+ * - `src/sentry/seer/endpoints/search_agent_state.py`
+ * - `src/sentry/seer/endpoints/search_agent_types.py`
+ */
+export const SearchAgentStartSchema = z
+  .object({
+    // Null until Seer has picked up the run; poll with sentry_run_id instead.
+    run_id: z.number().nullable(),
+    sentry_run_id: z.string(),
+  })
+  .passthrough();
+
+export const SearchAgentQuerySchema = z
+  .object({
+    query: z.string(),
+    group_by: z.array(z.string()).default([]),
+    visualization: z
+      .array(
+        z
+          .object({
+            y_axes: z.array(z.string()).default([]),
+            // Only set when the user asks for a time bucket, e.g. "per hour".
+            interval: z.string().nullable().optional(),
+          })
+          .passthrough(),
+      )
+      .default([]),
+    sort: z.string().default(""),
+    // Empty when an absolute start/end range is used instead.
+    stats_period: z.string().default(""),
+    start: z.string().nullable().optional(),
+    end: z.string().nullable().optional(),
+    mode: z.string(),
+    // Cross-event filters, only set for the Traces strategy.
+    span_query: z.string().nullable().optional(),
+    log_query: z.string().nullable().optional(),
+    metric_query: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+export const SearchAgentTranslateSchema = z
+  .object({
+    responses: z.array(SearchAgentQuerySchema),
+    unsupported_reason: z.string().nullable().optional(),
+    // Projects Seer scoped the query to, a superset of the requested projects
+    // when it broadens scope. Absent when there's no expansion.
+    project_ids: z.array(z.number()).nullable().optional(),
+  })
+  .passthrough();
+
+export const SearchAgentStateSchema = z
+  .object({
+    session: z
+      .object({
+        // Only `status` is set while the run is still being created in Seer.
+        status: z.string(),
+        final_response: SearchAgentTranslateSchema.nullable().optional(),
+        unsupported_reason: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .nullable(),
+  })
+  .passthrough();
 
 export const EventAttachmentSchema = z.object({
   id: z.string(),
@@ -1347,11 +1498,23 @@ export const EventAttachmentSchema = z.object({
   size: z.number(),
   mimetype: z.string(),
   dateCreated: z.string().datetime(),
-  sha1: z.string(),
+  // Objectstore-backed attachments do not store a usable SHA1 (checksum is
+  // unavailable), so we neither require nor surface it from this endpoint.
   headers: z.record(z.string(), z.string()).optional(),
 });
 
 export const EventAttachmentListSchema = z.array(EventAttachmentSchema);
+
+// GET /organizations/{org}/environments/ — visible environments (the endpoint
+// excludes the empty-name "No Environment" and hidden environments by default).
+export const OrganizationEnvironmentSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+});
+
+export const OrganizationEnvironmentListSchema = z.array(
+  OrganizationEnvironmentSchema,
+);
 
 /**
  * Schema for individual tag values within an issue's tag distribution.
@@ -1436,6 +1599,84 @@ export const UserReportSchema = z.object({
 export const UserReportListSchema = z.array(UserReportSchema);
 
 export const ExternalIssueListSchema = z.array(ExternalIssueSchema);
+
+export const IntegrationProviderSchema = z
+  .object({
+    key: z.string(),
+    slug: z.string().optional(),
+    name: z.string().optional(),
+  })
+  .passthrough();
+
+export const IssueIntegrationExternalIssueSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]),
+    key: z.string(),
+    url: z.string().optional(),
+    title: z.string().nullable().optional(),
+    description: z.string().nullable().optional(),
+    displayName: z.string().optional(),
+  })
+  .passthrough();
+
+export const IssueIntegrationSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]),
+    name: z.string(),
+    domainName: z.string().nullable().optional(),
+    status: z.string().optional(),
+    provider: IntegrationProviderSchema,
+    externalIssues: z.array(IssueIntegrationExternalIssueSchema).default([]),
+  })
+  .passthrough();
+
+export const IssueIntegrationListSchema = z.array(IssueIntegrationSchema);
+
+export const NativeExternalIssueSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]),
+    key: z.string(),
+    url: z.string().optional(),
+    integrationId: z.union([z.string(), z.number()]).optional(),
+    displayName: z.string().optional(),
+  })
+  .passthrough();
+
+export const SentryAppInstallationSchema = z
+  .object({
+    uuid: z.string(),
+    status: z.string().optional(),
+    app: z
+      .object({
+        uuid: z.string().optional(),
+        slug: z.string(),
+        sentryAppId: z.number().optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+export const SentryAppInstallationListSchema = z.array(
+  SentryAppInstallationSchema,
+);
+
+export const SentryAppComponentSchema = z.object({
+  type: z.string(),
+  sentryApp: z.object({ uuid: z.string(), slug: z.string() }),
+  schema: z.record(z.string(), z.unknown()),
+  error: z.unknown().optional(),
+});
+export const SentryAppComponentListSchema = z.array(SentryAppComponentSchema);
+
+export const SentryAppExternalRequestOptionsSchema = z.object({
+  choices: z.array(
+    z.tuple([
+      z.union([z.string(), z.number()]),
+      z.union([z.string(), z.number()]),
+    ]),
+  ),
+  defaultValue: z.union([z.string(), z.number()]).optional(),
+});
 
 /**
  * Schema for Sentry trace metadata response.
@@ -2106,11 +2347,43 @@ export const AgenticOnboardingStageStatusUpdateSchema = z.enum([
   "failed",
 ]);
 
-export const AgenticOnboardingStageStateSchema = z.object({
-  stage: AgenticOnboardingStageSchema,
+const AgenticOnboardingCreateProjectExtraSchema = z
+  .object({
+    projectSlugs: z.array(z.string().trim().min(1)),
+  })
+  .strict();
+
+const AgenticOnboardingVerificationErrorExtraSchema = z
+  .object({
+    issueIds: z.array(z.string().trim().min(1)),
+  })
+  .strict();
+
+const AgenticOnboardingStageWithoutExtraSchema =
+  AgenticOnboardingStageSchema.exclude([
+    "create_project",
+    "receive_verification_error",
+  ]);
+
+const AgenticOnboardingStageStateBaseSchema = z.object({
   status: AgenticOnboardingStageStatusSchema.nullable(),
   eventNote: z.string().nullable(),
 });
+
+export const AgenticOnboardingStageStateSchema = z.discriminatedUnion("stage", [
+  AgenticOnboardingStageStateBaseSchema.extend({
+    stage: z.literal("create_project"),
+    extra: AgenticOnboardingCreateProjectExtraSchema.nullable(),
+  }),
+  AgenticOnboardingStageStateBaseSchema.extend({
+    stage: z.literal("receive_verification_error"),
+    extra: AgenticOnboardingVerificationErrorExtraSchema.nullable(),
+  }),
+  AgenticOnboardingStageStateBaseSchema.extend({
+    stage: AgenticOnboardingStageWithoutExtraSchema,
+    extra: z.null(),
+  }),
+]);
 
 export const AgenticOnboardingRunStatusSchema = z.enum([
   "active",
@@ -2124,16 +2397,35 @@ export const AgenticOnboardingRunStatusUpdateSchema = z.enum([
   "failed",
 ]);
 
-export const AgenticOnboardingStatusUpdateSchema = z.object({
+export const AgenticOnboardingRunTokenSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9]{10}$/);
+
+const AgenticOnboardingStatusUpdateBaseSchema = z.object({
   schemaVersion: z.literal(1),
-  runToken: z.string().regex(/^[A-Za-z0-9]{10}$/),
-  stage: AgenticOnboardingStageSchema,
+  runToken: AgenticOnboardingRunTokenSchema,
   status: AgenticOnboardingStageStatusUpdateSchema,
   runStatus: AgenticOnboardingRunStatusUpdateSchema.optional(),
   eventNote: z.string().trim().min(1).max(256).optional(),
-  projectSlugs: z.array(z.string().trim().min(1)).min(1).max(100).optional(),
-  issueIds: z.array(z.string().trim().min(1)).min(1).max(100).optional(),
 });
+
+export const AgenticOnboardingStatusUpdateSchema = z.discriminatedUnion(
+  "stage",
+  [
+    AgenticOnboardingStatusUpdateBaseSchema.extend({
+      stage: z.literal("create_project"),
+      extra: AgenticOnboardingCreateProjectExtraSchema.optional(),
+    }),
+    AgenticOnboardingStatusUpdateBaseSchema.extend({
+      stage: z.literal("receive_verification_error"),
+      extra: AgenticOnboardingVerificationErrorExtraSchema.optional(),
+    }),
+    AgenticOnboardingStatusUpdateBaseSchema.extend({
+      stage: AgenticOnboardingStageWithoutExtraSchema,
+      extra: z.never().optional(),
+    }),
+  ],
+);
 
 export const AgenticOnboardingRunSchema = z.object({
   schemaVersion: z.literal(1),
@@ -2146,13 +2438,98 @@ export const AgenticOnboardingRunSchema = z.object({
   expiresAt: z.string(),
   continueUpdates: z.boolean(),
   runStatus: AgenticOnboardingRunStatusSchema,
-  projectSlugs: z
-    .array(z.string())
-    .nullable()
-    .transform((projectSlugs) => projectSlugs ?? []),
-  issueIds: z
-    .array(z.string())
-    .nullable()
-    .transform((issueIds) => issueIds ?? []),
   stages: z.array(AgenticOnboardingStageStateSchema),
 });
+
+/**
+ * Measured ingestion delay for the queried dataset. Only present for EAP
+ * datasets (spans, logs, trace metrics) on orgs with the feature enabled.
+ * `completeThrough` is the time (ms) up to which data is considered complete.
+ */
+export const IngestionMetaSchema = z
+  .object({
+    status: z.enum(["healthy", "stalled", "idle", "unknown"]),
+    delaySeconds: z.number().optional(),
+    completeThrough: z.number().optional(),
+  })
+  .passthrough();
+
+export type IngestionMeta = z.infer<typeof IngestionMetaSchema>;
+
+/**
+ * One bucket of an events-timeseries series. `timestamp` is in milliseconds.
+ * `incomplete` marks buckets that may still receive data (the current bucket,
+ * or anything after `meta.ingestion.completeThrough`).
+ */
+export const EventsTimeSeriesValueSchema = z
+  .object({
+    timestamp: z.number(),
+    value: z.number().nullish(),
+    incomplete: z.boolean(),
+    incompleteReason: z.string().optional(),
+  })
+  .passthrough();
+
+/**
+ * Response from the events-timeseries endpoint. The MCP always requests a
+ * single yAxis without topEvents, so `timeSeries` holds exactly one series.
+ */
+export const EventsTimeSeriesResponseSchema = z
+  .object({
+    timeSeries: z.array(
+      z
+        .object({
+          yAxis: z.string(),
+          values: z.array(EventsTimeSeriesValueSchema),
+          meta: z
+            .object({
+              // Bucket width in milliseconds
+              interval: z.number(),
+              valueType: z.string().optional(),
+              valueUnit: z.string().nullish(),
+            })
+            .passthrough(),
+        })
+        .passthrough(),
+    ),
+    meta: z
+      .object({
+        start: z.number().optional(),
+        end: z.number().optional(),
+        ingestion: IngestionMetaSchema.optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+export type EventsTimeSeriesResponse = z.infer<
+  typeof EventsTimeSeriesResponseSchema
+>;
+
+export const DroppedEventsBucketSchema = z
+  .object({
+    type: z.string(),
+    category: z.string(),
+    outcome: z.string(),
+    reason: z.string(),
+    start: z.number(),
+    end: z.number(),
+    count: z.number(),
+  })
+  .passthrough();
+
+export const DroppedEventsResponseSchema = z
+  .object({
+    meta: z
+      .object({
+        dataset: z.string(),
+        start: z.number(),
+        end: z.number(),
+        interval: z.number(),
+      })
+      .passthrough(),
+    droppedEvents: z.array(DroppedEventsBucketSchema),
+    acceptedEvents: z.array(DroppedEventsBucketSchema),
+  })
+  .passthrough();

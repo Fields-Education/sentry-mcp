@@ -1,14 +1,14 @@
 import { z } from "zod";
-import { setTag } from "@sentry/core";
-import { defineTool } from "../../internal/tool-helpers/define";
-import { apiServiceFromContext } from "../../internal/tool-helpers/api";
 import { UserInputError } from "../../errors";
-import type { ServerContext } from "../../types";
+import { apiServiceFromContext } from "../../internal/tool-helpers/api";
+import { defineTool } from "../../internal/tool-helpers/define";
 import {
   ParamOrganizationSlug,
-  ParamRegionUrl,
   ParamProjectSlug,
+  ParamRegionUrl,
 } from "../../schema";
+import { setTargetTagsAndAttributes } from "../../telem/scope";
+import type { ServerContext } from "../../types";
 import { validateResourceId } from "../../utils/slug-validation";
 
 export default defineTool({
@@ -136,8 +136,7 @@ export default defineTool({
     });
     const organizationSlug = params.organizationSlug;
 
-    setTag("organization.slug", organizationSlug);
-    setTag("project.slug", params.projectSlug);
+    setTargetTagsAndAttributes(params);
 
     const hasUpdates =
       params.name !== undefined ||

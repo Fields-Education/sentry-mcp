@@ -24,136 +24,58 @@ import { HttpResponse, http } from "msw";
  */
 import { setupServer } from "msw/node";
 
-import autofixStateFixture from "./fixtures/autofix-state.json" with {
-  type: "json",
-};
-import autofixStateExplorerFixture from "./fixtures/autofix-state-explorer.json" with {
-  type: "json",
-};
+import autofixStateFixture from "./fixtures/autofix-state.json" with { type: "json" };
+import autofixStateExplorerFixture from "./fixtures/autofix-state-explorer.json" with { type: "json" };
 import clientKeyFixture from "./fixtures/client-key.json" with { type: "json" };
-import dashboardDetailsFixture from "./fixtures/dashboard-details.json" with {
-  type: "json",
-};
-import dashboardListFixture from "./fixtures/dashboard-list.json" with {
-  type: "json",
-};
+import dashboardDetailsFixture from "./fixtures/dashboard-details.json" with { type: "json" };
+import dashboardListFixture from "./fixtures/dashboard-list.json" with { type: "json" };
 import eventsFixture from "./fixtures/event.json" with { type: "json" };
-import eventAttachmentsFixture from "./fixtures/event-attachments.json" with {
-  type: "json",
-};
-import eventsErrorsFixture from "./fixtures/events-errors.json" with {
-  type: "json",
-};
-import eventsErrorsEmptyFixture from "./fixtures/events-errors-empty.json" with {
-  type: "json",
-};
-import eventsSpansFixture from "./fixtures/events-spans.json" with {
-  type: "json",
-};
-import eventsSpansEmptyFixture from "./fixtures/events-spans-empty.json" with {
-  type: "json",
-};
-import eventsTraceMetricsFixture from "./fixtures/events-tracemetrics.json" with {
-  type: "json",
-};
-import eventsTraceMetricsAggregateFixture from "./fixtures/events-tracemetrics-aggregate.json" with {
-  type: "json",
-};
-import eventsTraceMetricsEmptyFixture from "./fixtures/events-tracemetrics-empty.json" with {
-  type: "json",
-};
-import flamegraphFixture from "./fixtures/flamegraph.json" with {
-  type: "json",
-};
+import eventAttachmentsFixture from "./fixtures/event-attachments.json" with { type: "json" };
+import eventsErrorsFixture from "./fixtures/events-errors.json" with { type: "json" };
+import eventsErrorsEmptyFixture from "./fixtures/events-errors-empty.json" with { type: "json" };
+import eventsSpansFixture from "./fixtures/events-spans.json" with { type: "json" };
+import eventsSpansEmptyFixture from "./fixtures/events-spans-empty.json" with { type: "json" };
+import eventsTraceMetricsFixture from "./fixtures/events-tracemetrics.json" with { type: "json" };
+import eventsTraceMetricsAggregateFixture from "./fixtures/events-tracemetrics-aggregate.json" with { type: "json" };
+import eventsTraceMetricsEmptyFixture from "./fixtures/events-tracemetrics-empty.json" with { type: "json" };
+import flamegraphFixture from "./fixtures/flamegraph.json" with { type: "json" };
 import issueFixture from "./fixtures/issue.json" with { type: "json" };
-import issueActivityFixture from "./fixtures/issue-activity.json" with {
-  type: "json",
-};
-import issueCommentsFixture from "./fixtures/issue-comments.json" with {
-  type: "json",
-};
-import issueNullCulpritFixture from "./fixtures/issue-null-culprit.json" with {
-  type: "json",
-};
-import issueTagValuesFixture from "./fixtures/issue-tag-values.json" with {
-  type: "json",
-};
-import issueUserReportsFixture from "./fixtures/issue-user-reports.json" with {
-  type: "json",
-};
+import issueActivityFixture from "./fixtures/issue-activity.json" with { type: "json" };
+import issueCommentsFixture from "./fixtures/issue-comments.json" with { type: "json" };
+import issueNullCulpritFixture from "./fixtures/issue-null-culprit.json" with { type: "json" };
+import issueTagValuesFixture from "./fixtures/issue-tag-values.json" with { type: "json" };
+import issueUserReportsFixture from "./fixtures/issue-user-reports.json" with { type: "json" };
 import monitorFixture from "./fixtures/monitor.json" with { type: "json" };
-import monitorCheckInsFixture from "./fixtures/monitor-checkins.json" with {
-  type: "json",
-};
-import monitorStatsFixture from "./fixtures/monitor-stats.json" with {
-  type: "json",
-};
-import organizationFixture from "./fixtures/organization.json" with {
-  type: "json",
-};
-import performanceEventFixture from "./fixtures/performance-event.json" with {
-  type: "json",
-};
-import profileChunkFixture from "./fixtures/profile-chunk.json" with {
-  type: "json",
-};
+import monitorCheckInsFixture from "./fixtures/monitor-checkins.json" with { type: "json" };
+import monitorStatsFixture from "./fixtures/monitor-stats.json" with { type: "json" };
+import organizationFixture from "./fixtures/organization.json" with { type: "json" };
+import performanceEventFixture from "./fixtures/performance-event.json" with { type: "json" };
+import profileChunkFixture from "./fixtures/profile-chunk.json" with { type: "json" };
 import projectFixture from "./fixtures/project.json" with { type: "json" };
 import releaseFixture from "./fixtures/release.json" with { type: "json" };
-import releaseCommitsFixture from "./fixtures/release-commits.json" with {
-  type: "json",
-};
-import releaseDeploysFixture from "./fixtures/release-deploys.json" with {
-  type: "json",
-};
-import replayDetailsFixture from "./fixtures/replay-details.json" with {
-  type: "json",
-};
-import replayRecordingSegmentsFixture from "./fixtures/replay-recording-segments.json" with {
-  type: "json",
-};
+import releaseCommitsFixture from "./fixtures/release-commits.json" with { type: "json" };
+import releaseDeploysFixture from "./fixtures/release-deploys.json" with { type: "json" };
+import replayDetailsFixture from "./fixtures/replay-details.json" with { type: "json" };
+import replayRecordingSegmentsFixture from "./fixtures/replay-recording-segments.json" with { type: "json" };
 import tagsFixture from "./fixtures/tags.json" with { type: "json" };
 import teamFixture from "./fixtures/team.json" with { type: "json" };
 import traceFixture from "./fixtures/trace.json" with { type: "json" };
-import traceEventFixture from "./fixtures/trace-event.json" with {
-  type: "json",
-};
-import traceItemsAttributesLogsNumberFixture from "./fixtures/trace-items-attributes-logs-number.json" with {
-  type: "json",
-};
-import traceItemsAttributesLogsStringFixture from "./fixtures/trace-items-attributes-logs-string.json" with {
-  type: "json",
-};
-import traceItemsAttributesSpansNumberFixture from "./fixtures/trace-items-attributes-spans-number.json" with {
-  type: "json",
-};
-import traceItemsAttributesSpansStringFixture from "./fixtures/trace-items-attributes-spans-string.json" with {
-  type: "json",
-};
-import traceItemsAttributesTraceMetricsNumberFixture from "./fixtures/trace-items-attributes-tracemetrics-number.json" with {
-  type: "json",
-};
-import traceItemsAttributesTraceMetricsStringFixture from "./fixtures/trace-items-attributes-tracemetrics-string.json" with {
-  type: "json",
-};
+import traceEventFixture from "./fixtures/trace-event.json" with { type: "json" };
+import traceItemsAttributesLogsNumberFixture from "./fixtures/trace-items-attributes-logs-number.json" with { type: "json" };
+import traceItemsAttributesLogsStringFixture from "./fixtures/trace-items-attributes-logs-string.json" with { type: "json" };
+import traceItemsAttributesSpansNumberFixture from "./fixtures/trace-items-attributes-spans-number.json" with { type: "json" };
+import traceItemsAttributesSpansStringFixture from "./fixtures/trace-items-attributes-spans-string.json" with { type: "json" };
+import traceItemsAttributesSpansNumberWithContextFixture from "./fixtures/trace-items-attributes-spans-number-with-context.json" with { type: "json" };
+import traceItemsAttributesSpansStringWithContextFixture from "./fixtures/trace-items-attributes-spans-string-with-context.json" with { type: "json" };
+import traceItemsAttributesTraceMetricsNumberFixture from "./fixtures/trace-items-attributes-tracemetrics-number.json" with { type: "json" };
+import traceItemsAttributesTraceMetricsStringFixture from "./fixtures/trace-items-attributes-tracemetrics-string.json" with { type: "json" };
 import traceMetaFixture from "./fixtures/trace-meta.json" with { type: "json" };
-import traceMetaWithNullsFixture from "./fixtures/trace-meta-with-nulls.json" with {
-  type: "json",
-};
-import traceMixedFixture from "./fixtures/trace-mixed.json" with {
-  type: "json",
-};
-import transactionProfileV1Fixture from "./fixtures/transaction-profile-v1.json" with {
-  type: "json",
-};
-import transactionProfileV1MissingFunctionFixture from "./fixtures/transaction-profile-v1-missing-function.json" with {
-  type: "json",
-};
-import uptimeChecksFixture from "./fixtures/uptime-checks.json" with {
-  type: "json",
-};
-import uptimeMonitorFixture from "./fixtures/uptime-monitor.json" with {
-  type: "json",
-};
+import traceMetaWithNullsFixture from "./fixtures/trace-meta-with-nulls.json" with { type: "json" };
+import traceMixedFixture from "./fixtures/trace-mixed.json" with { type: "json" };
+import transactionProfileV1Fixture from "./fixtures/transaction-profile-v1.json" with { type: "json" };
+import transactionProfileV1MissingFunctionFixture from "./fixtures/transaction-profile-v1-missing-function.json" with { type: "json" };
+import uptimeChecksFixture from "./fixtures/uptime-checks.json" with { type: "json" };
+import uptimeMonitorFixture from "./fixtures/uptime-monitor.json" with { type: "json" };
 import userFixture from "./fixtures/user.json" with { type: "json" };
 import { issueFixture2 } from "./payloads";
 
@@ -416,13 +338,12 @@ export const restHandlers = buildHandlers([
         expiresAt: "2026-08-13T12:00:00Z",
         continueUpdates: true,
         runStatus: "active",
-        projectSlugs: [],
-        issueIds: [],
         stages: [
           {
             stage: "connect_mcp",
             status: "completed",
             eventNote: null,
+            extra: null,
           },
         ],
       });
@@ -991,6 +912,15 @@ export const restHandlers = buildHandlers([
 
   {
     method: "get",
+    path: "/api/0/organizations/sentry-mcp-evals/environments/",
+    fetch: () =>
+      HttpResponse.json([
+        { id: "1", name: "production" },
+        { id: "2", name: "development" },
+      ]),
+  },
+  {
+    method: "get",
     path: "/api/0/organizations/sentry-mcp-evals/releases/",
     fetch: () => HttpResponse.json([releaseFixture]),
   },
@@ -1079,6 +1009,11 @@ export const restHandlers = buildHandlers([
   {
     method: "delete",
     path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/uptime/4509100000001001/",
+    fetch: () => new HttpResponse(null, { status: 202 }),
+  },
+  {
+    method: "delete",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/monitors/nightly-import/environments/production/",
     fetch: () => new HttpResponse(null, { status: 202 }),
   },
   {
@@ -1193,6 +1128,7 @@ export const restHandlers = buildHandlers([
       const url = new URL(request.url);
       const itemType = url.searchParams.get("itemType");
       const attributeType = url.searchParams.get("attributeType");
+      const useContext = url.searchParams.get("expand") === "context";
 
       // Validate required parameters
       if (!itemType) {
@@ -1215,6 +1151,18 @@ export const restHandlers = buildHandlers([
 
       if (!attributeType) {
         if (normalizedItemType === "span") {
+          if (useContext) {
+            return HttpResponse.json([
+              ...withTraceItemAttributeMetadata(
+                traceItemsAttributesSpansStringWithContextFixture,
+                "string",
+              ),
+              ...withTraceItemAttributeMetadata(
+                traceItemsAttributesSpansNumberWithContextFixture,
+                "number",
+              ),
+            ]);
+          }
           return HttpResponse.json([
             ...withTraceItemAttributeMetadata(
               traceItemsAttributesSpansStringFixture,
@@ -1327,6 +1275,11 @@ export const restHandlers = buildHandlers([
     fetch: () => HttpResponse.json({ autofix: null }),
   },
   {
+    method: "get",
+    path: "/api/0/organizations/sentry-mcp-evals/issues/:issueId(\\d+)/autofix/",
+    fetch: () => HttpResponse.json({ autofix: null }),
+  },
+  {
     method: "post",
     path: "/api/0/organizations/sentry-mcp-evals/issues/CLOUDFLARE-MCP-42/autofix/",
     fetch: () => HttpResponse.json({ run_id: 123 }),
@@ -1414,6 +1367,13 @@ export const restHandlers = buildHandlers([
           ],
         },
       }),
+  },
+  // The backend returns 404 when no suspect committers are found.
+  {
+    method: "get",
+    path: "/api/0/projects/:org/:project/events/:eventId/committers/",
+    fetch: () =>
+      HttpResponse.json({ detail: "No committers found" }, { status: 404 }),
   },
   // External issue links endpoints (default: empty for most issues)
   {
@@ -1607,7 +1567,6 @@ export const restHandlers = buildHandlers([
           size: 1024,
           mimetype: "application/octet-stream",
           dateCreated: "2025-04-08T21:15:04.000Z",
-          sha1: "abc123def456",
           headers: { "Content-Type": "application/octet-stream" },
         },
       ]),
@@ -1623,6 +1582,116 @@ export const restHandlers = buildHandlers([
         },
       });
     },
+  },
+  // A text/plain (.log) attachment (the shape reported in #1267).
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/e49541c747cb4d8aa3efb70ca5aba245/attachments/",
+    fetch: () =>
+      HttpResponse.json([
+        {
+          id: "789",
+          name: "application.log",
+          type: "event.attachment",
+          size: 44,
+          mimetype: "text/plain",
+          dateCreated: "2025-04-08T21:15:04.000Z",
+          headers: { "Content-Type": "text/plain" },
+        },
+      ]),
+  },
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/e49541c747cb4d8aa3efb70ca5aba245/attachments/789/",
+    fetch: () =>
+      new HttpResponse(
+        new Blob(["INFO app started\nERROR db connection failed\n"], {
+          type: "text/plain",
+        }),
+        { headers: { "Content-Type": "text/plain" } },
+      ),
+  },
+  // Oversized objectstore attachment: the download 302-redirects to a presigned
+  // URL (mocked below).
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/f49541c747cb4d8aa3efb70ca5aba246/attachments/",
+    fetch: () =>
+      HttpResponse.json([
+        {
+          id: "999",
+          name: "core.dmp",
+          type: "event.attachment",
+          size: 50 * 1024 * 1024,
+          mimetype: "application/octet-stream",
+          dateCreated: "2025-04-08T21:15:04.000Z",
+          headers: { "Content-Type": "application/octet-stream" },
+        },
+      ]),
+  },
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/f49541c747cb4d8aa3efb70ca5aba246/attachments/999/",
+    fetch: () =>
+      HttpResponse.redirect(
+        "https://objectstore.example.test/attachments/999/blob?sig=test-signature",
+        302,
+      ),
+  },
+  // Oversized legacy attachment: the download streams a 200 with no redirect, so
+  // there is no presigned URL.
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/h49541c747cb4d8aa3efb70ca5aba248/attachments/",
+    fetch: () =>
+      HttpResponse.json([
+        {
+          id: "222",
+          // Hostile, uploader-controlled name: must never reach a shell command.
+          name: "pwn; rm -rf ~ #.dmp",
+          type: "event.attachment",
+          size: 40 * 1024 * 1024,
+          mimetype: "application/octet-stream",
+          dateCreated: "2025-04-08T21:15:04.000Z",
+          headers: { "Content-Type": "application/octet-stream" },
+        },
+      ]),
+  },
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/h49541c747cb4d8aa3efb70ca5aba248/attachments/222/",
+    fetch: () =>
+      new HttpResponse(
+        new Blob(["legacy bytes"], { type: "application/octet-stream" }),
+        {
+          headers: { "Content-Type": "application/octet-stream" },
+        },
+      ),
+  },
+  // Metadata reports a non-empty file but the download returns zero bytes.
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/g49541c747cb4d8aa3efb70ca5aba247/attachments/",
+    fetch: () =>
+      HttpResponse.json([
+        {
+          id: "111",
+          name: "screenshot.png",
+          type: "event.attachment",
+          size: 1024,
+          mimetype: "image/png",
+          dateCreated: "2025-04-08T21:15:04.000Z",
+          headers: { "Content-Type": "image/png" },
+        },
+      ]),
+  },
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/g49541c747cb4d8aa3efb70ca5aba247/attachments/111/",
+    fetch: () =>
+      new HttpResponse(new Blob([], { type: "image/png" }), {
+        headers: { "Content-Type": "image/png" },
+      }),
   },
   {
     method: "get",
@@ -1665,6 +1734,10 @@ export const restHandlers = buildHandlers([
 
 // Add handlers for mcp.sentry.dev and localhost
 export const searchHandlers = [
+  // Presigned target for the oversized-attachment redirect (999).
+  http.get("https://objectstore.example.test/attachments/999/blob", () =>
+    HttpResponse.text("presigned blob bytes"),
+  ),
   http.post("https://mcp.sentry.dev/api/search", async ({ request }) => {
     const body = (await request.json()) as any;
 

@@ -50,6 +50,12 @@ export const ParamSearchQuery = z
     "Search query to filter results by name or slug. Use this to narrow down results when there are many items.",
   );
 
+export const ParamCursor = z
+  .string()
+  .describe(
+    "Pagination cursor from a previous call's nextCursor. Reuse it with the same filters and scope to fetch the next page.",
+  );
+
 export const ParamIssueShortId = z
   .string()
   .toUpperCase()
@@ -62,6 +68,14 @@ export const ParamIssueUrl = z
   .trim()
   .describe(
     "The URL of the issue. e.g. https://my-organization.sentry.io/issues/PROJECT-1Z43",
+  );
+
+export const ParamExternalIssueUrl = z
+  .string()
+  .url()
+  .trim()
+  .describe(
+    "URL of the existing external ticket or GitHub pull request. For Sentry Apps, use the canonical issue URL shown by the provider.",
   );
 
 export const ParamReplayId = z
@@ -177,8 +191,10 @@ export const ParamIssueIgnoreMode = z
 export const ParamAssignedTo = z
   .string()
   .trim()
+  .min(1)
+  .nullable()
   .describe(
-    "The assignee in format 'user:ID' or 'team:ID_OR_SLUG' where ID is numeric. Example: 'user:123456', 'team:789', or 'team:my-team-slug'. Use `execute_sentry_tool(name='whoami', arguments={})` to find your user ID.",
+    "The assignee in format 'user:ID' or 'team:ID_OR_SLUG' where ID is numeric. Pass null to unassign the issue. Example: 'user:123456', 'team:789', or 'team:my-team-slug'. Use `execute_sentry_tool(name='whoami', arguments={})` to find your user ID.",
   );
 
 export const ParamIgnoreDurationMinutes = z
@@ -225,6 +241,7 @@ export const ParamIgnoreUserWindowMinutes = z
 
 export const ParamReason = z
   .string()
+  .overwrite((s) => s.replace(/\0/g, ""))
   .trim()
   .min(1)
   .describe(
