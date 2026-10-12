@@ -6,7 +6,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 const workflow = readFileSync(
-  new URL("../.github/workflows/migrate-cloudflare-token.yml", import.meta.url),
+  new URL(
+    "../.github/disabled-workflows/migrate-cloudflare-token.yml",
+    import.meta.url,
+  ),
   "utf8",
 );
 const stepName = "Validate successful deployment after environment copy";
@@ -32,7 +35,7 @@ const requiredSteps = [
 
 test("required migration proof names every live deployment gate", () => {
   const deploy = readFileSync(
-    new URL("../.github/workflows/deploy.yml", import.meta.url),
+    new URL("../.github/disabled-workflows/deploy.yml", import.meta.url),
     "utf8",
   );
   for (const name of requiredSteps) {

@@ -13,9 +13,11 @@ CLI releases build it from that workspace. Start here for repository guides:
 - [CLI development notes](../../packages/cli/DEVELOPMENT.md) and
   [command conventions](../../packages/cli/CONTRIBUTING.md) — implementation
   details and command design.
-- [CLI build workflow](../../.github/workflows/cli-build.yml) and
+- [CLI build workflow](../../.github/disabled-workflows/cli-build.yml) and
   [release configuration](../../.craft.yml) — binaries, npm packaging, and
-  release-gated website artifacts.
+  release-gated website artifacts. (Upstream Sentry workflows live in
+  `.github/disabled-workflows/` on this fork so they never run here — see
+  [`.github/disabled-workflows/README.md`](../../.github/disabled-workflows/README.md).)
 - [CLI AGENTS.md](../../packages/cli/AGENTS.md) — package-specific coding and
   testing rules.
 - [CLI docs fragments](../../apps/cli-docs/src/fragments/commands/index.md)
