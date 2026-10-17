@@ -480,21 +480,36 @@ export async function performDeviceFlow(
   );
 }
 
+/** Where {@link completeOAuthFlow} / {@link setApiToken} store the token. */
+export type StoreTokenOptions = {
+  /**
+   * Store the token as a new, active account, keeping earlier logins for
+   * `sentry auth switch` (a re-login as the same user on the same server is
+   * folded back into one account once user info is recorded). When false
+   * (the default), the active account's credentials are replaced — what
+   * re-authentication (`sentry auth login --force`, `sentry auth refresh`,
+   * automatic login) expects.
+   */
+  newAccount?: boolean;
+};
+
 /**
  * Complete the OAuth flow by storing the token in the database. The token
  * is scoped to {@link getSentryUrl} so the fetch-layer trust check refuses
  * to attach it to other hosts.
  *
  * @param tokenResponse - The token response from performDeviceFlow
+ * @param options - Whether to add a new account or replace the active one
  */
 export async function completeOAuthFlow(
   tokenResponse: TokenResponse,
+  options: StoreTokenOptions = {},
 ): Promise<void> {
   await setAuthToken(
     tokenResponse.access_token,
     tokenResponse.expires_in,
     tokenResponse.refresh_token,
-    { host: getSentryUrl() },
+    { host: getSentryUrl(), newAccount: options.newAccount },
   );
 }
 
@@ -504,9 +519,16 @@ export async function completeOAuthFlow(
  * Use this for users who have an existing API token from Sentry settings.
  *
  * @param token - The API token to store
+ * @param options - Whether to add a new account or replace the active one
  */
-export async function setApiToken(token: string): Promise<void> {
-  await setAuthToken(token, undefined, undefined, { host: getSentryUrl() });
+export async function setApiToken(
+  token: string,
+  options: StoreTokenOptions = {},
+): Promise<void> {
+  await setAuthToken(token, undefined, undefined, {
+    host: getSentryUrl(),
+    newAccount: options.newAccount,
+  });
 }
 
 /** Refresh an access token using a refresh token. */

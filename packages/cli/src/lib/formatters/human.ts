@@ -32,6 +32,7 @@ import { resolveOrgDisplayName } from "../api-client.js";
 import { getReplayIdFromEvent } from "../replay-search.js";
 import { withSerializeSpan } from "../telemetry.js";
 import { tipsSuppressed } from "../tips.js";
+import { formatAccountLabel } from "./accounts.js";
 import { type FixabilityTier, muted } from "./colors.js";
 import {
   colorTag,
@@ -1760,9 +1761,28 @@ export function formatLogoutResult(data: LogoutResult): string {
     return renderMarkdown(data.message ?? "Not currently authenticated.");
   }
   const lines: string[] = [];
-  lines.push(`${colorTag("green", "✓")} Logged out successfully.`);
+  const removed = data.removed ?? [];
+  const [only] = removed;
+  let removedLabel = "";
+  if (removed.length > 1) {
+    removedLabel = data.all
+      ? ` of all ${removed.length} accounts`
+      : ` of ${removed.length} accounts (${removed
+          .map((a) => escapeMarkdownInline(formatAccountLabel(a)))
+          .join(", ")})`;
+  } else if (only) {
+    removedLabel = ` of ${escapeMarkdownInline(formatAccountLabel(only))}`;
+  }
+  lines.push(
+    `${colorTag("green", "✓")} Logged out${removedLabel} successfully.`,
+  );
   if (data.configPath) {
     lines.push(`Credentials removed from: ${safeCodeSpan(data.configPath)}`);
+  }
+  if (data.activeAccount) {
+    lines.push(
+      `Now using: ${escapeMarkdownInline(formatAccountLabel(data.activeAccount))}`,
+    );
   }
   return renderMarkdown(lines.join("\n\n"));
 }
@@ -1806,6 +1826,15 @@ function buildAuthDetailRows(data: AuthStatusData): [string, string][] {
   }
   if (data.user) {
     rows.push(["User", formatUserIdentity(data.user)]);
+  }
+  if (data.host) {
+    rows.push(["Server", escapeMarkdownInline(data.host)]);
+  }
+  if (data.accounts !== undefined && data.accounts > 1) {
+    rows.push([
+      "Accounts",
+      `${data.accounts} stored (${safeCodeSpan("sentry auth list")})`,
+    ]);
   }
   if (data.token) {
     // Stored credentials do not retain an explicit auth method, so managed
