@@ -2,12 +2,12 @@ name: Post-merge tasks
 
 on:
   push:
-    branches: ["main", "release/*", "release/mcp/**"]
+    branches: ["main", "release/*"]
   workflow_dispatch:
 
 jobs:
   build-publish:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
 
     steps:
       - name: Checkout
@@ -26,7 +26,7 @@ jobs:
         run: pnpm install
 
       - name: Build
-        run: pnpm --filter '@sentry/mcp-server...' --if-present run build
+        run: pnpm build
 
       - name: Run linter
         run: pnpm lint
