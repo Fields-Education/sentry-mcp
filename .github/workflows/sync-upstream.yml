@@ -1,14 +1,13 @@
 name: Sync Upstream
 
-# Merges getsentry/sentry-mcp main into our main. The fork only *adds* files
-# (Fields wrangler configs, these two workflows, `.disabled` renames of
-# upstream workflows), so upstream merges apply cleanly. Anything that doesn't
-# merge, install, or build fails the run (nothing is pushed) for manual
-# resolution; see packages/mcp-cloudflare-fields/README.md.
+# Merges getsentry/sentry-mcp main into our main using only GITHUB_TOKEN.
 #
-# Requires the SYNC_TOKEN secret: a fine-grained PAT (or app token) with
-# Contents + Workflows write on this repo. GITHUB_TOKEN can't push commits that
-# touch .github/workflows, and its pushes don't trigger the deploy workflow.
+# GITHUB_TOKEN can push upstream commits that touch .github/workflows as long
+# as the pushed tip leaves our .github/workflows unchanged, so every merge
+# resets that directory to ours (upstream workflows never land on the fork).
+# Pushes made with GITHUB_TOKEN don't trigger other workflows, so the deploy is
+# dispatched explicitly. Anything that doesn't merge or build fails the run
+# and nothing is pushed; see packages/mcp-cloudflare-fields/README.md.
 
 on:
   schedule:
@@ -25,22 +24,15 @@ jobs:
   sync:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
-      contents: read
+      contents: write
+      actions: write
+    env:
+      TARGET_BRANCH: main
     steps:
-      - name: Require SYNC_TOKEN
-        env:
-          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
-        run: |
-          if [ -z "$SYNC_TOKEN" ]; then
-            echo "::error::SYNC_TOKEN secret is not set (needs Contents + Workflows write)."
-            exit 1
-          fi
-
       - uses: actions/checkout@v6
         with:
-          ref: main
+          ref: ${{ env.TARGET_BRANCH }}
           fetch-depth: 0
-          token: ${{ secrets.SYNC_TOKEN }}
 
       - name: Merge upstream
         id: merge
@@ -57,20 +49,21 @@ jobs:
             exit 0
           fi
 
-          git merge upstream/main --no-edit \
-            -m "chore: sync with upstream sentry-mcp ($(git rev-parse --short upstream/main))"
+          git merge upstream/main --no-commit --no-ff || true
 
-          # Keep every upstream workflow disabled; only ours may run.
-          for f in .github/workflows/*.yml .github/workflows/*.yaml; do
-            [ -e "$f" ] || continue
-            case "$(basename "$f")" in
-              deploy-fields.yml|sync-upstream.yml) ;;
-              *) git mv "$f" "$f.disabled" ;;
-            esac
-          done
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: disable new upstream workflows"
+          # Keep exactly our workflows; this also resolves any upstream
+          # workflow conflicts.
+          git rm -rq --cached .github/workflows
+          rm -rf .github/workflows
+          git checkout HEAD -- .github/workflows
+
+          CONFLICTS=$(git diff --name-only --diff-filter=U)
+          if [ -n "$CONFLICTS" ]; then
+            echo "::error::Merge conflicts need manual resolution:"
+            echo "$CONFLICTS"
+            exit 1
           fi
+          git commit --no-edit -m "chore: sync with upstream sentry-mcp ($(git rev-parse --short upstream/main))"
 
       - name: Setup Node.js
         if: steps.merge.outputs.behind != '0'
@@ -93,8 +86,10 @@ jobs:
           pnpm --filter '@sentry/mcp-cloudflare...' run build
           git checkout -- packages/mcp-cloudflare
 
-      # Fast-forward push (no force). Pushing with SYNC_TOKEN triggers
-      # deploy-fields.yml.
-      - name: Push
+      - name: Push and deploy
         if: steps.merge.outputs.behind != '0'
-        run: git push origin HEAD:main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git push origin "HEAD:$TARGET_BRANCH"
+          gh workflow run deploy-fields.yml --ref "$TARGET_BRANCH"

@@ -74,7 +74,6 @@ Secrets used by the Fields workflows:
 - `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` - deploys (org-level)
 - `CLOUDFLARE_SUBDOMAIN` - workers.dev subdomain, used by smoke tests
 - `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_HOST_FIELDS` - source map upload to s.fields.app
-- `SYNC_TOKEN` - fine-grained PAT with Contents + Workflows write, used by the upstream sync
 
 ## Local Development
 
@@ -93,13 +92,16 @@ New KV bindings without an `id` (currently `MCP_CACHE`) are created automaticall
 
 ## Syncing with Upstream
 
-`.github/workflows/sync-upstream.yml` runs daily: it merges `upstream/main`, renames any new upstream workflow to `.disabled`, verifies the Fields build, and fast-forward pushes `main` (which triggers the deploy). It needs a `SYNC_TOKEN` secret (fine-grained PAT with Contents + Workflows write on this repo).
+`.github/workflows/sync-upstream.yml` runs daily with the built-in `GITHUB_TOKEN` (no PAT or app). It merges `upstream/main`, resets `.github/workflows` to just our two workflows (upstream's never land here), verifies the Fields build, pushes `main`, and dispatches the deploy.
+
+`GITHUB_TOKEN` may push upstream commits that touch workflows only if the pushed tip leaves `.github/workflows` unchanged, so edits to `deploy-fields.yml` or `sync-upstream.yml` must go through a normal PR.
 
 If a run fails, resolve it locally:
 
 ```bash
 git fetch upstream
 git merge upstream/main
+git rm -rq --cached .github/workflows && rm -rf .github/workflows && git checkout HEAD -- .github/workflows
 node packages/mcp-cloudflare-fields/check-bindings.mjs  # add any missing bindings to our wrangler configs
 ```
 
