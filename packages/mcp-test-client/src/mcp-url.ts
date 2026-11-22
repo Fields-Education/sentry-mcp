@@ -37,10 +37,9 @@ export function resolveAuthorizationServerUrl(mcpHost?: string): URL {
 export function applyProtectedResourceFlags(
   protectedResourceUrl: URL,
   options: {
-    useExperimental?: boolean;
+    useExperimental?: boolean | undefined;
   },
 ): URL {
-
   if (options.useExperimental) {
     protectedResourceUrl.searchParams.set("experimental", "1");
   }

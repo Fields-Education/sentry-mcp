@@ -12,6 +12,50 @@ import {
 } from "../../test-utils/structured-content.js";
 
 describe("whoami", () => {
+  it.each([
+    ["sentry.io", "sentry.io"],
+    ["us.sentry.io", "sentry.io"],
+    ["de.sentry.io", "sentry.io"],
+    ["example.us.sentry.io", "sentry.io"],
+    ["example.my.sentry.io", "example.my.sentry.io"],
+    ["sentry.example.com", "sentry.example.com"],
+  ])(
+    "queries %s identity through %s despite regional constraints",
+    async (host, expectedHost) => {
+      const requests: { url: string; authorization: string | null }[] = [];
+      const user = { id: 123456, name: "Test User", email: "test@example.com" };
+      const constraints = { regionUrl: "https://de.sentry.io" };
+      mswServer.use(
+        http.get("*", ({ request }) => {
+          requests.push({
+            url: request.url,
+            authorization: request.headers.get("authorization"),
+          });
+          return HttpResponse.json(user);
+        }),
+      );
+
+      const result = await whoami.handler(
+        {},
+        createTestContextWithConstraints(constraints, {
+          sentryHost: host,
+          accessToken: "test-token",
+        }),
+      );
+
+      expect(requests).toEqual([
+        {
+          url: `https://${expectedHost}/api/0/auth/`,
+          authorization: "Bearer test-token",
+        },
+      ]);
+      expect(getStructuredContent(result)).toEqual({
+        user: { ...user, id: String(user.id) },
+        sessionConstraints: constraints,
+      });
+    },
+  );
+
   it("serializes without constraints", async () => {
     mswServer.use(
       http.get("https://sentry.io/api/0/auth/", () =>
@@ -110,5 +154,41 @@ describe("whoami", () => {
         },
       }
     `);
+  });
+
+  it("lists every signed-in user with several logins", async () => {
+    mswServer.use(
+      http.get("https://sentry.io/api/0/auth/", ({ request }) => {
+        const token = request.headers.get("authorization");
+        return token === "Bearer b-token"
+          ? HttpResponse.json({ id: 2, name: "B", email: "b@example.com" })
+          : HttpResponse.json({ id: 1, name: "A", email: "a@example.com" });
+      }),
+    );
+
+    const result = await whoami.handler(
+      {},
+      createTestContext({
+        sentryHost: "sentry.io",
+        credentialRouter: {
+          resolve: async () => ({ id: "a", accessToken: "a-token" }),
+          list: async () => [
+            { id: "a", accessToken: "a-token" },
+            { id: "b", accessToken: "b-token" },
+          ],
+        },
+      }),
+    );
+
+    const content = whoamiOutputSchema.parse(getStructuredContent(result));
+    expect(content.user).toEqual({
+      id: "1",
+      name: "A",
+      email: "a@example.com",
+    });
+    expect(content.accounts).toEqual([
+      { id: "1", name: "A", email: "a@example.com" },
+      { id: "2", name: "B", email: "b@example.com" },
+    ]);
   });
 });

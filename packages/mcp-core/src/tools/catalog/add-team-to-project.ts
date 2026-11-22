@@ -1,16 +1,16 @@
-import { setTag } from "@sentry/core";
 import { z } from "zod";
-import { defineTool } from "../../internal/tool-helpers/define";
-import { apiServiceFromContext } from "../../internal/tool-helpers/api";
-import { structuredResult } from "../../internal/tool-helpers/results";
 import type { Team } from "../../api-client/index";
-import type { ServerContext } from "../../types";
+import { apiServiceFromContext } from "../../internal/tool-helpers/api";
+import { defineTool } from "../../internal/tool-helpers/define";
+import { structuredResult } from "../../internal/tool-helpers/results";
 import {
   ParamOrganizationSlug,
   ParamProjectSlug,
   ParamRegionUrl,
   ParamTeamSlug,
 } from "../../schema";
+import { setTargetTagsAndAttributes } from "../../telem/scope";
+import type { ServerContext } from "../../types";
 
 const assignedTeamSchema = z.object({
   id: z.string(),
@@ -33,25 +33,11 @@ function mapTeam(team: Team) {
 
 export default defineTool({
   name: "add_team_to_project",
+  title: "Add Team to Project",
   skills: ["project-management"],
   requiredScopes: ["project:write", "team:read", "org:read"],
-  description: [
-    "Grant a team access to an existing Sentry project.",
-    "",
-    "Use this tool when you need to:",
-    "- Add another team to a project",
-    "- Grant a team access without changing project metadata",
-    "- Check whether a team already has project access before adding it",
-    "",
-    "<examples>",
-    "add_team_to_project(organizationSlug='my-organization', projectSlug='my-project', teamSlug='my-team')",
-    "</examples>",
-    "",
-    "<hints>",
-    "- Team access changes are separate from project metadata updates.",
-    "- If the team is already assigned, this tool returns the current team list without making another change.",
-    "</hints>",
-  ].join("\n"),
+  description:
+    "Grant a team access to a Sentry project. Returns the project's teams; makes no change if the team already has access.",
   inputSchema: {
     organizationSlug: ParamOrganizationSlug,
     regionUrl: ParamRegionUrl.nullable().default(null),
@@ -71,9 +57,7 @@ export default defineTool({
     });
     const organizationSlug = params.organizationSlug;
 
-    setTag("organization.slug", organizationSlug);
-    setTag("project.slug", params.projectSlug);
-    setTag("team.slug", params.teamSlug);
+    setTargetTagsAndAttributes(params);
 
     const currentTeams = await apiService.listProjectTeams({
       organizationSlug,

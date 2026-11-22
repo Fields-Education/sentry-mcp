@@ -54,8 +54,6 @@ export interface HotspotFrame {
  */
 export interface PerformanceInsight {
   type: "high_variance" | "consistently_slow" | "hot_function" | "consistent";
-  icon: string;
-  message: string;
 }
 
 /**
@@ -91,7 +89,7 @@ export function analyzeHotPathsFromFlamegraph(
   flamegraph: Flamegraph,
   options: { focusOnUserCode: boolean; maxHotPaths: number },
 ): HotPath[] {
-  const profile = flamegraph.profiles[0]; // Main thread
+  const profile = flamegraph.profiles.at(0); // Main thread
   if (!profile) {
     return [];
   }
@@ -114,8 +112,7 @@ export function analyzeHotPathsFromFlamegraph(
     }
   >();
 
-  for (let idx = 0; idx < profile.samples.length; idx++) {
-    const stackIndices = profile.samples[idx];
+  for (const [idx, stackIndices] of profile.samples.entries()) {
     const sampleCount = profile.sample_counts[idx] || 0;
     const duration = profile.sample_durations_ns[idx] || 0;
     const weight = profile.weights[idx] || 0;
@@ -139,7 +136,7 @@ export function analyzeHotPathsFromFlamegraph(
   }
 
   // Convert merged stacks to hot paths
-  const hotPaths = Array.from(mergedStacks.values()).map((merged) => {
+  const hotPaths = [...mergedStacks.values()].map((merged) => {
     // Reconstruct call stack - keep all frames, filter during formatting
     // Store leaf-to-root for efficient merging (reverse the API order)
     const callStack = reconstructCallStack(
@@ -280,8 +277,6 @@ export function generatePerformanceInsights(
   if (frameInfo.p99Duration > frameInfo.p75Duration * 3) {
     insights.push({
       type: "high_variance",
-      icon: "⚠️",
-      message: "High variance: Performance varies significantly across calls",
     });
   }
 
@@ -290,8 +285,6 @@ export function generatePerformanceInsights(
     // >100ms
     insights.push({
       type: "consistently_slow",
-      icon: "🐌",
-      message: "Consistently slow: Median execution time is high",
     });
   }
 
@@ -299,8 +292,6 @@ export function generatePerformanceInsights(
   if (frameInfo.count > 1000) {
     insights.push({
       type: "hot_function",
-      icon: "🔥",
-      message: "Hot function: Called very frequently",
     });
   }
 
@@ -311,8 +302,6 @@ export function generatePerformanceInsights(
   ) {
     insights.push({
       type: "consistent",
-      icon: "✅",
-      message: "Consistent: Low performance variance",
     });
   }
 
@@ -362,13 +351,15 @@ export function compareFrameStats(
   // Compare frames that exist in both
   const comparisons: FrameComparison[] = [];
 
-  for (const [fingerprint, indices] of frameMap.entries()) {
+  for (const indices of frameMap.values()) {
     if (indices.baselineIdx === undefined || indices.currentIdx === undefined) {
       continue; // Frame only in one dataset
     }
 
-    const baselineFrame = baselineFrames[indices.baselineIdx];
     const currentFrame = currentFrames[indices.currentIdx];
+    if (!currentFrame) {
+      continue;
+    }
     const baselineInfo =
       baselineInfos[indices.baselineIdx] || DEFAULT_FRAME_INFO;
     const currentInfo = currentInfos[indices.currentIdx] || DEFAULT_FRAME_INFO;
@@ -408,18 +399,20 @@ export function compareFrameStats(
     });
   }
 
-  // Sort by severity: major regressions first, then minor, then improvements
+  // Sort by severity: major regressions, minor regressions, improvements, then
+  // unchanged frames, so a truncated list keeps every kind of change. Within a
+  // kind, the largest change comes first.
   const severityOrder = {
     major_regression: 0,
     minor_regression: 1,
-    no_change: 2,
-    improvement: 3,
+    improvement: 2,
+    no_change: 3,
   };
 
   return comparisons.sort(
     (a, b) =>
       severityOrder[a.changeType] - severityOrder[b.changeType] ||
-      b.percentChange - a.percentChange,
+      Math.abs(b.percentChange) - Math.abs(a.percentChange),
   );
 }
 
@@ -441,19 +434,6 @@ export function formatDuration(ns: number): string {
     return `${(ns / MILLISECOND).toFixed(0)}ms`;
   }
   return `${(ns / SECOND).toFixed(1)}s`;
-}
-
-/**
- * Formats a percentage value for display.
- *
- * @param value Percentage value (0-100)
- * @returns Formatted percentage string (e.g., "45.2%", "0.1%")
- */
-export function formatPercentage(value: number): string {
-  if (value < 1) {
-    return `${value.toFixed(2)}%`;
-  }
-  return `${value.toFixed(1)}%`;
 }
 
 /**

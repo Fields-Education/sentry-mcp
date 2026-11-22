@@ -1,24 +1,23 @@
-import { setTag } from "@sentry/core";
-import { defineTool } from "../../internal/tool-helpers/define";
-import { apiServiceFromContext } from "../../internal/tool-helpers/api";
-import { hasAgentProvider } from "../../internal/agents/provider-factory";
-import { formatToolCallInstruction } from "../../internal/tool-helpers/tool-call-formatting";
-import {
-  addAIConversationSuggestedActions,
-  formatAIConversationActionInstructions,
-  type AIConversationReference,
-} from "../../internal/tool-helpers/ai-conversation-actions";
-import { resolveRegionUrlForOrganization } from "../../internal/tool-helpers/resolve-region-url";
 import type { SentryApiService, Trace, TraceSpan } from "../../api-client";
 import { UserInputError } from "../../errors";
-import type { ServerContext } from "../../types";
-import { formatSemanticSpanDisplay } from "../support/traces/semantic-display.js";
+import { hasAgentProvider } from "../../internal/agents/provider-factory";
+import {
+  type AIConversationReference,
+  formatAIConversationActionInstructions,
+} from "../../internal/tool-helpers/ai-conversation-actions";
+import { apiServiceFromContext } from "../../internal/tool-helpers/api";
+import { defineTool } from "../../internal/tool-helpers/define";
+import { resolveRegionUrlForOrganization } from "../../internal/tool-helpers/resolve-region-url";
+import { formatToolCallInstruction } from "../../internal/tool-helpers/tool-call-formatting";
 import {
   ParamOrganizationSlug,
   ParamRegionUrl,
   ParamSpanId,
   ParamTraceId,
 } from "../../schema";
+import { setTargetTagsAndAttributes } from "../../telem/scope";
+import type { ServerContext } from "../../types";
+import { formatSemanticSpanDisplay } from "../support/traces/semantic-display.js";
 
 // Constants for span filtering and tree rendering
 const MAX_TRACE_FETCH_LIMIT = 1000;
@@ -61,52 +60,19 @@ interface SpanExpansionCandidate {
 
 export default defineTool({
   name: "get_trace_details",
+  title: "Get Trace Details",
   skills: ["inspect"], // Only available in inspect skill
   requiredScopes: ["event:read"],
   requiredCapabilities: ["traces"],
-  description: [
-    "Get detailed information about a specific Sentry trace by ID.",
-    "",
-    "USE THIS TOOL WHEN USERS:",
-    "- Provide a specific trace ID (e.g., 'a4d1aae7216b47ff8117cf4e09ce9d0a')",
-    "- Ask to 'show me trace [TRACE-ID]', 'explain trace [TRACE-ID]'",
-    "- Want high-level overview and link to view trace details in Sentry",
-    "- Need trace statistics and span breakdown",
-    "- Want an overview first, then a guided pivot into additional spans or events",
-    "",
-    "DO NOT USE for:",
-    "- General searching for traces (use search_events with trace queries)",
-    "- Complete span enumeration or branch-by-branch reconstruction (use search_events scoped to the trace)",
-    "",
-    "TRIGGER PATTERNS:",
-    "- 'Show me trace abc123' → use get_trace_details",
-    "- 'Explain trace a4d1aae7216b47ff8117cf4e09ce9d0a' → use get_trace_details",
-    "- 'What is trace [trace-id]' → use get_trace_details",
-    "",
-    "<examples>",
-    "### Get trace overview",
-    "```",
-    "get_trace_details(organizationSlug='my-organization', traceId='a4d1aae7216b47ff8117cf4e09ce9d0a')",
-    "```",
-    "",
-    "### Focus a single span",
-    "```",
-    "get_trace_details(organizationSlug='my-organization', traceId='a4d1aae7216b47ff8117cf4e09ce9d0a', spanId='aa8e7f3384ef4ff5')",
-    "```",
-    "</examples>",
-    "",
-    "<hints>",
-    "- Trace IDs are 32-character hexadecimal strings",
-    "- This returns a condensed trace overview, not a full span dump",
-    "- Provide `spanId` to focus on a single span within the trace",
-    "- If the response says it shows a subset of spans, use search_events to inspect the rest of the trace",
-    "</hints>",
-  ].join("\n"),
+  description:
+    "Get an overview of one Sentry trace by trace ID: trace statistics, a span breakdown, and a link to the trace in Sentry. Shows a condensed subset of spans, not every span; to list all spans in a trace, use search_traces.",
   inputSchema: {
     organizationSlug: ParamOrganizationSlug,
     regionUrl: ParamRegionUrl.nullable().default(null),
     traceId: ParamTraceId,
-    spanId: ParamSpanId.optional(),
+    spanId: ParamSpanId.optional().describe(
+      "A span ID in the trace to focus on; omit for the trace overview.",
+    ),
   },
   annotations: {
     readOnlyHint: true,
@@ -131,15 +97,12 @@ export default defineTool({
       regionUrl: regionUrl ?? undefined,
     });
 
-    setTag("organization.slug", params.organizationSlug);
-    setTag("trace.id", params.traceId);
-    if (params.spanId) {
-      setTag("trace.span_id", params.spanId);
-    }
-
-    if (context.constraints.projectSlug) {
-      setTag("project.slug", context.constraints.projectSlug);
-    }
+    setTargetTagsAndAttributes({
+      organizationSlug: params.organizationSlug,
+      projectSlug: context.constraints.projectSlug,
+      traceId: params.traceId,
+      spanId: params.spanId,
+    });
 
     // Get trace metadata for overview
     const traceMeta = await apiService.getTraceMeta({
@@ -191,14 +154,7 @@ export default defineTool({
       directToolNames: context.directToolNames,
       aiConversations,
     });
-    return addAIConversationSuggestedActions({
-      markdown,
-      organizationSlug: params.organizationSlug,
-      aiConversations,
-      experimentalMode: context.experimentalMode ?? false,
-      availableToolNames: context.availableToolNames,
-      directToolNames: context.directToolNames,
-    });
+    return markdown;
   },
 });
 
@@ -295,8 +251,8 @@ function selectInterestingSpans(
       break;
     }
 
-    fakeRoot.children.push(createSelectedSpan(root, 0));
-    const selectedRoot = fakeRoot.children[fakeRoot.children.length - 1];
+    const selectedRoot = createSelectedSpan(root, 0);
+    fakeRoot.children.push(selectedRoot);
     spanCount += 1;
     enqueueSelectedChildren(
       root,
@@ -381,7 +337,7 @@ function normalizeSpanId(value: unknown): string | undefined {
 function getTraceSpanId(span: TraceSpan): string {
   return (
     normalizeSpanId(span.span_id) ||
-    normalizeSpanId(span.additional_attributes?.span_id) ||
+    normalizeSpanId(span.additional_attributes?.["span_id"]) ||
     span.event_id
   );
 }
@@ -555,16 +511,14 @@ function renderSpanTree(spans: SelectedSpan[]): string[] {
     }
 
     // Render children with proper tree indentation
-    for (let i = 0; i < span.children.length; i++) {
-      const child = span.children[i];
+    for (const [i, child] of span.children.entries()) {
       const isLastChild = i === span.children.length - 1;
       const childPrefix = prefix + (isLast ? "   " : "│  ");
       renderSpan(child, childPrefix, isLastChild);
     }
   }
 
-  for (let i = 0; i < spans.length; i++) {
-    const span = spans[i];
+  for (const [i, span] of spans.entries()) {
     const isLastRoot = i === spans.length - 1;
     renderSpan(span, "", isLastRoot);
   }
@@ -610,18 +564,21 @@ function calculateOperationStats(trace: Trace): Record<
   }
 > {
   const allSpans = getAllSpansFlattened(trace);
-  const operationSpans: Record<string, TraceSpan[]> = {};
+  const operationSpans = new Map<string, TraceSpan[]>();
 
   // Group leaf spans by operation type (only spans with no children)
   for (const span of allSpans) {
     // Only consider leaf nodes - spans that have no children
-    if (!span.children || span.children.length === 0) {
+    if (span.children.length === 0) {
       // Use span.op if available, otherwise extract from span.name, fallback to "unknown"
-      const op = span.op || (span.name ? span.name.split(" ")[0] : "unknown");
-      if (!operationSpans[op]) {
-        operationSpans[op] = [];
+      const op =
+        span.op || (span.name ? (span.name.split(" ")[0] ?? "") : "unknown");
+      const bucket = operationSpans.get(op);
+      if (bucket) {
+        bucket.push(span);
+      } else {
+        operationSpans.set(op, [span]);
       }
-      operationSpans[op].push(span);
     }
   }
 
@@ -631,7 +588,7 @@ function calculateOperationStats(trace: Trace): Record<
   > = {};
 
   // Calculate stats for each operation
-  for (const [op, opSpans] of Object.entries(operationSpans)) {
+  for (const [op, opSpans] of operationSpans) {
     const durations = opSpans
       .map((span) => span.duration || 0)
       .filter((duration) => duration > 0)
@@ -705,14 +662,14 @@ function formatTraceOutput({
 }: {
   organizationSlug: string;
   traceId: string;
-  spanId?: string;
+  spanId?: string | undefined;
   summary: TraceSummary;
   trace: Trace;
   traceFetchState: TraceFetchState;
   apiService: SentryApiService;
-  experimentalMode?: boolean;
-  availableToolNames?: ReadonlySet<string>;
-  directToolNames?: ReadonlySet<string>;
+  experimentalMode?: boolean | undefined;
+  availableToolNames?: ReadonlySet<string> | undefined;
+  directToolNames?: ReadonlySet<string> | undefined;
   aiConversations: AIConversationReference[];
 }): string {
   if (spanId) {
@@ -760,9 +717,9 @@ function formatTraceOverviewOutput({
   summary: TraceSummary;
   trace: Trace;
   apiService: SentryApiService;
-  experimentalMode?: boolean;
-  availableToolNames?: ReadonlySet<string>;
-  directToolNames?: ReadonlySet<string>;
+  experimentalMode?: boolean | undefined;
+  availableToolNames?: ReadonlySet<string> | undefined;
+  directToolNames?: ReadonlySet<string> | undefined;
   aiConversations: AIConversationReference[];
 }): string {
   const sections: string[] = [];
@@ -874,9 +831,9 @@ function formatFocusedSpanOutput({
   trace: Trace;
   traceFetchState: TraceFetchState;
   apiService: SentryApiService;
-  experimentalMode?: boolean;
-  availableToolNames?: ReadonlySet<string>;
-  directToolNames?: ReadonlySet<string>;
+  experimentalMode?: boolean | undefined;
+  availableToolNames?: ReadonlySet<string> | undefined;
+  directToolNames?: ReadonlySet<string> | undefined;
   aiConversations: AIConversationReference[];
 }): string {
   const focusedSpan = findTraceSpan(trace, spanId);
@@ -906,7 +863,7 @@ function formatFocusedSpanOutput({
   sections.push("");
   sections.push("## Summary");
   sections.push("");
-  sections.push(`**Project**: ${focusedSpan.project_slug ?? "unknown"}`);
+  sections.push(`**Project**: ${focusedSpan.project_slug}`);
   sections.push(`**Operation**: ${focusedSpan.op ?? "unknown"}`);
   sections.push(`**Description**: ${formatTraceSpanDescription(focusedSpan)}`);
   sections.push(`**Duration**: ${formatDuration(focusedSpan.duration)}`);
@@ -1083,20 +1040,18 @@ function formatSpanAttributeSections(
       span.additional_attributes ?? {},
     ),
   );
-  sections.push(...formatJsonSection("### Errors", span.errors ?? []));
-  sections.push(
-    ...formatJsonSection("### Occurrences", span.occurrences ?? []),
-  );
+  sections.push(...formatJsonSection("### Errors", span.errors));
+  sections.push(...formatJsonSection("### Occurrences", span.occurrences));
 
   return sections;
 }
 
-function formatJsonSection(title: string, value: unknown): string[] {
+function formatJsonSection(title: string, value: object): string[] {
   return [
     title,
     "",
     "```json",
-    JSON.stringify(sortJsonValue(value), null, 2) ?? "null",
+    JSON.stringify(sortJsonValue(value), null, 2),
     "```",
     "",
   ];
@@ -1198,8 +1153,8 @@ function formatAIConversationSection({
   aiConversations: AIConversationReference[];
   organizationSlug: string;
   experimentalMode: boolean;
-  availableToolNames?: ReadonlySet<string>;
-  directToolNames?: ReadonlySet<string>;
+  availableToolNames?: ReadonlySet<string> | undefined;
+  directToolNames?: ReadonlySet<string> | undefined;
 }): string[] {
   if (aiConversations.length === 0) {
     return [];
@@ -1213,9 +1168,9 @@ function formatAIConversationSection({
     directToolNames,
   });
 
-  const lines = ["## AI Conversations", ""];
-  if (aiConversations.length === 1) {
-    const [conversation] = aiConversations;
+  const lines = ["## Agent Conversations", ""];
+  const [conversation] = aiConversations;
+  if (aiConversations.length === 1 && conversation) {
     lines.push(`**Conversation ID**: \`${conversation.conversationId}\``);
     if (conversation.spanId) {
       lines.push(`**Matching Span**: \`${conversation.spanId}\``);
@@ -1250,20 +1205,22 @@ function buildTraceNextSteps({
   traceId: string;
   spanFocused?: boolean;
   experimentalMode: boolean;
-  availableToolNames?: ReadonlySet<string>;
-  directToolNames?: ReadonlySet<string>;
+  availableToolNames?: ReadonlySet<string> | undefined;
+  directToolNames?: ReadonlySet<string> | undefined;
 }): string[] {
   const formatSearchStep = ({
     label,
+    toolName,
     arguments: args,
     fallbackInstruction,
   }: {
     label: string;
+    toolName: "search_traces" | "search_errors" | "search_logs";
     arguments: Record<string, string>;
     fallbackInstruction: string;
   }) =>
     `- **${label}**: ${formatToolCallInstruction({
-      toolName: "search_events",
+      toolName,
       arguments: {
         organizationSlug,
         ...args,
@@ -1282,6 +1239,7 @@ function buildTraceNextSteps({
     return [
       formatSearchStep({
         label: "Search spans",
+        toolName: "search_traces",
         arguments: {
           query: spanQuery,
         },
@@ -1289,6 +1247,7 @@ function buildTraceNextSteps({
       }),
       formatSearchStep({
         label: "Search errors",
+        toolName: "search_errors",
         arguments: {
           query: `show error events from trace ${traceId}`,
         },
@@ -1296,6 +1255,7 @@ function buildTraceNextSteps({
       }),
       formatSearchStep({
         label: "Search logs",
+        toolName: "search_logs",
         arguments: {
           query: `show logs from trace ${traceId}`,
         },
@@ -1307,24 +1267,24 @@ function buildTraceNextSteps({
   return [
     formatSearchStep({
       label: "Search spans",
+      toolName: "search_traces",
       arguments: {
-        dataset: "spans",
         query: `trace:${traceId}`,
       },
       fallbackInstruction: "Span search is not available in this session",
     }),
     formatSearchStep({
       label: "Search errors",
+      toolName: "search_errors",
       arguments: {
-        dataset: "errors",
         query: `trace:${traceId}`,
       },
       fallbackInstruction: "Error search is not available in this session",
     }),
     formatSearchStep({
       label: "Search logs",
+      toolName: "search_logs",
       arguments: {
-        dataset: "logs",
         query: `trace:${traceId}`,
       },
       fallbackInstruction: "Log search is not available in this session",

@@ -1,6 +1,6 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
-import { USER_AGENT } from "../../version";
+import { getUserAgent } from "../../version";
 
 // Default configuration constants
 const DEFAULT_OPENAI_MODEL = "gpt-5";
@@ -37,12 +37,12 @@ export function setOpenAIBaseUrl(baseUrl: string | undefined): void {
  * provider so generic OpenAI-compatible endpoints keep predictable behavior.
  */
 export function getOpenAIModel(model?: string): LanguageModel {
-  const defaultModel = process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL;
+  const defaultModel = process.env["OPENAI_MODEL"] || DEFAULT_OPENAI_MODEL;
 
   const factory = createOpenAI({
     ...(configuredBaseUrl && { baseURL: configuredBaseUrl }),
     headers: {
-      "User-Agent": USER_AGENT,
+      "User-Agent": getUserAgent(),
     },
   });
 

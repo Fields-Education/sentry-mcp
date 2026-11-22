@@ -1,5 +1,3 @@
-#!/usr/bin/env tsx
-
 import {
   writeFileSync,
   readFileSync,
@@ -11,7 +9,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { USER_AGENT } from "../src/version.js";
+import { getUserAgent } from "../src/version.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -64,11 +62,6 @@ const OtelGroupSchema = z.object({
 const OtelYamlFileSchema = z.object({
   groups: z.array(OtelGroupSchema),
 });
-
-// TypeScript types inferred from Zod schemas
-type OtelAttribute = z.infer<typeof OtelAttributeSchema>;
-type OtelGroup = z.infer<typeof OtelGroupSchema>;
-type OtelYamlFile = z.infer<typeof OtelYamlFileSchema>;
 
 interface JsonAttribute {
   description: string;
@@ -199,7 +192,7 @@ async function fetchYamlContent(namespace: string): Promise<string | null> {
       `${GITHUB_BASE_URL}/${namespace}/registry.yaml`,
       {
         headers: {
-          "User-Agent": USER_AGENT,
+          "User-Agent": getUserAgent(),
         },
       },
     );
@@ -230,7 +223,7 @@ function convertYamlToJson(
   namespace: string,
 ): JsonNamespace {
   // Parse YAML and validate with Zod
-  const parsedYaml = parseYaml(yamlContent);
+  const parsedYaml: unknown = parseYaml(yamlContent);
   const validationResult = OtelYamlFileSchema.safeParse(parsedYaml);
 
   if (!validationResult.success) {
@@ -241,11 +234,10 @@ function convertYamlToJson(
 
   const otelData = validationResult.data;
 
-  if (otelData.groups.length === 0) {
+  const group = otelData.groups.at(0); // Take the first group
+  if (!group) {
     throw new Error(`No groups found in ${namespace}/registry.yaml`);
   }
-
-  const group = otelData.groups[0]; // Take the first group
   const attributes: Record<string, JsonAttribute> = {};
 
   for (const attr of group.attributes) {
@@ -281,7 +273,7 @@ function convertYamlToJson(
     }
 
     // Handle enums/members from the type object or explicit members
-    if (typeof attr.type === "object" && attr.type.members) {
+    if (typeof attr.type === "object") {
       jsonAttr.examples = attr.type.members.map((m) => String(m.value));
     } else if (attr.members) {
       jsonAttr.examples = attr.members.map((m) => String(m.value));
@@ -336,10 +328,15 @@ async function generateNamespaceFiles() {
     // Check if file exists and has custom content (not from OpenTelemetry)
     if (existsSync(outputPath)) {
       const existingContent = readFileSync(outputPath, "utf8");
-      const existingJson = JSON.parse(existingContent);
+      const existingJson: unknown = JSON.parse(existingContent);
 
       // Skip if this appears to be a custom namespace (not from OpenTelemetry)
-      if (existingJson.custom === true) {
+      if (
+        typeof existingJson === "object" &&
+        existingJson !== null &&
+        "custom" in existingJson &&
+        existingJson.custom === true
+      ) {
         console.log(`⏭️  Skipping custom namespace: ${namespace}`);
         skipped++;
         continue;
@@ -400,7 +397,7 @@ function generateNamespacesIndex(
         namespaces.push({
           namespace: data.namespace,
           description: data.description,
-          custom: data.custom,
+          ...(data.custom !== undefined && { custom: data.custom }),
         });
       } catch (error) {
         console.warn(`⚠️  Failed to read ${file} for index`);

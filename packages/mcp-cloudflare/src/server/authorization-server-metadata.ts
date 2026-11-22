@@ -1,4 +1,5 @@
 import { SCOPES } from "../constants";
+import { SUPPORTED_PROMPT_VALUES } from "./oauth/constants";
 
 const OAUTH_METADATA_PREFIX = "/.well-known/oauth-authorization-server";
 
@@ -66,7 +67,10 @@ export function createScopedAuthorizationServerMetadataResponse(
       "none",
     ],
     revocation_endpoint: new URL("/oauth/token", requestUrl.origin).href,
-    code_challenge_methods_supported: ["plain", "S256"],
+    // Match the provider's root metadata. workers-oauth-provider rejects
+    // `plain` PKCE unless `allowPlainPKCE` is set, which we do not set.
+    code_challenge_methods_supported: ["S256"],
+    prompt_values_supported: SUPPORTED_PROMPT_VALUES,
   };
 
   return new Response(JSON.stringify(metadata), {
@@ -85,18 +89,14 @@ const ROOT_AUTHORIZATION_SERVER_METADATA_PATH =
 const ADVERTISE_AUTHORIZATION_RESPONSE_ISS_PARAMETER_SUPPORTED = false;
 
 /**
- * workers-oauth-provider emits root AS metadata but does not advertise RFC 9207
- * support. When we append `iss` on authorization responses, patch the provider
- * document so clients can discover that behavior.
+ * workers-oauth-provider emits root AS metadata without the `prompt` values we
+ * honor or RFC 9207 support. Patch the provider document so clients can
+ * discover both behaviors.
  */
 export async function patchRootAuthorizationServerMetadata(
   response: Response,
   url: URL,
 ): Promise<Response> {
-  if (!ADVERTISE_AUTHORIZATION_RESPONSE_ISS_PARAMETER_SUPPORTED) {
-    return response;
-  }
-
   if (
     !response.ok ||
     url.pathname !== ROOT_AUTHORIZATION_SERVER_METADATA_PATH
@@ -110,14 +110,14 @@ export async function patchRootAuthorizationServerMetadata(
   }
 
   try {
-    const metadata = (await response.clone().json()) as Record<string, unknown>;
-    if (metadata.authorization_response_iss_parameter_supported === true) {
-      return response;
-    }
-
+    const metadata = await response.clone().json<Record<string, unknown>>();
     const patched = {
       ...metadata,
-      authorization_response_iss_parameter_supported: true,
+      prompt_values_supported: SUPPORTED_PROMPT_VALUES,
+      // oxlint-disable-next-line typescript/no-unnecessary-condition -- deliberate compile-time toggle; see the TODO on the constant.
+      ...(ADVERTISE_AUTHORIZATION_RESPONSE_ISS_PARAMETER_SUPPORTED
+        ? { authorization_response_iss_parameter_supported: true }
+        : {}),
     };
 
     const headers = new Headers(response.headers);

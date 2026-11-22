@@ -1,7 +1,7 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
 import { ConfigurationError } from "../../errors";
-import { USER_AGENT } from "../../version";
+import { getUserAgent } from "../../version";
 
 const DEFAULT_OPENAI_MODEL = "gpt-5";
 
@@ -44,7 +44,7 @@ export function getAzureOpenAIApiSurface(): AzureOpenAIApiSurface {
 }
 
 function getAzureOpenAIApiVersion(): string | undefined {
-  const apiVersion = process.env.OPENAI_API_VERSION?.trim();
+  const apiVersion = process.env["OPENAI_API_VERSION"]?.trim();
   return apiVersion && apiVersion.length > 0 ? apiVersion : undefined;
 }
 
@@ -72,20 +72,20 @@ function createAzureOpenAIFetch(baseUrl: string): typeof fetch {
       }
     }
 
-    if (process.env.OPENAI_API_KEY) {
+    if (process.env["OPENAI_API_KEY"]) {
       // Azure API-key auth uses the `api-key` header. Keep the existing
       // Authorization header as well for proxy compatibility.
-      headers.set("api-key", process.env.OPENAI_API_KEY);
+      headers.set("api-key", process.env["OPENAI_API_KEY"]);
     }
 
     if (input instanceof Request) {
-      return fetch(new Request(requestUrl.toString(), input), {
+      return await fetch(new Request(requestUrl.toString(), input), {
         ...init,
         headers,
       });
     }
 
-    return fetch(requestUrl.toString(), {
+    return await fetch(requestUrl.toString(), {
       ...init,
       headers,
     });
@@ -100,12 +100,13 @@ export function getAzureOpenAIModel(model?: string): LanguageModel {
   }
 
   const apiSurface = getAzureOpenAIApiSurface();
-  const modelId = model ?? (process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL);
+  const modelId =
+    model ?? (process.env["OPENAI_MODEL"] || DEFAULT_OPENAI_MODEL);
 
   const factory = createOpenAI({
     baseURL: configuredBaseUrl,
     headers: {
-      "User-Agent": USER_AGENT,
+      "User-Agent": getUserAgent(),
     },
     name: "azure-openai",
     fetch: createAzureOpenAIFetch(configuredBaseUrl),

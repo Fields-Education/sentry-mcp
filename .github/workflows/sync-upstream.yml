@@ -1,172 +1,95 @@
 name: Sync Upstream
 
-# NOTE: GitHub disables scheduled workflows on forks by default.
-# Use repository_dispatch from an external cron (e.g., Cloudflare Worker) to trigger.
+# Merges getsentry/sentry-mcp main into our main using only GITHUB_TOKEN.
+#
+# GITHUB_TOKEN can push upstream commits that touch .github/workflows as long
+# as the pushed tip leaves our .github/workflows unchanged, so every merge
+# resets that directory to ours (upstream workflows never land on the fork).
+# Pushes made with GITHUB_TOKEN don't trigger other workflows, so the deploy is
+# dispatched explicitly. Anything that doesn't merge or build fails the run
+# and nothing is pushed; see packages/mcp-cloudflare-fields/README.md.
 
 on:
   schedule:
-    - cron: "0 6 * * *" # Every day at 6am UTC (1am EST) - NOTE: Won't fire on forks
+    - cron: "0 6 * * *"
   repository_dispatch:
     types: [sync-upstream]
-  workflow_dispatch: # Allow manual trigger
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
 
 jobs:
   sync:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
-      id-token: write
       contents: write
-      pull-requests: write
-      issues: write
+      actions: write
+    env:
+      TARGET_BRANCH: main
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
+          ref: ${{ env.TARGET_BRANCH }}
           fetch-depth: 0
-          persist-credentials: true
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Configure git
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Merge upstream
+        id: merge
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Ensure gh CLI targets this fork, not the upstream parent
-          gh repo set-default "${{ github.repository }}"
-
-      - name: Add upstream remote
-        run: |
-          git remote add upstream https://github.com/getsentry/sentry-mcp.git || true
+          git remote add upstream https://github.com/getsentry/sentry-mcp.git
           git fetch upstream main
 
-      - name: Check for upstream changes
-        id: check
-        run: |
-          UPSTREAM_COMMITS=$(git rev-list HEAD..upstream/main --count)
-          echo "upstream_commits=$UPSTREAM_COMMITS" >> "$GITHUB_OUTPUT"
-          if [ "$UPSTREAM_COMMITS" -gt 0 ]; then
-            echo "Found $UPSTREAM_COMMITS new commits from upstream"
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No new commits from upstream"
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          BEHIND=$(git rev-list --count HEAD..upstream/main)
+          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
+          if [ "$BEHIND" -eq 0 ]; then
+            echo "Already up to date with upstream."
+            exit 0
           fi
 
-      - name: Rebase onto upstream
-        id: rebase
-        if: steps.check.outputs.has_changes == 'true'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Rebase our fork commits on top of upstream/main.
-          # This keeps upstream commit SHAs intact so GitHub shows 0 behind.
-          if git rebase upstream/main; then
-            echo "rebase_success=true" >> "$GITHUB_OUTPUT"
-            echo "Rebase successful!"
+          git merge upstream/main --no-commit --no-ff || true
 
-            # Ensure upstream workflows stay disabled on our fork
-            FORK_CHANGES=false
-            for wf in deploy.yml release.yml warden.yml test.yml smoke-tests.yml token-cost.yml eval.yml merge-jobs.yml mcp-server-package.yml; do
-              if [ -f ".github/workflows/$wf" ]; then
-                mv ".github/workflows/$wf" ".github/workflows/$wf.disabled"
-                git add ".github/workflows/$wf.disabled"
-                git rm ".github/workflows/$wf" 2>/dev/null || true
-                FORK_CHANGES=true
-              fi
-            done
+          # Keep exactly our workflows; this also resolves any upstream
+          # workflow conflicts.
+          git rm -rq --cached .github/workflows
+          rm -rf .github/workflows
+          git checkout HEAD -- .github/workflows
 
-            # Keep the Fields package on the same release as the shared source
-            UPSTREAM_VERSION=$(node -p "require('./packages/mcp-cloudflare/package.json').version")
-            FIELDS_VERSION=$(node -p "require('./packages/mcp-cloudflare-fields/package.json').version")
-            if [ "$FIELDS_VERSION" != "$UPSTREAM_VERSION" ]; then
-              npm pkg set "version=$UPSTREAM_VERSION" --prefix packages/mcp-cloudflare-fields
-              git add packages/mcp-cloudflare-fields/package.json
-              FORK_CHANGES=true
-            fi
-
-            if [ "$FORK_CHANGES" = true ]; then
-              git commit -m "chore: keep fork configuration in sync"
-            fi
-
-            # Force push since rebase rewrites our fork commits
-            git push origin main --force-with-lease
-            echo "Successfully rebased onto upstream"
-          else
-            echo "rebase_success=false" >> "$GITHUB_OUTPUT"
-            echo "Rebase failed - conflicts detected"
-            git rebase --abort || true
+          CONFLICTS=$(git diff --name-only --diff-filter=U)
+          if [ -n "$CONFLICTS" ]; then
+            echo "::error::Merge conflicts need manual resolution:"
+            echo "$CONFLICTS"
+            exit 1
           fi
+          git commit --no-edit -m "chore: sync with upstream sentry-mcp ($(git rev-parse --short upstream/main))"
 
-      - name: Install OpenCode
-        if: steps.check.outputs.has_changes == 'true' && steps.rebase.outputs.rebase_success == 'false'
+      - name: Setup Node.js
+        if: steps.merge.outputs.behind != '0'
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      # pnpm/action-setup@v6.1.1
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115
+        if: steps.merge.outputs.behind != '0'
+        with:
+          run_install: false
+
+      - name: Verify Fields build
+        if: steps.merge.outputs.behind != '0'
         run: |
-          curl -fsSL https://opencode.ai/install | bash
-          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+          pnpm install --frozen-lockfile
+          node packages/mcp-cloudflare-fields/check-bindings.mjs
+          cp packages/mcp-cloudflare-fields/wrangler.jsonc packages/mcp-cloudflare-fields/wrangler.canary.jsonc packages/mcp-cloudflare/
+          pnpm --filter '@sentry/mcp-cloudflare...' run build
+          git checkout -- packages/mcp-cloudflare
 
-      - name: Use OpenCode to resolve conflicts
-        if: steps.check.outputs.has_changes == 'true' && steps.rebase.outputs.rebase_success == 'false'
+      - name: Push and deploy
+        if: steps.merge.outputs.behind != '0'
         env:
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          PROMPT=$(cat <<'EOF'
-          This fork of getsentry/sentry-mcp needs to be rebased onto the latest upstream.
-          The automatic rebase failed due to conflicts.
-
-          Strategy: We need to reset to upstream/main and re-apply our fork-specific changes on top.
-          This ensures all upstream commit SHAs are in our history (so GitHub shows 0 commits behind).
-
-          1. First, set up the environment:
-             ```bash
-             git remote add upstream https://github.com/getsentry/sentry-mcp.git || true
-             git fetch upstream main
-             BRANCH_NAME="sync-upstream-$(date +%Y%m%d)-resolved"
-             git push origin --delete "$BRANCH_NAME" 2>/dev/null || true
-             ```
-
-          2. Create a branch from upstream/main and apply our fork changes:
-             ```bash
-             git checkout -b "$BRANCH_NAME" upstream/main
-             ```
-
-          3. Now apply our fork-specific customizations. Key context:
-             - This is the Fields Education fork deployed to Cloudflare
-             - `packages/mcp-cloudflare-fields/` is OUR package - check origin/main for its contents
-             - Keep its version and shared dependencies aligned with `packages/mcp-cloudflare/package.json`
-             - `.github/workflows/deploy-fields.yml` is OUR deploy workflow
-             - `.github/workflows/sync-upstream.yml` is OUR sync workflow
-
-          4. Cherry-pick or recreate our fork commits from origin/main:
-             - Use `git log origin/main --oneline` to see our fork commits
-             - Use `git log upstream/main..origin/main --oneline` to see ONLY fork-specific commits
-             - Cherry-pick each fork-specific commit: `git cherry-pick <sha>`
-             - If a cherry-pick conflicts, resolve it manually, then `git cherry-pick --continue`
-
-          5. IMPORTANT - Keep ALL upstream Sentry workflows DISABLED:
-             - Rename any of these to `<name>.disabled` if they appear as active .yml files:
-               deploy.yml, release.yml, warden.yml, test.yml, smoke-tests.yml,
-               token-cost.yml, eval.yml, merge-jobs.yml, mcp-server-package.yml
-             - Our `.disabled` suffix prevents them from running on the fork
-
-          6. Verify the result:
-             - All upstream files should match upstream/main
-             - Our fork-specific files should be present
-             - For `pnpm-lock.yaml`, if it has issues delete it and run `pnpm install`
-
-          7. After everything is resolved:
-             - Stage all changes: `git add -A`
-             - Commit any remaining changes: `git commit -m "chore: sync with upstream sentry-mcp (rebased)"`
-             - Push: `git push -u origin HEAD`
-             - Create a PR to main branch using `gh pr create`
-             - IMPORTANT: The PR description should note that main needs to be force-pushed
-               to replace the merge-based history with the rebased history
-          EOF
-          )
-
-          opencode run \
-            --model opencode/claude-opus-5 \
-            --print-logs \
-            "$PROMPT"
+          git push origin "HEAD:$TARGET_BRANCH"
+          gh workflow run deploy-fields.yml --ref "$TARGET_BRANCH"

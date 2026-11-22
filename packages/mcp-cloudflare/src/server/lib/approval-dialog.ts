@@ -1,17 +1,13 @@
-import type {
-  AuthRequest,
-  ClientInfo,
-} from "@cloudflare/workers-oauth-provider";
+import type { ClientInfo } from "@cloudflare/workers-oauth-provider";
+import skillDefinitions from "@sentry/mcp-core/skillDefinitions";
 import { logError, logIssue, logWarn } from "@sentry/mcp-core/telem/logging";
-import { getUrlHost, sanitizeHtml, sanitizeHrefUrl } from "./html-utils";
-import skillDefinitions, {
-  type SkillDefinition,
-} from "@sentry/mcp-core/skillDefinitions";
 import {
+  type OAuthState,
   signState,
   verifyAndParseState,
-  type OAuthState,
 } from "../oauth/state";
+import { z } from "zod";
+import { getUrlHost, sanitizeHrefUrl, sanitizeHtml } from "./html-utils";
 
 const COOKIE_NAME = "mcp-approved-clients";
 export const SKILL_PREFERENCES_COOKIE_NAME = "mcp-skill-preferences";
@@ -19,9 +15,7 @@ const ONE_YEAR_IN_SECONDS = 31536000;
 const MAX_SKILL_PREFERENCE_CLIENTS = 10;
 // Hosted OAuth approvals only mint active skills. Deprecated skills may still
 // work for existing grants or explicit stdio use, but not through this form.
-const APPROVABLE_SKILLS = (skillDefinitions as SkillDefinition[]).filter(
-  (skill) => !skill.deprecated,
-);
+const APPROVABLE_SKILLS = skillDefinitions.filter((skill) => !skill.deprecated);
 const APPROVABLE_SKILL_IDS = new Set(
   APPROVABLE_SKILLS.map((skill) => skill.id),
 );
@@ -41,7 +35,7 @@ async function importKey(secret: string): Promise<CryptoKey> {
     );
   }
   const enc = new TextEncoder();
-  return crypto.subtle.importKey(
+  return await crypto.subtle.importKey(
     "raw",
     enc.encode(secret),
     { name: "HMAC", hash: "SHA-256" },
@@ -64,7 +58,7 @@ async function signData(key: CryptoKey, data: string): Promise<string> {
     enc.encode(data),
   );
   // Convert ArrayBuffer to hex string
-  return Array.from(new Uint8Array(signatureBuffer))
+  return [...new Uint8Array(signatureBuffer)]
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 }
@@ -84,8 +78,13 @@ async function verifySignature(
   const enc = new TextEncoder();
   try {
     // Convert hex signature back to ArrayBuffer
+    const hexPairs = signatureHex.match(/.{1,2}/g);
+    if (!hexPairs) {
+      // An empty signature can never match.
+      return false;
+    }
     const signatureBytes = new Uint8Array(
-      signatureHex.match(/.{1,2}/g)!.map((byte) => Number.parseInt(byte, 16)),
+      hexPairs.map((byte) => Number.parseInt(byte, 16)),
     );
     return await crypto.subtle.verify(
       "HMAC",
@@ -126,9 +125,13 @@ async function getSignedCookiePayload(
   const cookieValue = getCookieValue(cookieHeader, cookieName);
   if (!cookieValue) return null;
 
-  const parts = cookieValue.split(".");
+  const [signatureHex, base64Payload, ...extraParts] = cookieValue.split(".");
 
-  if (parts.length !== 2) {
+  if (
+    signatureHex === undefined ||
+    base64Payload === undefined ||
+    extraParts.length > 0
+  ) {
     logWarn("Invalid signed cookie format", {
       loggerScope: ["cloudflare", "approval-dialog"],
       extra: { cookieName },
@@ -136,7 +139,6 @@ async function getSignedCookiePayload(
     return null;
   }
 
-  const [signatureHex, base64Payload] = parts;
   let payload: string;
   try {
     payload = atob(base64Payload);
@@ -189,23 +191,28 @@ async function getApprovedClientsFromCookie(
   if (!payload) return null;
 
   try {
-    const approvedClients = JSON.parse(payload);
-    if (!Array.isArray(approvedClients)) {
+    const parsed: unknown = JSON.parse(payload);
+    if (!Array.isArray(parsed)) {
       logWarn("Approval cookie payload is not an array", {
         loggerScope: ["cloudflare", "approval-dialog"],
       });
       return null; // Payload isn't an array
     }
     // Ensure all elements are strings
-    if (!approvedClients.every((item) => typeof item === "string")) {
+    const approvedClients: unknown[] = parsed;
+    if (
+      !approvedClients.every((item): item is string => typeof item === "string")
+    ) {
       logWarn("Approval cookie payload contains non-string elements", {
         loggerScope: ["cloudflare", "approval-dialog"],
       });
       return null;
     }
-    return approvedClients as string[];
+    return approvedClients;
   } catch (e) {
-    logIssue(new Error(`Error parsing cookie payload: ${e}`, { cause: e }));
+    logIssue(
+      new Error(`Error parsing cookie payload: ${String(e)}`, { cause: e }),
+    );
     return null; // JSON parsing failed
   }
 }
@@ -213,14 +220,14 @@ async function getApprovedClientsFromCookie(
 function filterApprovableSkillIds(input: unknown): string[] {
   if (!Array.isArray(input)) return [];
 
-  return Array.from(
-    new Set(
+  return [
+    ...new Set(
       input.filter(
         (skill): skill is string =>
           typeof skill === "string" && APPROVABLE_SKILL_IDS.has(skill),
       ),
     ),
-  );
+  ];
 }
 
 /**
@@ -244,7 +251,8 @@ function parseSkillPreferencesPayload(
       if (!Array.isArray(entry) || entry.length !== 2) {
         continue;
       }
-      const [clientId, skills] = entry;
+      const pair: unknown[] = entry;
+      const [clientId, skills] = pair;
       if (typeof clientId !== "string" || !clientId) {
         continue;
       }
@@ -376,7 +384,7 @@ export interface ApprovalDialogOptions {
    * Arbitrary state data to pass through the approval flow
    * Will be encoded in the form and returned when approval is complete
    */
-  state: Record<string, any>;
+  state: Record<string, unknown>;
   /**
    * HMAC secret key for signing state parameters
    */
@@ -384,7 +392,8 @@ export interface ApprovalDialogOptions {
   /**
    * Skill IDs to preselect. When omitted, all approvable skills are selected.
    */
-  defaultSkills?: string[];
+  // Undefined when no remembered skills cookie exists.
+  defaultSkills?: string[] | undefined;
 }
 
 /**
@@ -393,11 +402,14 @@ export interface ApprovalDialogOptions {
  * @param secret - HMAC secret key for signing.
  * @returns A HMAC-signed compact string (signature.base64payload).
  */
-async function encodeState(data: any, secret: string): Promise<string> {
+async function encodeState(
+  data: Record<string, unknown>,
+  secret: string,
+): Promise<string> {
   try {
     const now = Date.now();
     const payload: OAuthState = {
-      req: data as Record<string, unknown>,
+      req: data,
       iat: now,
       exp: now + 10 * 60 * 1000, // 10 minute expiry
     };
@@ -420,13 +432,13 @@ async function encodeState(data: any, secret: string): Promise<string> {
  * @returns The original data.
  * @throws Error if signature is invalid or state has expired.
  */
-async function decodeState<T = any>(
+async function decodeState(
   encoded: string,
   secret: string,
-): Promise<T> {
+): Promise<Record<string, unknown>> {
   try {
     const parsed = await verifyAndParseState(encoded, secret);
-    return parsed.req as T;
+    return parsed.req;
   } catch (error) {
     logError(error, {
       loggerScope: ["cloudflare", "approval-dialog"],
@@ -452,15 +464,8 @@ export async function renderApprovalDialog(
   request: Request,
   options: ApprovalDialogOptions,
 ): Promise<Response> {
-  const {
-    client,
-    server,
-    scope,
-    redirectUri,
-    state,
-    cookieSecret,
-    defaultSkills,
-  } = options;
+  const { client, scope, redirectUri, state, cookieSecret, defaultSkills } =
+    options;
   const defaultSkillIds =
     defaultSkills === undefined
       ? new Set(APPROVABLE_SKILLS.map((skill) => skill.id))
@@ -505,7 +510,7 @@ export async function renderApprovalDialog(
   const rawRedirectUri =
     typeof redirectUri === "string" && redirectUri.length > 0
       ? redirectUri
-      : client?.redirectUris?.length === 1
+      : client?.redirectUris.length === 1
         ? client.redirectUris[0]
         : null;
 
@@ -716,6 +721,15 @@ export async function renderApprovalDialog(
             display: flex;
             justify-content: flex-end;
             gap: var(--space-md);
+          }
+
+          /* Keep Approve as the form's default submit while rendering Cancel first. */
+          .actions .button-primary {
+            order: 2;
+          }
+
+          .actions .button-secondary {
+            order: 1;
           }
 
           a {
@@ -1012,8 +1026,8 @@ export async function renderApprovalDialog(
                   }
 
                   <div class="actions">
-                    <button type="button" class="button button-secondary" onclick="window.history.back()" aria-label="Cancel authorization">Cancel</button>
-                    <button type="submit" class="button button-primary" aria-label="Approve authorization request">Approve</button>
+                    <button type="submit" name="decision" value="approve" class="button button-primary" aria-label="Approve authorization request">Approve</button>
+                    <button type="submit" name="decision" value="deny" class="button button-secondary" aria-label="Cancel authorization">Cancel</button>
                   </div>
                 </div>
               </div>
@@ -1032,24 +1046,45 @@ export async function renderApprovalDialog(
 }
 
 /**
- * Result of parsing the approval form submission.
+ * The OAuth request fields the approval POST reads back from signed state.
+ * Other fields from the original request pass through unchanged.
+ */
+const ApprovedAuthRequestSchema = z.looseObject({
+  clientId: z.string().min(1),
+  redirectUri: z.string(),
+  state: z.string().optional(),
+  resource: z.string().optional(),
+});
+
+const ApprovalStateSchema = z.looseObject({
+  oauthReqInfo: ApprovedAuthRequestSchema,
+  forcePrompt: z.boolean().optional(),
+  idpHint: z.string().optional(),
+});
+
+/** The signed state the consent form passes back on submission. */
+export type ApprovalState = z.infer<typeof ApprovalStateSchema>;
+
+/**
+ * Result of parsing an approval or denial from the consent form.
  */
 export interface ParsedApprovalResult {
   /** The original state object passed through the form. */
-  state: any;
-  /** Headers to set on the redirect response, including the Set-Cookie header. */
+  state: ApprovalState;
+  /** Headers to set on approval. Empty when authorization is denied. */
   headers: Headers;
-  /** Selected skills */
+  /** Selected skills. Empty when authorization is denied. */
   skills: string[];
+  /** Whether the user approved or denied authorization. */
+  decision: "approve" | "deny";
 }
 
 /**
- * Parses the form submission from the approval dialog, extracts the state,
- * and generates Set-Cookie headers to mark the client as approved.
+ * Parses the consent form and signs approval cookies only when approved.
  *
  * @param request - The incoming POST Request object containing the form data.
  * @param cookieSecret - The secret key used to sign the approval cookie.
- * @returns A promise resolving to an object containing the parsed state and necessary headers.
+ * @returns The parsed consent decision, state, skills, and response headers.
  * @throws If the request method is not POST, form data is invalid, or state is missing.
  */
 export async function parseRedirectApproval(
@@ -1060,30 +1095,42 @@ export async function parseRedirectApproval(
     throw new Error("Invalid request method. Expected POST.");
   }
 
-  let state: any;
-  let clientId: string | undefined;
+  let state: ApprovalState;
+  let clientId: string;
   let skills: string[];
+  let decision: "approve" | "deny";
 
   try {
     const formData = await request.formData();
     const encodedState = formData.get("state");
+    const formDecision = formData.get("decision");
 
     if (typeof encodedState !== "string" || !encodedState) {
       throw new Error("Missing or invalid 'state' in form data.");
     }
+    if (
+      formDecision !== null &&
+      formDecision !== "approve" &&
+      formDecision !== "deny"
+    ) {
+      throw new Error("Invalid approval decision.");
+    }
 
-    state = await decodeState<{ oauthReqInfo?: AuthRequest }>(
-      encodedState,
-      cookieSecret,
-    ); // Decode and verify the state
-    clientId = state?.oauthReqInfo?.clientId; // Extract clientId from within the state
-
-    if (!clientId) {
+    // Decode and verify the state
+    const decoded = ApprovalStateSchema.safeParse(
+      await decodeState(encodedState, cookieSecret),
+    );
+    if (!decoded.success) {
       throw new Error("Could not extract clientId from state object.");
     }
+    state = decoded.data;
+    clientId = state.oauthReqInfo.clientId;
 
     // Extract skill selections from checkboxes - collect all 'skill' field values
     skills = filterApprovableSkillIds(formData.getAll("skill"));
+    // Forms opened before this field existed submit no decision; those were
+    // approval-only forms, so preserve their original behavior.
+    decision = formDecision === "deny" ? "deny" : "approve";
   } catch (error) {
     logError(error, {
       loggerScope: ["cloudflare", "approval-dialog"],
@@ -1096,15 +1143,19 @@ export async function parseRedirectApproval(
     );
   }
 
+  if (decision === "deny") {
+    return { decision, state, headers: new Headers(), skills: [] };
+  }
+
   // Get existing approved clients
   const cookieHeader = request.headers.get("Cookie");
   const existingApprovedClients =
     (await getApprovedClientsFromCookie(cookieHeader, cookieSecret)) || [];
 
   // Add the newly approved client ID (avoid duplicates)
-  const updatedApprovedClients = Array.from(
-    new Set([...existingApprovedClients, clientId]),
-  );
+  const updatedApprovedClients = [
+    ...new Set([...existingApprovedClients, clientId]),
+  ];
 
   // Sign the updated approval list
   const payload = JSON.stringify(updatedApprovedClients);
@@ -1125,7 +1176,7 @@ export async function parseRedirectApproval(
     ),
   );
 
-  return { state, headers, skills };
+  return { decision, state, headers, skills };
 }
 
 // sanitizeHtml function is now imported from "./html-utils"

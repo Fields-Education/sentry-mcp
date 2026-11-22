@@ -1,4 +1,9 @@
+import { inlineCode } from "@sentry/toolkit-core/markdown";
 import type { SentryApiService } from "../../../api-client";
+import type {
+  EventsTimeSeriesResponse,
+  IngestionMeta,
+} from "../../../api-client/schema";
 import { formatToolCallInstruction } from "../../../internal/tool-helpers/tool-call-formatting";
 import { formatUserGeoSummary } from "../../../internal/user-formatting";
 import { logInfo } from "../../../telem/logging";
@@ -32,17 +37,6 @@ export interface ExecutedSearch {
   timeRange?: SearchTimeRange;
 }
 
-function formatInlineCode(value: string): string {
-  const backtickRuns = value.match(/`+/g) ?? [];
-  const fenceLength =
-    backtickRuns.reduce((max, run) => Math.max(max, run.length), 0) + 1;
-  const fence = "`".repeat(fenceLength);
-  const needsPadding = value.startsWith("`") || value.endsWith("`");
-  return needsPadding
-    ? `${fence} ${value} ${fence}`
-    : `${fence}${value}${fence}`;
-}
-
 function formatExecutedTimeRange(timeRange?: SearchTimeRange): string {
   if (!timeRange) {
     return "Last 14d";
@@ -65,20 +59,20 @@ export function formatExecutedSearch(executedSearch?: ExecutedSearch): string {
     executedSearch.fields === undefined
       ? undefined
       : executedSearch.fields.length > 0
-        ? executedSearch.fields.map(formatInlineCode).join(", ")
+        ? executedSearch.fields.map(inlineCode).join(", ")
         : "(none)";
 
   const lines = [
     "## Executed Search",
-    `- Dataset: ${formatInlineCode(executedSearch.dataset)}`,
-    `- Query: ${formatInlineCode(executedSearch.query || "(empty)")}`,
+    `- Dataset: ${inlineCode(executedSearch.dataset)}`,
+    `- Query: ${inlineCode(executedSearch.query || "(empty)")}`,
   ];
 
   if (fields !== undefined) {
     lines.push(`- Fields: ${fields}`);
   }
   if (executedSearch.sort) {
-    lines.push(`- Sort: ${formatInlineCode(executedSearch.sort)}`);
+    lines.push(`- Sort: ${inlineCode(executedSearch.sort)}`);
   }
   lines.push(
     `- Time range: ${formatExecutedTimeRange(executedSearch.timeRange)}`,
@@ -91,9 +85,61 @@ export function formatSearchPresentationHint(hint: string): string {
   return `**Suggested presentation:** ${hint}\n\n`;
 }
 
+export const DASHBOARD_LINK_HINT =
+  "Please tell the user this dashboard link is available if they want to open the results in Sentry.";
+
 export function formatSentryDashboardLink(url: string): string {
-  return `**View these results in Sentry**:\n${url}\nPlease tell the user this dashboard link is available if they want to open the results in Sentry.\n\n`;
+  return `**View these results in Sentry**:\n${url}\n${DASHBOARD_LINK_HINT}\n\n`;
 }
+
+/** Presentation and empty-result guidance shared by markdown and structured results. */
+export interface SearchResultHints {
+  samples: string;
+  aggregates: string;
+  empty: string;
+}
+
+const AGGREGATE_RESULTS_HINT =
+  "A compact table works well for these aggregate results.";
+const EMPTY_RESULTS_HINT =
+  "Try being more specific or using different terms in your search.";
+
+export const ERROR_RESULT_HINTS: SearchResultHints = {
+  samples: "Useful details to surface include severity, event IDs, and links.",
+  aggregates: AGGREGATE_RESULTS_HINT,
+  empty: EMPTY_RESULTS_HINT,
+};
+
+export const SPAN_RESULT_HINTS: SearchResultHints = {
+  samples:
+    "A timeline works well for these traces, with durations and parent-child span relationships visible.",
+  aggregates: AGGREGATE_RESULTS_HINT,
+  empty: EMPTY_RESULTS_HINT,
+};
+
+export const METRIC_RESULT_HINTS: SearchResultHints = {
+  samples:
+    "Concise summaries work well for these metric samples, highlighting metric name, type, value, and trace context.",
+  aggregates:
+    "A compact table with grouping labels and units works well for these metric aggregates.",
+  empty: "Try being more specific about the metric name, type, or filters.",
+};
+
+export const PROFILE_RESULT_HINTS: SearchResultHints = {
+  samples:
+    "Concise summaries work well for these profiles, highlighting profile ID, transaction, duration, release, and trace context.",
+  aggregates:
+    "A compact table with readable duration units works well for these profile aggregates.",
+  empty:
+    "Try narrowing the transaction, release, platform, or profile filters.",
+};
+
+export const LOG_RESULT_HINTS: SearchResultHints = {
+  samples:
+    "Console-style formatting works well for these logs, with timestamps preserved.",
+  aggregates: AGGREGATE_RESULTS_HINT,
+  empty: EMPTY_RESULTS_HINT,
+};
 
 /**
  * Common parameters for event formatters
@@ -107,11 +153,11 @@ export interface FormatEventResultsParams {
   explorerUrl: string;
   sentryQuery: string;
   fields: string[];
-  explanation?: string;
+  explanation?: string | undefined;
   executedSearch?: ExecutedSearch;
   experimentalMode?: boolean;
-  availableToolNames?: ReadonlySet<string>;
-  directToolNames?: ReadonlySet<string>;
+  availableToolNames?: ReadonlySet<string> | undefined;
+  directToolNames?: ReadonlySet<string> | undefined;
 }
 
 function formatUserFieldLines(
@@ -119,7 +165,7 @@ function formatUserFieldLines(
   options: { prefix?: string } = {},
 ): string[] {
   const prefix = options.prefix ?? "";
-  const geoSummary = formatUserGeoSummary(value.geo);
+  const geoSummary = formatUserGeoSummary(value["geo"]);
   const userSummary = formatKnownUserValue(value, { includeGeo: false });
   const lines: string[] = [];
 
@@ -154,16 +200,11 @@ export function formatErrorResults(params: FormatEventResultsParams): string {
 
   let output = `# Search Results for "${inputQuery}"\n\n`;
 
-  // Check if this is an aggregate query and adjust display instructions
-  if (isAggregateQuery(fields)) {
-    output += formatSearchPresentationHint(
-      "A compact table works well for these aggregate results.",
-    );
-  } else {
-    output += formatSearchPresentationHint(
-      "Useful details to surface include severity, event IDs, and links.",
-    );
-  }
+  output += formatSearchPresentationHint(
+    isAggregateQuery(fields)
+      ? ERROR_RESULT_HINTS.aggregates
+      : ERROR_RESULT_HINTS.samples,
+  );
 
   if (includeExplanation && explanation) {
     output += formatExplanation(explanation);
@@ -184,7 +225,7 @@ export function formatErrorResults(params: FormatEventResultsParams): string {
       },
     });
     output += `No results found.\n\n`;
-    output += `Try being more specific or using different terms in your search.\n`;
+    output += `${ERROR_RESULT_HINTS.empty}\n`;
     return output;
   }
 
@@ -249,7 +290,7 @@ export function formatErrorResults(params: FormatEventResultsParams): string {
           value !== null &&
           value !== undefined
         ) {
-          if (key === "user" && typeof value === "object" && value !== null) {
+          if (key === "user" && typeof value === "object") {
             for (const line of formatUserFieldLines(
               value as Record<string, unknown>,
             )) {
@@ -292,16 +333,11 @@ export function formatLogResults(params: FormatEventResultsParams): string {
 
   let output = `# Search Results for "${inputQuery}"\n\n`;
 
-  // Check if this is an aggregate query and adjust display instructions
-  if (isAggregateQuery(fields)) {
-    output += formatSearchPresentationHint(
-      "A compact table works well for these aggregate results.",
-    );
-  } else {
-    output += formatSearchPresentationHint(
-      "Console-style formatting works well for these logs, with timestamps preserved.",
-    );
-  }
+  output += formatSearchPresentationHint(
+    isAggregateQuery(fields)
+      ? LOG_RESULT_HINTS.aggregates
+      : LOG_RESULT_HINTS.samples,
+  );
 
   if (includeExplanation && explanation) {
     output += formatExplanation(explanation);
@@ -322,7 +358,7 @@ export function formatLogResults(params: FormatEventResultsParams): string {
       },
     });
     output += `No results found.\n\n`;
-    output += `Try being more specific or using different terms in your search.\n`;
+    output += `${LOG_RESULT_HINTS.empty}\n`;
     return output;
   }
 
@@ -377,10 +413,12 @@ export function formatLogResults(params: FormatEventResultsParams): string {
       "sentry.item_id",
     ];
 
-    for (let i = 0; i < eventData.length; i++) {
-      const event = eventData[i];
-
+    for (const [i, event] of eventData.entries()) {
       output += `### Log ${i + 1}\n`;
+
+      if (typeof event["id"] === "string" && event["id"]) {
+        output += `- **Log URL**: ${apiService.getLogUrl(organizationSlug, event["id"])}\n`;
+      }
 
       // Display priority fields first
       for (const field of priorityFields) {
@@ -408,7 +446,7 @@ export function formatLogResults(params: FormatEventResultsParams): string {
           value !== null &&
           value !== undefined
         ) {
-          if (key === "user" && typeof value === "object" && value !== null) {
+          if (key === "user" && typeof value === "object") {
             for (const line of formatUserFieldLines(
               value as Record<string, unknown>,
               { prefix: "- " },
@@ -453,16 +491,11 @@ export function formatSpanResults(params: FormatEventResultsParams): string {
 
   let output = `# Search Results for "${inputQuery}"\n\n`;
 
-  // Check if this is an aggregate query and adjust display instructions
-  if (isAggregateQuery(fields)) {
-    output += formatSearchPresentationHint(
-      "A compact table works well for these aggregate results.",
-    );
-  } else {
-    output += formatSearchPresentationHint(
-      "A timeline works well for these traces, with durations and parent-child span relationships visible.",
-    );
-  }
+  output += formatSearchPresentationHint(
+    isAggregateQuery(fields)
+      ? SPAN_RESULT_HINTS.aggregates
+      : SPAN_RESULT_HINTS.samples,
+  );
 
   if (includeExplanation && explanation) {
     output += formatExplanation(explanation);
@@ -483,7 +516,7 @@ export function formatSpanResults(params: FormatEventResultsParams): string {
       },
     });
     output += `No results found.\n\n`;
-    output += `Try being more specific or using different terms in your search.\n`;
+    output += `${SPAN_RESULT_HINTS.empty}\n`;
     return output;
   }
 
@@ -547,7 +580,7 @@ export function formatSpanResults(params: FormatEventResultsParams): string {
           value !== null &&
           value !== undefined
         ) {
-          if (key === "user" && typeof value === "object" && value !== null) {
+          if (key === "user" && typeof value === "object") {
             for (const line of formatUserFieldLines(
               value as Record<string, unknown>,
             )) {
@@ -601,7 +634,8 @@ function getProfileTimestampValue(value: unknown): string | null {
   return null;
 }
 
-function getProfileDetailUrl(
+/** Flamegraph URL for a transaction profile or continuous profile row. */
+export function getProfileDetailUrl(
   apiService: SentryApiService,
   organizationSlug: string,
   event: FlexibleEventData,
@@ -645,15 +679,11 @@ export function formatProfileResults(params: FormatEventResultsParams): string {
 
   let output = `# Search Results for "${inputQuery}"\n\n`;
 
-  if (isAggregateQuery(fields)) {
-    output += formatSearchPresentationHint(
-      "A compact table with readable duration units works well for these profile aggregates.",
-    );
-  } else {
-    output += formatSearchPresentationHint(
-      "Concise summaries work well for these profiles, highlighting profile ID, transaction, duration, release, and trace context.",
-    );
-  }
+  output += formatSearchPresentationHint(
+    isAggregateQuery(fields)
+      ? PROFILE_RESULT_HINTS.aggregates
+      : PROFILE_RESULT_HINTS.samples,
+  );
 
   if (includeExplanation && explanation) {
     output += formatExplanation(explanation);
@@ -674,8 +704,7 @@ export function formatProfileResults(params: FormatEventResultsParams): string {
       },
     });
     output += "No results found.\n\n";
-    output +=
-      "Try narrowing the transaction, release, platform, or profile filters.\n";
+    output += `${PROFILE_RESULT_HINTS.empty}\n`;
     return output;
   }
 
@@ -746,7 +775,7 @@ export function formatProfileResults(params: FormatEventResultsParams): string {
           value !== null &&
           value !== undefined
         ) {
-          if (key === "user" && typeof value === "object" && value !== null) {
+          if (key === "user" && typeof value === "object") {
             for (const line of formatUserFieldLines(
               value as Record<string, unknown>,
             )) {
@@ -812,15 +841,11 @@ export function formatTraceMetricsResults(
 
   let output = `# Search Results for "${inputQuery}"\n\n`;
 
-  if (isAggregateQuery(fields)) {
-    output += formatSearchPresentationHint(
-      "A compact table with grouping labels and units works well for these metric aggregates.",
-    );
-  } else {
-    output += formatSearchPresentationHint(
-      "Concise summaries work well for these metric samples, highlighting metric name, type, value, and trace context.",
-    );
-  }
+  output += formatSearchPresentationHint(
+    isAggregateQuery(fields)
+      ? METRIC_RESULT_HINTS.aggregates
+      : METRIC_RESULT_HINTS.samples,
+  );
 
   if (includeExplanation && explanation) {
     output += formatExplanation(explanation);
@@ -841,8 +866,7 @@ export function formatTraceMetricsResults(
       },
     });
     output += "No results found.\n\n";
-    output +=
-      "Try being more specific about the metric name, type, or filters.\n";
+    output += `${METRIC_RESULT_HINTS.empty}\n`;
     return output;
   }
 
@@ -896,7 +920,7 @@ export function formatTraceMetricsResults(
           value !== null &&
           value !== undefined
         ) {
-          if (key === "user" && typeof value === "object" && value !== null) {
+          if (key === "user" && typeof value === "object") {
             for (const line of formatUserFieldLines(
               value as Record<string, unknown>,
             )) {
@@ -926,4 +950,238 @@ export function formatTraceMetricsResults(
     "- Switch between samples and aggregates in Sentry for deeper analysis\n";
 
   return output;
+}
+
+/**
+ * Whether summing per-bucket values yields a meaningful series total.
+ * Only `count()` and `sum(...)` are additive across time buckets;
+ * `count_unique`, `avg`, percentiles, min/max, rates, etc. are not.
+ */
+function isAdditiveAggregate(yAxis: string): boolean {
+  const fn = yAxis.trim().toLowerCase();
+  return fn === "count()" || fn.startsWith("sum(");
+}
+
+function formatBucketTime(timestampMs: number): string {
+  return new Date(timestampMs).toISOString().slice(0, 16).replace("T", " ");
+}
+
+/**
+ * One line describing the measured ingestion delay, so the caller knows how
+ * far behind the data is before reading a trailing dip as a real drop.
+ */
+function formatIngestionStatus(ingestion: IngestionMeta): string {
+  const parts: string[] = [];
+  if (ingestion.delaySeconds !== undefined) {
+    const seconds = Math.round(ingestion.delaySeconds);
+    const delay =
+      seconds >= 60
+        ? `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+        : `${seconds}s`;
+    parts.push(`~${delay} behind`);
+  }
+  if (ingestion.completeThrough !== undefined) {
+    parts.push(
+      `data complete through ${formatBucketTime(ingestion.completeThrough)} UTC`,
+    );
+  }
+  const detail = parts.length > 0 ? ` (${parts.join(", ")})` : "";
+  return `- **Ingestion**: ${ingestion.status}${detail}`;
+}
+
+export interface TimeSeriesPoint {
+  timestamp: number;
+  time: string;
+  /** Sort key: the number, or parsed time for date-typed strings. */
+  value: number;
+  /** The bucket value as returned: a number, or the raw string. */
+  rawValue: number | string;
+  display: string;
+  filling: boolean;
+  outsideRetention: boolean;
+}
+
+/** One series of an events-timeseries result, with every bucket. */
+export interface SeriesSummary {
+  /** Every bucket, oldest first. */
+  points: TimeSeriesPoint[];
+  total: number | null;
+  hasFilling: boolean;
+  peak: TimeSeriesPoint | undefined;
+}
+
+interface TimeSeriesSummary extends Omit<SeriesSummary, "points"> {
+  bucketCount: number;
+  /** The most recent `MAX_TIME_SERIES_ROWS` buckets. */
+  shown: TimeSeriesPoint[];
+  ingestion: IngestionMeta | undefined;
+}
+
+const MAX_TIME_SERIES_ROWS = 48;
+
+/**
+ * Summarize one series: a metric bucketed over time.
+ * Buckets flagged `incomplete` by Sentry are still receiving data and are
+ * excluded from the peak; those that start before the retention window are
+ * permanently partial and will not change.
+ */
+export function summarizeSeries(
+  series: EventsTimeSeriesResponse["timeSeries"][number] | undefined,
+  yAxis: string,
+): SeriesSummary {
+  // String aggregates can return identifiers, even when their values look numeric.
+  const isStringSeries = series?.meta.valueType === "string";
+  const points = (series?.values ?? []).map((bucket): TimeSeriesPoint => {
+    // OUTSIDE_RETENTION buckets start before the retention window: their data
+    // is permanently partial. Every other reason means data is still arriving.
+    const outsideRetention =
+      bucket.incomplete && bucket.incompleteReason === "OUTSIDE_RETENTION";
+    const raw = bucket.value ?? 0;
+    // Date-typed aggregates such as max(timestamp) return ISO datetime
+    // strings. Number() rejects those whole (parseFloat would keep the year),
+    // so order them by parsed time and display the raw string.
+    const numeric = typeof raw === "number" ? raw : Number(raw);
+    const isNumeric = !Number.isNaN(numeric);
+    const keepsNumber = !isStringSeries && isNumeric;
+    return {
+      timestamp: bucket.timestamp,
+      time: formatBucketTime(bucket.timestamp),
+      value: isNumeric ? numeric : Date.parse(String(raw)) || 0,
+      rawValue: keepsNumber ? numeric : String(raw),
+      display: keepsNumber ? numeric.toLocaleString() : String(raw),
+      filling: bucket.incomplete && !outsideRetention,
+      outsideRetention,
+    };
+  });
+
+  return {
+    points,
+    // Total is only meaningful for additive aggregates; summing count_unique /
+    // avg / percentile buckets would be wrong, so omit it for those.
+    total:
+      !isStringSeries && isAdditiveAggregate(yAxis)
+        ? points.reduce((sum, p) => sum + p.value, 0)
+        : null,
+    hasFilling: points.some((p) => p.filling),
+    // Buckets still filling can't be the peak yet. Partial retention buckets are
+    // final, so if one still tops the rest it is a real peak.
+    peak: points
+      .filter((p) => !isStringSeries && !p.filling)
+      .reduce<TimeSeriesPoint | undefined>(
+        (max, p) => (max === undefined || p.value > max.value ? p : max),
+        undefined,
+      ),
+  };
+}
+
+/** Summarize an ungrouped events-timeseries result, keeping recent buckets. */
+export function summarizeTimeSeries(
+  series: EventsTimeSeriesResponse,
+  yAxis: string,
+): TimeSeriesSummary {
+  const { points, ...summary } = summarizeSeries(series.timeSeries[0], yAxis);
+  return {
+    ...summary,
+    bucketCount: points.length,
+    shown:
+      points.length > MAX_TIME_SERIES_ROWS
+        ? points.slice(-MAX_TIME_SERIES_ROWS)
+        : points,
+    ingestion: series.meta?.ingestion,
+  };
+}
+
+/**
+ * Format an events-timeseries result: a metric bucketed over time.
+ * `interval` is null when Sentry chose the bucket size for the range.
+ */
+export function formatTimeSeriesResults(params: {
+  series: EventsTimeSeriesResponse;
+  yAxis: string;
+  interval: string | null;
+  inputQuery: string;
+  includeExplanation?: boolean;
+  explanation?: string | undefined;
+  timeRange?: SearchTimeRange;
+  url?: string;
+}): string {
+  const {
+    series,
+    yAxis,
+    interval,
+    inputQuery,
+    includeExplanation,
+    explanation,
+    timeRange,
+    url,
+  } = params;
+
+  const { bucketCount, shown, total, hasFilling, peak, ingestion } =
+    summarizeTimeSeries(series, yAxis);
+  const truncatedNote =
+    bucketCount > shown.length
+      ? ` (most recent ${shown.length} of ${bucketCount})`
+      : "";
+
+  const lines: string[] = [`# Search Results for "${inputQuery}"`];
+
+  if (includeExplanation && explanation) {
+    lines.push("", formatExplanation(explanation));
+  }
+
+  lines.push("", `## ${yAxis} over time`);
+  lines.push(
+    `- **Interval**: ${interval ? `\`${interval}\`` : "auto (chosen by Sentry for the range)"}`,
+  );
+  lines.push(`- **Time range**: ${formatExecutedTimeRange(timeRange)}`);
+  if (total !== null) {
+    lines.push(
+      `- **Total**: ${total.toLocaleString()}${hasFilling ? " (so far)" : ""}`,
+    );
+  }
+  if (peak) {
+    lines.push(`- **Peak**: ${peak.display} at ${peak.time}`);
+  }
+  if (ingestion) {
+    lines.push(formatIngestionStatus(ingestion));
+  }
+
+  if (shown.length > 0) {
+    lines.push(
+      "",
+      `## Buckets${truncatedNote}`,
+      "",
+      "| Time (UTC) | Value |",
+      "| --- | --- |",
+    );
+    for (const p of shown) {
+      const marker = p.filling ? " *" : p.outsideRetention ? " †" : "";
+      lines.push(`| ${p.time} | ${p.display}${marker} |`);
+    }
+    // Footnotes describe markers in the visible rows only; older retention
+    // buckets may have been cut by MAX_TIME_SERIES_ROWS.
+    const shownFilling = shown.some((p) => p.filling);
+    const shownOutsideRetention = shown.some((p) => p.outsideRetention);
+    if (shownFilling || shownOutsideRetention) {
+      lines.push("");
+    }
+    if (shownFilling) {
+      lines.push(
+        "\\* Incomplete bucket: data is still arriving, so the value may rise.",
+      );
+    }
+    if (shownOutsideRetention) {
+      lines.push(
+        "† Partial bucket: it starts before the retention window, so older data is missing and the value will not change.",
+      );
+    }
+  } else {
+    lines.push("", "No data points in this range.");
+  }
+
+  if (url) {
+    lines.push("", formatSentryDashboardLink(url).trimEnd());
+  }
+
+  return lines.join("\n");
 }

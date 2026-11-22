@@ -1,25 +1,26 @@
 #!/usr/bin/env node
 
+import path from "node:path";
+import { stdin as input, stdout as output } from "node:process";
 /**
  * CLI entry point for MCP QA: loads env, resolves transport/provider, then runs
  * either tool discovery or the test agent against a single MCP connection.
  */
 import * as readline from "node:readline/promises";
-import { stdin as input, stdout as output } from "node:process";
+import { fileURLToPath } from "node:url";
+import { sentryBeforeSend } from "@sentry/mcp-core/telem/sentry";
+import * as Sentry from "@sentry/node";
+import chalk from "chalk";
 import { Command, Option } from "commander";
 import { config } from "dotenv";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import chalk from "chalk";
-import * as Sentry from "@sentry/node";
+import { z } from "zod";
+import { runAgent } from "./agent.js";
+import { resolveAgentProvider } from "./agent-provider.js";
+import { logError, logInfo } from "./logger.js";
 import { connectToMCPServer } from "./mcp-test-client.js";
 import { connectToRemoteMCPServer } from "./mcp-test-client-remote.js";
-import { runAgent } from "./agent.js";
-import { logError, logInfo } from "./logger.js";
-import { sentryBeforeSend } from "@sentry/mcp-core/telem/sentry";
-import type { MCPConnection } from "./types.js";
 import { resolveTransportMode } from "./transport.js";
-import { resolveAgentProvider } from "./agent-provider.js";
+import type { MCPConnection } from "./types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "../../../");
@@ -30,6 +31,25 @@ config(); // Try current directory first (.env in mcp-test-client)
 config({ path: path.join(rootDir, ".env") }); // Also try root directory (fallback for shared values)
 
 const program = new Command();
+
+/** The options commander parses from the flags declared below. */
+const CliOptionsSchema = z.object({
+  model: z.string().optional(),
+  accessToken: z.string().optional(),
+  transport: z.enum(["auto", "stdio", "http"]),
+  mcpHost: z.string(),
+  host: z.string().optional(),
+  sentryDsn: z.string().optional(),
+  experimental: z.boolean().optional(),
+  stdioBundle: z.boolean().optional(),
+  listTools: z.boolean().optional(),
+});
+
+function errorCode(error: unknown): unknown {
+  return typeof error === "object" && error !== null && "code" in error
+    ? error.code
+    : undefined;
+}
 
 // OAuth support for MCP server (not Sentry directly)
 
@@ -51,37 +71,48 @@ program
   .option(
     "--mcp-host <host>",
     "MCP server host",
-    process.env.MCP_URL || "http://localhost:5173",
+    process.env["MCP_URL"] || "http://localhost:5173",
   )
   .option("--host <host>", "Sentry host for stdio transport")
-  .option("--sentry-dsn <dsn>", "Sentry DSN for error reporting")
+  .option(
+    "--sentry-dsn <dsn>",
+    "Sentry DSN for the test client's own error reporting (not the server's)",
+  )
   .option("--experimental", "Enable experimental tools (/mcp?experimental=1)")
+  .option(
+    "--stdio-bundle",
+    "Run the built @sentry/mcp-server bundle instead of `sentry mcp` from CLI source",
+  )
   .option(
     "--list-tools",
     "Connect to the MCP server, list available tools, and exit without using an LLM",
   )
-  .action(async (prompt, options) => {
+  .action(async (prompt: string | undefined, rawOptions: unknown) => {
     try {
+      const options = CliOptionsSchema.parse(rawOptions);
       const agentProvider = resolveAgentProvider(process.env);
 
       // Initialize Sentry with CLI-provided DSN if available
       const sentryDsn =
         options.sentryDsn ||
-        process.env.SENTRY_DSN ||
-        process.env.DEFAULT_SENTRY_DSN;
+        process.env["SENTRY_DSN"] ||
+        process.env["DEFAULT_SENTRY_DSN"];
+
+      const scopeContext = {
+        "gen_ai.agent.name": "sentry-mcp-agent",
+        "gen_ai.provider.name": agentProvider ?? "unknown",
+      };
 
       Sentry.init({
         dsn: sentryDsn,
-        sendDefaultPii: true,
         tracesSampleRate: 1,
         beforeSend: sentryBeforeSend,
         initialScope: {
-          tags: {
-            "gen_ai.agent.name": "sentry-mcp-agent",
-            "gen_ai.provider.name": agentProvider ?? "unknown",
-          },
+          tags: scopeContext,
+          // SDK v11 does not copy scope tags onto streamed spans.
+          attributes: scopeContext,
         },
-        release: process.env.SENTRY_RELEASE,
+        release: process.env["SENTRY_RELEASE"],
         integrations: [
           Sentry.consoleIntegration(),
           Sentry.zodErrorsIntegration(),
@@ -91,16 +122,16 @@ program
           }),
         ],
         environment:
-          process.env.SENTRY_ENVIRONMENT ??
-          (process.env.NODE_ENV !== "production"
+          process.env["SENTRY_ENVIRONMENT"] ??
+          (process.env["NODE_ENV"] !== "production"
             ? "development"
             : "production"),
       });
 
       // Check for access token in priority order
       const accessToken =
-        options.accessToken || process.env.SENTRY_ACCESS_TOKEN;
-      const sentryHost = options.host || process.env.SENTRY_HOST;
+        options.accessToken || process.env["SENTRY_ACCESS_TOKEN"];
+      const sentryHost = options.host || process.env["SENTRY_HOST"];
 
       const transport = resolveTransportMode({
         requestedTransport: options.transport,
@@ -131,8 +162,8 @@ program
         connection = await connectToMCPServer({
           accessToken,
           host: sentryHost,
-          sentryDsn: sentryDsn,
           useExperimental: options.experimental,
+          useBundle: options.stdioBundle,
         });
       } else {
         connection = await connectToRemoteMCPServer({
@@ -142,8 +173,9 @@ program
         });
       }
 
-      // Set conversation ID as a global tag for all traces
+      // The tag reaches error events; setConversationId puts the ID on gen_ai spans.
       Sentry.setTag("gen_ai.conversation.id", connection.sessionId);
+      Sentry.setConversationId(connection.sessionId);
 
       const agentConfig = {
         model: options.model,
@@ -152,7 +184,7 @@ program
 
       try {
         if (listToolsOnly) {
-          const toolNames = Array.from(connection.tools.keys()).sort();
+          const toolNames = [...connection.tools.keys()].sort();
           logInfo("Available tools", `${toolNames.length} tools`);
           for (const toolName of toolNames) {
             console.log(chalk.gray(`  - ${toolName}`));
@@ -167,15 +199,9 @@ program
 
           const rl = readline.createInterface({ input, output });
 
-          while (true) {
+          for (;;) {
             try {
               const userInput = await rl.question(chalk.gray("> "));
-
-              // Handle null input (Ctrl+D / EOF)
-              if (userInput === null) {
-                logInfo("Goodbye!");
-                break;
-              }
 
               if (
                 userInput.toLowerCase() === "exit" ||
@@ -193,8 +219,8 @@ program
             } catch (error) {
               // Handle EOF (Ctrl+D) which may throw an error
               if (
-                (error as any).code === "ERR_USE_AFTER_CLOSE" ||
-                (error instanceof Error && error.message?.includes("EOF"))
+                errorCode(error) === "ERR_USE_AFTER_CLOSE" ||
+                (error instanceof Error && error.message.includes("EOF"))
               ) {
                 logInfo("Goodbye!");
                 break;
@@ -224,15 +250,14 @@ program
   });
 
 // Handle uncaught errors
-process.on("unhandledRejection", async (error) => {
+process.on("unhandledRejection", (error) => {
   const eventId = Sentry.captureException(error);
   logError(
     "Unhandled error",
     `${error instanceof Error ? error.message : String(error)}. Event ID: ${eventId}`,
   );
   // Ensure Sentry events are flushed before exit
-  await Sentry.flush(5000);
-  process.exit(1);
+  void Sentry.flush(5000).finally(() => process.exit(1));
 });
 
 program.parse(process.argv);

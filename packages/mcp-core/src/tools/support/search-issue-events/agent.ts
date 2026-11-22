@@ -1,5 +1,8 @@
 import { z } from "zod";
-import { callEmbeddedAgent } from "../../../internal/agents/callEmbeddedAgent";
+import {
+  callEmbeddedAgent,
+  type ToolCall,
+} from "../../../internal/agents/callEmbeddedAgent";
 import type { SentryApiService } from "../../../api-client";
 import { createWhoamiTool } from "../../../internal/agents/tools/whoami";
 import { createIssueEventFieldsTool } from "./utils";
@@ -28,12 +31,18 @@ export const searchIssueEventsAgentOutputSchema = z
         }),
         z.object({
           start: z.string().describe("ISO 8601 start time"),
-          end: z.string().describe("ISO 8601 end time"),
+          end: z
+            .string()
+            .optional()
+            .describe(
+              "ISO 8601 end time. Omit for open-ended ranges like 'since X'; the search then runs until now.",
+            ),
         }),
         z.null(),
       ])
+      .default(null)
       .describe(
-        "Time range for filtering events. Use either statsPeriod for relative time or start/end for absolute time. Use null for default 14-day window.",
+        "Time range for filtering events. Use either statsPeriod for relative time or start (and optional end) for absolute time. Use null for default 14-day window.",
       ),
     explanation: z
       .string()
@@ -43,7 +52,7 @@ export const searchIssueEventsAgentOutputSchema = z
   .refine(
     (data) => {
       // Only validate if both sort and fields are present
-      if (!data.sort || !data.fields || data.fields.length === 0) {
+      if (!data.sort || data.fields.length === 0) {
         return true;
       }
 
@@ -65,7 +74,7 @@ export interface SearchIssueEventsAgentOptions {
   query: string;
   organizationSlug: string;
   apiService: SentryApiService;
-  projectId?: string;
+  projectId?: string | undefined;
 }
 
 /**
@@ -76,7 +85,7 @@ export async function searchIssueEventsAgent(
   options: SearchIssueEventsAgentOptions,
 ): Promise<{
   result: z.output<typeof searchIssueEventsAgentOutputSchema>;
-  toolCalls: any[];
+  toolCalls: ToolCall[];
 }> {
   // Provider check happens in callEmbeddedAgent via getAgentProvider()
   // Create tools pre-bound with the provided API service and organization
@@ -91,10 +100,7 @@ export async function searchIssueEventsAgent(
   });
 
   // Use callEmbeddedAgent to translate the query with tool call capture
-  return await callEmbeddedAgent<
-    z.output<typeof searchIssueEventsAgentOutputSchema>,
-    typeof searchIssueEventsAgentOutputSchema
-  >({
+  return await callEmbeddedAgent({
     system: systemPrompt,
     prompt: options.query,
     tools: {
@@ -102,5 +108,6 @@ export async function searchIssueEventsAgent(
       whoami: whoamiTool,
     },
     schema: searchIssueEventsAgentOutputSchema,
+    abortSignal: options.apiService.signal,
   });
 }

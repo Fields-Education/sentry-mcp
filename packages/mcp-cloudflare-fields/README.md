@@ -4,21 +4,17 @@ Fork of `@sentry/mcp-cloudflare` configured for deployment to Fields infrastruct
 
 ## Architecture
 
-This package uses symlinks to the original `mcp-cloudflare` package for all source code, with only configuration files being unique:
+This directory holds only Fields-specific config. There is no separate workspace package: CI copies these wrangler files over `packages/mcp-cloudflare/` and builds/deploys upstream's package with them.
 
 ```
 mcp-cloudflare-fields/
-├── src/              → symlink to ../mcp-cloudflare/src/
-├── public/           → symlink to ../mcp-cloudflare/public/
-├── vite.config.ts    → symlink to ../mcp-cloudflare/vite.config.ts
-├── tsconfig*.json    → symlinks to ../mcp-cloudflare/
-├── package.json      # Unique - different name
-├── wrangler.jsonc    # Unique - Fields worker config
-├── wrangler.canary.jsonc  # Unique - Canary config
-└── wrangler.test.jsonc  # Unique - test config for shared upstream tests
+├── wrangler.jsonc         # Fields production worker (sentry-mcp-fields)
+├── wrangler.canary.jsonc  # Fields canary worker (sentry-mcp-fields-canary)
+├── check-bindings.mjs     # Fails if upstream adds a binding these configs lack
+└── .env.example           # Local dev vars
 ```
 
-This means upstream changes to `mcp-cloudflare` automatically apply here.
+Because the fork never modifies upstream files, upstream merges apply cleanly and `pnpm-lock.yaml` stays identical to upstream.
 
 ## Setup
 
@@ -73,59 +69,40 @@ wrangler secret put SENTRY_HOST --config wrangler.canary.jsonc
 
 ### 5. Configure GitHub Repository
 
-Add these secrets/variables to your fork:
+Secrets used by the Fields workflows:
 
-**Secrets** (already have):
-- `CLOUDFLARE_API_TOKEN`
-- `CLOUDFLARE_ACCOUNT_ID`
-
-**Variables** (new):
-- `CLOUDFLARE_SUBDOMAIN` - Your workers.dev subdomain
-- `SENTRY_ORG_FIELDS` - Org slug on s.fields.app (for source maps)
-- `SENTRY_PROJECT_FIELDS` - Project slug on s.fields.app (for source maps)
-
-**Secrets** (new):
-- `SENTRY_AUTH_TOKEN` - Auth token from s.fields.app (for source maps)
+- `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` - deploys (org-level)
+- `CLOUDFLARE_SUBDOMAIN` - workers.dev subdomain, used by smoke tests
+- `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_HOST_FIELDS` - source map upload to s.fields.app
 
 ## Local Development
 
 ```bash
-# Copy env example to .dev.vars
-cp .env.example .dev.vars
-
-# Edit .dev.vars with your values
-# Then start dev server
-pnpm dev
+cp packages/mcp-cloudflare-fields/wrangler*.jsonc packages/mcp-cloudflare/
+cp packages/mcp-cloudflare-fields/.env.example packages/mcp-cloudflare/.dev.vars  # then fill in values
+pnpm --filter @sentry/mcp-cloudflare dev
+git checkout -- packages/mcp-cloudflare  # restore upstream configs when done
 ```
-
-Server runs on http://localhost:8790
 
 ## Deployment
 
-Automatic via GitHub Actions when pushing to `main` (after tests pass).
+`.github/workflows/deploy-fields.yml` runs on every push to `main`: canary deploy → smoke tests → production deploy → smoke tests (rolls back on failure).
 
-Manual deployment:
-```bash
-# Canary
-pnpm deploy:canary
-
-# Production
-pnpm deploy
-```
+New KV bindings without an `id` (currently `MCP_CACHE`) are created automatically by `wrangler deploy` and stay linked to the worker.
 
 ## Syncing with Upstream
 
-```bash
-# Add upstream remote (one-time)
-git remote add upstream https://github.com/getsentry/sentry-mcp.git
+`.github/workflows/sync-upstream.yml` runs daily with the built-in `GITHUB_TOKEN` (no PAT or app). It merges `upstream/main`, resets `.github/workflows` to just our two workflows (upstream's never land here), verifies the Fields build, pushes `main`, and dispatches the deploy.
 
-# Fetch and merge
+`GITHUB_TOKEN` may push upstream commits that touch workflows only if the pushed tip leaves `.github/workflows` unchanged, so edits to `deploy-fields.yml` or `sync-upstream.yml` must go through a normal PR.
+
+If a run fails, resolve it locally:
+
+```bash
 git fetch upstream
 git merge upstream/main
-
-# Resolve any conflicts in:
-# - .github/workflows/deploy-fields.yml (your file, shouldn't conflict)
-# - packages/mcp-cloudflare-fields/ configs (your files, shouldn't conflict)
+git rm -rq --cached .github/workflows && rm -rf .github/workflows && git checkout HEAD -- .github/workflows
+node packages/mcp-cloudflare-fields/check-bindings.mjs  # add any missing bindings to our wrangler configs
 ```
 
-The symlinks ensure source code changes from upstream automatically apply.
+Keep upstream files unmodified. Fork changes belong in this directory or the two Fields workflows.

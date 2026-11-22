@@ -8,9 +8,9 @@ import { Markdown } from "./markdown";
 
 interface InteractiveMarkdownProps {
   children: string;
-  className?: string;
+  className?: string | undefined;
   hasSlashCommands?: boolean;
-  onSlashCommand?: (command: string) => void;
+  onSlashCommand?: ((command: string) => void) | undefined;
 }
 
 export function InteractiveMarkdown({
@@ -48,7 +48,7 @@ export function InteractiveMarkdown({
         components={{
           // Custom renderer for code that might contain slash commands
           code: ({ children, ref, ...props }) => {
-            const text = String(children);
+            const text = typeof children === "string" ? children : "";
             if (text.startsWith("/") && text.match(/^\/[a-zA-Z]+$/)) {
               // This is a slash command, make it clickable
               const command = text.slice(1);
@@ -65,7 +65,7 @@ export function InteractiveMarkdown({
             }
             // Regular code rendering
             return (
-              <code ref={ref as any} {...props}>
+              <code ref={ref} {...props}>
                 {children}
               </code>
             );

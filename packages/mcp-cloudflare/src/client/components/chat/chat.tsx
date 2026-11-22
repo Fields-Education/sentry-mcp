@@ -33,11 +33,7 @@ export function Chat({ isOpen, onClose, onLogout }: ChatProps) {
   } = useMcpMetadata(isAuthenticated);
 
   // Initialize streaming simulation first (without scroll callback)
-  const {
-    isStreaming: isLocalStreaming,
-    startStreaming,
-    isMessageStreaming,
-  } = useStreamingSimulation();
+  const { startStreaming, isMessageStreaming } = useStreamingSimulation();
 
   // Manage input state manually (AI SDK 5+ removed built-in input management)
   const [input, setInput] = useState("");
@@ -76,7 +72,7 @@ export function Chat({ isOpen, onClose, onLogout }: ChatProps) {
       e.preventDefault();
       if (!input.trim()) return;
 
-      sendMessage({ text: input });
+      void sendMessage({ text: input });
       setInput("");
     },
     [input, sendMessage],
@@ -108,7 +104,7 @@ export function Chat({ isOpen, onClose, onLogout }: ChatProps) {
     } else if (metadataError) {
       content = `❌ Failed to load tools: ${metadataError}\n\nPlease check your connection and try again.`;
       messageMetadata = { type: "tools-error", error: metadataError };
-    } else if (!metadata || !metadata.tools || !Array.isArray(metadata.tools)) {
+    } else if (!metadata) {
       content =
         "No tools are currently available. The MCP server may not have loaded tools yet.\n\nPlease check your connection and try again.";
       messageMetadata = { type: "tools-empty" };
@@ -117,15 +113,14 @@ export function Chat({ isOpen, onClose, onLogout }: ChatProps) {
       const definitionsByName = new Map(
         TOOL_DEFINITIONS.map((t) => [t.name, t]),
       );
-      const detailed = metadata.tools
-        .slice()
+      const detailed = [...metadata.tools]
         .sort((a, b) => a.localeCompare(b))
         .map((name) => {
           const def = definitionsByName.get(name);
           return {
             name,
             description: def ? def.description.split("\n")[0] : "",
-          } as { name: string; description: string };
+          };
         });
 
       content =
@@ -229,7 +224,7 @@ Try asking me things like:
     ) {
       hadAuthErrorRef.current = false;
       // Retry the failed message
-      regenerate();
+      void regenerate();
     }
 
     // Reset retry state on successful completion (no error)
@@ -344,7 +339,7 @@ Try asking me things like:
       }
 
       // Send the message using sendMessage (AI SDK 5+ API)
-      sendMessage({ text: prompt });
+      void sendMessage({ text: prompt });
     },
     [sendMessage, handleSlashCommand],
   );
@@ -392,7 +387,7 @@ Try asking me things like:
             <span className="sr-only">Logout</span>
             <PanelLeftOpen className="size-4" />
           </Button>
-          {isAuthenticated && onLogout ? (
+          {isAuthenticated ? (
             <Button
               variant="secondary"
               onClick={onLogout}
@@ -425,13 +420,16 @@ Try asking me things like:
           input={input}
           error={error}
           isChatLoading={status === "streaming" || status === "submitted"}
-          isLocalStreaming={isLocalStreaming}
           isMessageStreaming={isMessageStreaming}
           isOpen={isOpen}
           onInputChange={handleInputChange}
           onSubmit={handleSubmit}
-          onStop={stop}
-          onRetry={regenerate}
+          onStop={() => {
+            void stop();
+          }}
+          onRetry={() => {
+            void regenerate();
+          }}
           onSlashCommand={handleSlashCommand}
           onSendPrompt={handleSendPrompt}
         />

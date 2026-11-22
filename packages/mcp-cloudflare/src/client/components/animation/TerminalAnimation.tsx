@@ -2,6 +2,7 @@
 
 import "asciinema-player/dist/bundle/asciinema-player.css";
 import "./dracula.css";
+import type { Marker, Player } from "asciinema-player";
 import { useCallback, useEffect, useRef, useState } from "react";
 import BrowserAnimation from "./BrowserAnimation";
 import KeysPaste from "./terminal-ui/keys-paste";
@@ -43,7 +44,7 @@ function getPulseColorClass(index: number): string {
   }
 }
 
-const steps: Step[] = [
+const steps: [Step, ...Step[]] = [
   {
     label: "Copypaste Sentry Issue URL",
     description: "Copy the Sentry issue url directly from your browser",
@@ -88,7 +89,7 @@ const steps: Step[] = [
 ];
 
 export default function TerminalAnimation() {
-  const playerRef = useRef<any>(null);
+  const playerRef = useRef<Player | null>(null);
   const cliDemoRef = useRef<HTMLDivElement | null>(null);
 
   const autoContinueTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
@@ -117,8 +118,10 @@ export default function TerminalAnimation() {
     clearAllTimers();
     try {
       const p = playerRef.current;
-      p?.pause?.();
-      p?.dispose?.();
+      if (p) {
+        void p.pause();
+        p.dispose();
+      }
     } catch {}
     playerRef.current = null;
     try {
@@ -142,8 +145,8 @@ export default function TerminalAnimation() {
       setSpeed(newSpeed);
 
       try {
-        p.pause?.();
-        p.seek?.(step.startTime + (isFastStep ? 87 : OFFSET)); // skip 87 seconds fakes a 30x speedup
+        void p.pause();
+        void p.seek(step.startTime + (isFastStep ? 87 : OFFSET)); // skip 87 seconds fakes a 30x speedup
       } catch (err) {
         console.error("[TerminalAnimation] gotoStep seek failed", {
           stepIndex: idx,
@@ -163,12 +166,12 @@ export default function TerminalAnimation() {
 
       if (mobile) {
         try {
-          p.play?.();
+          void p.play();
         } catch {}
       } else if (step.pauseMs) {
         autoContinueTimerRef.current = setTimeout(() => {
           try {
-            p.play?.();
+            void p.play();
           } catch {}
         }, step.pauseMs);
       }
@@ -187,19 +190,22 @@ export default function TerminalAnimation() {
     if (playerRef.current) return;
 
     try {
+      // Older browsers and test DOMs do not implement matchMedia.
+      const matchMedia: typeof window.matchMedia | undefined =
+        typeof window !== "undefined" ? window.matchMedia : undefined;
       isMobileRef.current =
-        (typeof window !== "undefined" &&
-          window.matchMedia?.("(hover: none)")?.matches) ||
+        matchMedia?.call(window, "(hover: none)").matches ||
         (typeof window !== "undefined" && window.innerWidth < 768);
     } catch {
       isMobileRef.current = false;
     }
 
-    const AsciinemaPlayerLibrary = await import("asciinema-player" as any);
+    if (typeof WebAssembly === "undefined") return;
+    const AsciinemaPlayerLibrary = await import("asciinema-player");
     if (!cliDemoRef.current) return;
 
     // Convert steps to markers format: [time, label]
-    const markers = steps.map((step) => [step.startTime, step.label]);
+    const markers = steps.map((step): Marker => [step.startTime, step.label]);
 
     const player = AsciinemaPlayerLibrary.create(
       "demo.cast",
@@ -209,8 +215,7 @@ export default function TerminalAnimation() {
         rows: Math.max(
           1,
           Math.floor(
-            ((cliDemoRef.current?.getBoundingClientRect().height ?? 0) - 18) /
-              16.82, // line-height
+            (cliDemoRef.current.getBoundingClientRect().height - 18) / 16.82, // line-height
           ),
         ), // -18 for 9px border on <pre> for terminal output
         // NOTE: fits cols to container width (which is extended to 200% on mobile for optimal font-size result), or rows (specified above) to container height by decreasing the font size (note below)
@@ -234,7 +239,7 @@ export default function TerminalAnimation() {
     playerRef.current = player;
 
     // Listen to marker events from the player
-    player.addEventListener("marker", (event: any) => {
+    player.addEventListener("marker", (event) => {
       const { index } = event;
       if (!isManualSeekRef.current) {
         handleMarkerReached(index);
@@ -251,15 +256,15 @@ export default function TerminalAnimation() {
     setCurrentIndex(-1);
 
     try {
-      p.pause?.();
-      p.seek?.(steps[0].startTime - OFFSET);
+      void p.pause();
+      void p.seek(steps[0].startTime - OFFSET);
       setSpeed(3);
     } catch {}
 
     // Start from the first marker
     setTimeout(() => {
       try {
-        p.play?.();
+        void p.play();
       } catch {}
     }, 100);
   }, [clearAllTimers]);
@@ -268,13 +273,13 @@ export default function TerminalAnimation() {
     if (didInitRef.current) return;
     didInitRef.current = true;
 
-    (async () => {
+    void (async () => {
       await mountOnce();
       // Start playing from the first marker
       setTimeout(() => {
         const p = playerRef.current;
         try {
-          p?.play?.();
+          if (p) void p.play();
         } catch {}
       }, 100);
     })();

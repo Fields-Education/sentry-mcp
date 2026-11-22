@@ -1,22 +1,26 @@
 import {
-  generateText,
-  Output,
-  type Tool,
   APICallError,
+  generateText,
   NoObjectGeneratedError,
   NoOutputGeneratedError,
+  Output,
   RetryError,
-  stepCountIs,
+  type StepResult,
+  type Tool,
 } from "ai";
-import { getAgentProvider } from "./provider-factory";
+import type { z } from "zod";
 import {
   AgentExecutionError,
   ConfigurationError,
-  UserInputError,
   LLMProviderError,
+  UserInputError,
 } from "../../errors";
 import { logIssue, logWarn } from "../../telem/logging";
-import type { z } from "zod";
+import { getUserAgent } from "../../version";
+import { getAgentProvider } from "./provider-factory";
+
+// Tool work gets this many model steps; a validated final response may get one more.
+const MAX_WORK_STEPS = 5;
 
 /**
  * Resolve the underlying provider failure from an AI SDK error.
@@ -104,21 +108,32 @@ interface EmbeddedAgentResult<T> {
  * - Errors are re-thrown for the calling agent to handle
  * - Each agent can implement its own error handling strategy
  */
-export async function callEmbeddedAgent<
-  TOutput,
-  TSchema extends z.ZodType<TOutput, unknown>,
->({
+export async function callEmbeddedAgent<TOutput>({
   system,
   prompt,
   tools,
   schema,
+  isReadyToFinalize,
+  abortSignal,
 }: {
   system: string;
   prompt: string;
   tools: Record<string, Tool>;
-  schema: TSchema;
+  schema: z.ZodType<TOutput>;
+  /** Whether this step produced a result that permits a final response. */
+  isReadyToFinalize?: (step: StepResult<Record<string, Tool>>) => boolean;
+  /** Cancels the model calls, such as when the MCP client cancels the tool call. */
+  abortSignal?: AbortSignal | undefined;
 }): Promise<EmbeddedAgentResult<TOutput>> {
   const capturedToolCalls: ToolCall[] = [];
+
+  function shouldAllowFinalResponseStep(
+    steps: StepResult<Record<string, Tool>>[],
+  ): boolean {
+    if (steps.length !== MAX_WORK_STEPS) return false;
+    const lastStep = steps.at(-1);
+    return lastStep !== undefined && (isReadyToFinalize?.(lastStep) ?? false);
+  }
 
   // Get the configured provider (OpenAI, Azure OpenAI, or Anthropic)
   const provider = getAgentProvider();
@@ -126,10 +141,19 @@ export async function callEmbeddedAgent<
   try {
     const result = await generateText({
       model: provider.getModel(),
+      // generateText sets a call-level user-agent that replaces the
+      // providers' own, so ours has to go on the call too.
+      headers: { "User-Agent": getUserAgent() },
       system,
       prompt,
       tools,
-      stopWhen: stepCountIs(5),
+      ...(abortSignal === undefined ? {} : { abortSignal }),
+      stopWhen: ({ steps }) =>
+        steps.length >= MAX_WORK_STEPS && !shouldAllowFinalResponseStep(steps),
+      prepareStep: ({ steps }) => {
+        if (shouldAllowFinalResponseStep(steps)) return { toolChoice: "none" };
+        return undefined;
+      },
       experimental_output: Output.object({ schema }),
       experimental_telemetry: {
         isEnabled: true,
@@ -139,13 +163,11 @@ export async function callEmbeddedAgent<
       // See: https://github.com/getsentry/sentry-mcp/issues/623
       providerOptions: provider.getProviderOptions(),
       onStepFinish: (event) => {
-        if (event.toolCalls && event.toolCalls.length > 0) {
-          for (const toolCall of event.toolCalls) {
-            capturedToolCalls.push({
-              toolName: toolCall.toolName,
-              args: toolCall.input,
-            });
-          }
+        for (const toolCall of event.toolCalls) {
+          capturedToolCalls.push({
+            toolName: toolCall.toolName,
+            args: toolCall.input,
+          });
         }
       },
     });
@@ -161,7 +183,6 @@ export async function callEmbeddedAgent<
 
     if (
       typeof rawOutput === "object" &&
-      rawOutput !== null &&
       "error" in rawOutput &&
       typeof (rawOutput as { error?: unknown }).error === "string"
     ) {
@@ -181,6 +202,12 @@ export async function callEmbeddedAgent<
       toolCalls: capturedToolCalls,
     };
   } catch (error: unknown) {
+    // A cancelled call is not an agent failure. Surface the abort reason so the
+    // tool stops, instead of filing an issue or falling back to the raw query.
+    if (abortSignal?.aborted) {
+      throw abortSignal.reason;
+    }
+
     // Rescue NoObjectGeneratedError: try to parse the raw LLM text through the schema
     // (schema defaults like .default("") fill missing fields)
     if (NoObjectGeneratedError.isInstance(error)) {
@@ -207,6 +234,21 @@ export async function callEmbeddedAgent<
       });
       throw new UserInputError(
         "The AI was unable to process your query. Please try rephrasing.",
+      );
+    }
+
+    // NoOutputGeneratedError: the model exhausted its steps without emitting the
+    // structured output (typically after repeated tool/validation failures). This
+    // is a recoverable model limitation, not a system fault — surface it as user
+    // input like its NoObjectGeneratedError sibling and log a warning, instead of
+    // filing a Sentry issue for every occurrence.
+    if (NoOutputGeneratedError.isInstance(error)) {
+      logWarn("Embedded agent produced no output", {
+        loggerScope: ["agents", "embedded"],
+        extra: { errorMessage: error.message },
+      });
+      throw new UserInputError(
+        "The AI could not construct a valid query for this request. Please rephrase or narrow it — for example, specify the fields, a real environment name, or a time range.",
       );
     }
 
@@ -242,9 +284,9 @@ export async function callEmbeddedAgent<
       throw error;
     }
 
-    // Unexpected agent failures (including NoOutputGeneratedError): file one
-    // Sentry issue, then throw a typed error so AI-powered tools can fall back
-    // or return a graceful response instead of hard-failing the MCP tool.
+    // Genuinely unexpected agent failures: file one Sentry issue, then throw a
+    // typed error so AI-powered tools can fall back or return a graceful response
+    // instead of hard-failing the MCP tool.
     throw toAgentExecutionError(error);
   }
 }
@@ -336,9 +378,9 @@ function extractJsonCandidates(text: string): string[] {
 
   // Strategy 1: Extract from markdown code blocks (```json ... ``` or ``` ... ```)
   const codeBlockRegex = /```(?:json)?\s*\n?([\s\S]*?)\n?```/g;
-  const allMatches = Array.from(text.matchAll(codeBlockRegex));
+  const allMatches = [...text.matchAll(codeBlockRegex)];
   for (const match of allMatches) {
-    candidates.add(match[1].trim());
+    candidates.add((match[1] ?? "").trim());
   }
 
   // Strategy 2: Find balanced JSON objects anywhere in the text.
@@ -346,7 +388,7 @@ function extractJsonCandidates(text: string): string[] {
     candidates.add(jsonObject);
   }
 
-  return Array.from(candidates);
+  return [...candidates];
 }
 
 /**
@@ -357,11 +399,11 @@ function extractJsonCandidates(text: string): string[] {
  */
 function rescueFromText<TOutput>(
   text: string,
-  schema: z.ZodType<TOutput, unknown>,
+  schema: z.ZodType<TOutput>,
 ): TOutput | null {
   for (const candidate of extractJsonCandidates(text)) {
     try {
-      const parsed = JSON.parse(candidate);
+      const parsed: unknown = JSON.parse(candidate);
       const result = schema.safeParse(parsed);
       if (result.success) {
         return result.data;

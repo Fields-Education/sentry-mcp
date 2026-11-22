@@ -1,29 +1,37 @@
-import { Hono } from "hono";
+import {
+  AuthorizationError,
+  type AuthRequest,
+} from "@cloudflare/workers-oauth-provider";
 import * as Sentry from "@sentry/cloudflare";
-import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
+import { logWarn } from "@sentry/mcp-core/telem/logging";
+import { Hono } from "hono";
+import { SCOPES } from "../../../constants";
 import {
   getRememberedSkillsForClient,
-  renderApprovalDialog,
   parseRedirectApproval,
+  renderApprovalDialog,
 } from "../../lib/approval-dialog";
+import { resolveClientFamilyFromName } from "../../lib/client-family";
 import { redirectUriHasUserInfo } from "../../lib/html-utils";
 import { isRegisteredRedirectUri } from "../../lib/redirect-uri";
-import { resolveClientFamilyFromName } from "../../lib/client-family";
+import type { Env } from "../../types";
+import { SENTRY_AUTH_URL } from "../constants";
+import {
+  ACCESS_DENIED_DESCRIPTION,
+  createAuthorizationErrorRedirect,
+  createResourceValidationError,
+  getAuthorizationServerIssuer,
+  getUpstreamAuthorizeUrl,
+  parseIdpHint,
+  promptRequestsAccountSelection,
+  validateResourceParameter,
+} from "../helpers";
+import { parseResourceMcpConstraints } from "../resource-scope";
+import { type OAuthState, signState } from "../state";
 import {
   CLIENT_REGISTRATION_METHOD_ATTRIBUTE,
   getClientRegistrationMethodTelemetry,
 } from "../telemetry";
-import type { Env } from "../../types";
-import { SENTRY_AUTH_URL } from "../constants";
-import {
-  getUpstreamAuthorizeUrl,
-  validateResourceParameter,
-  createResourceValidationError,
-} from "../helpers";
-import { SCOPES } from "../../../constants";
-import { signState, type OAuthState } from "../state";
-import { logWarn } from "@sentry/mcp-core/telem/logging";
-import { parseResourceMcpConstraints } from "../resource-scope";
 
 /**
  * Extended AuthRequest that includes skills and resource parameter
@@ -33,12 +41,20 @@ interface AuthRequestWithSkills extends AuthRequest {
   resource?: string;
 }
 
+// Long enough to sign in, sign up for Sentry, and approve consent on Sentry.
+const UPSTREAM_STATE_TTL_MS = 30 * 60 * 1000;
+
 async function redirectToUpstream(
   env: Env,
   request: Request,
-  oauthReqInfo: AuthRequest | AuthRequestWithSkills,
+  // Only serialized into the upstream state when no override is given.
+  oauthReqInfo: object,
   headers: HeadersInit = {},
   stateOverride?: string,
+  {
+    forcePrompt = false,
+    idpHint,
+  }: { forcePrompt?: boolean; idpHint?: string | undefined } = {},
 ) {
   const responseHeaders = new Headers(headers);
   responseHeaders.set(
@@ -52,6 +68,8 @@ async function redirectToUpstream(
       client_id: env.SENTRY_CLIENT_ID,
       redirect_uri: new URL("/oauth/callback", request.url).href,
       state: stateOverride ?? btoa(JSON.stringify(oauthReqInfo)),
+      force_prompt: forcePrompt,
+      idp_hint: idpHint,
     }),
   );
 
@@ -73,35 +91,61 @@ export default new Hono<{ Bindings: Env }>()
     try {
       oauthReqInfo = await c.env.OAUTH_PROVIDER.parseAuthRequest(c.req.raw);
     } catch (err) {
-      // Log invalid redirect URI errors without sending them to Sentry
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      if (errorMessage.includes("Invalid redirect URI")) {
-        // parseAuthRequest threw before producing a request, so read the
-        // attempted values directly from the query string.
-        const authUrl = new URL(c.req.url);
-        const attemptedClientId = authUrl.searchParams.get("client_id");
-        const attemptedRedirectUri = authUrl.searchParams.get("redirect_uri");
-        let registeredUris: string[] | undefined;
-        let clientName: string | undefined;
-        if (attemptedClientId) {
-          try {
-            const client =
-              await c.env.OAUTH_PROVIDER.lookupClient(attemptedClientId);
-            registeredUris = client?.redirectUris;
-            clientName = client?.clientName;
-          } catch {}
+      // workers-oauth-provider >= 0.10.0 throws AuthorizationError for
+      // expected authorization-request validation failures (missing
+      // client_id, invalid redirect URI, etc). These are user-correctable
+      // and must be rendered locally when no redirectUri is attached, so
+      // don't forward them to Sentry.
+      if (err instanceof AuthorizationError) {
+        const errorMessage = err.description;
+        if (errorMessage.includes("Invalid redirect URI")) {
+          // parseAuthRequest threw before producing a request, so read the
+          // attempted values directly from the query string.
+          const authUrl = new URL(c.req.url);
+          const attemptedClientId = authUrl.searchParams.get("client_id");
+          const attemptedRedirectUri = authUrl.searchParams.get("redirect_uri");
+          let registeredUris: string[] | undefined;
+          let clientName: string | undefined;
+          if (attemptedClientId) {
+            try {
+              const client =
+                await c.env.OAUTH_PROVIDER.lookupClient(attemptedClientId);
+              registeredUris = client?.redirectUris;
+              clientName = client?.clientName;
+            } catch {}
+          }
+          logWarn(`OAuth authorization failed: ${errorMessage}`, {
+            loggerScope: ["cloudflare", "oauth", "authorize"],
+            extra: {
+              error: errorMessage,
+              clientId: attemptedClientId,
+              redirectUri: attemptedRedirectUri,
+              registeredUris,
+              clientName,
+            },
+          });
+          return c.text("Invalid redirect URI", 400);
         }
-        logWarn(`OAuth authorization failed: ${errorMessage}`, {
+
+        logWarn(`OAuth authorization request rejected: ${errorMessage}`, {
           loggerScope: ["cloudflare", "oauth", "authorize"],
-          extra: {
-            error: errorMessage,
-            clientId: attemptedClientId,
-            redirectUri: attemptedRedirectUri,
-            registeredUris,
-            clientName,
-          },
+          extra: { code: err.code, error: errorMessage },
         });
-        return c.text("Invalid redirect URI", 400);
+
+        // Once redirect URI validation has succeeded, the provider attaches
+        // the validated redirectUri so the error can be safely relayed to
+        // the client instead of rendered locally.
+        if (err.redirectUri) {
+          return createAuthorizationErrorRedirect(
+            err.redirectUri,
+            err.code,
+            errorMessage,
+            err.state,
+            err.issuer ?? getAuthorizationServerIssuer(c.req.url),
+          );
+        }
+
+        return c.text(errorMessage, 400);
       }
       // Re-throw other errors to be captured by Sentry
       throw err;
@@ -146,7 +190,7 @@ export default new Hono<{ Bindings: Env }>()
       if (oauthReqInfo.redirectUri) {
         return createResourceValidationError(
           oauthReqInfo.redirectUri,
-          oauthReqInfo.state ?? undefined,
+          oauthReqInfo.state,
           c.req.url,
         );
       }
@@ -194,7 +238,15 @@ export default new Hono<{ Bindings: Env }>()
       },
       scope: approvalScope,
       redirectUri: oauthReqInfoWithResource.redirectUri,
-      state: { oauthReqInfo: oauthReqInfoWithResource },
+      state: {
+        oauthReqInfo: oauthReqInfoWithResource,
+        // Clients such as Copilot CLI send an OIDC `prompt` to add another
+        // account. Kept in the signed form state, outside the auth request.
+        forcePrompt: promptRequestsAccountSelection(
+          requestUrl.searchParams.get("prompt"),
+        ),
+        idpHint: parseIdpHint(requestUrl.searchParams.getAll("idp_hint")),
+      },
       cookieSecret: c.env.COOKIE_SECRET,
       defaultSkills,
     });
@@ -218,10 +270,12 @@ export default new Hono<{ Bindings: Env }>()
   /**
    * OAuth Authorization Endpoint (POST /oauth/authorize)
    *
-   * This route handles the approval form submission and redirects to Sentry.
+   * Approve redirects to Sentry. Deny redirects the MCP client with
+   * `error=access_denied`.
    */
   .post("/", async (c) => {
-    // Validates form submission, extracts state, and generates Set-Cookie headers to skip approval dialog next time
+    // Validates form submission and extracts state. Approve also sets cookies
+    // so the next consent prompt can remember this client and its skills.
     let result: Awaited<ReturnType<typeof parseRedirectApproval>>;
     try {
       result = await parseRedirectApproval(c.req.raw, c.env.COOKIE_SECRET);
@@ -233,11 +287,7 @@ export default new Hono<{ Bindings: Env }>()
       return c.text("Invalid request", 400);
     }
 
-    const { state, headers, skills } = result;
-
-    if (!state.oauthReqInfo) {
-      return c.text("Invalid request", 400);
-    }
+    const { state, headers, skills, decision } = result;
 
     // Store the selected skills in the OAuth request info
     // This will be passed through to the callback via the state parameter
@@ -246,7 +296,7 @@ export default new Hono<{ Bindings: Env }>()
       skills,
     };
 
-    // Reject redirect URIs with userinfo components)
+    // Reject redirect URIs with userinfo components
     if (redirectUriHasUserInfo(oauthReqWithSkills.redirectUri)) {
       logWarn("Rejected redirect URI with userinfo component", {
         loggerScope: ["cloudflare", "oauth", "authorize"],
@@ -288,6 +338,16 @@ export default new Hono<{ Bindings: Env }>()
       return c.text("Invalid request", 400);
     }
 
+    if (decision === "deny") {
+      return createAuthorizationErrorRedirect(
+        oauthReqWithSkills.redirectUri,
+        "access_denied",
+        ACCESS_DENIED_DESCRIPTION,
+        oauthReqWithSkills.state,
+        getAuthorizationServerIssuer(c.req.url),
+      );
+    }
+
     // Validate resource parameter (RFC 8707)
     const resourceFromState = oauthReqWithSkills.resource;
     if (
@@ -309,12 +369,11 @@ export default new Hono<{ Bindings: Env }>()
       );
     }
 
-    // Build signed state for redirect to Sentry (10 minute validity)
     const now = Date.now();
     const payload: OAuthState = {
-      req: oauthReqWithSkills as unknown as Record<string, unknown>,
+      req: oauthReqWithSkills,
       iat: now,
-      exp: now + 10 * 60 * 1000,
+      exp: now + UPSTREAM_STATE_TTL_MS,
     };
     const signedState = await signState(payload, c.env.COOKIE_SECRET);
 
@@ -332,11 +391,17 @@ export default new Hono<{ Bindings: Env }>()
       },
     });
 
-    return redirectToUpstream(
+    return await redirectToUpstream(
       c.env,
       c.req.raw,
       oauthReqWithSkills,
       headers,
       signedState,
+      {
+        // A hinted sign-in always ends on Sentry's consent screen, so the
+        // user sees which account and org they are connecting.
+        forcePrompt: state.forcePrompt === true || state.idpHint !== undefined,
+        idpHint: state.idpHint,
+      },
     );
   });

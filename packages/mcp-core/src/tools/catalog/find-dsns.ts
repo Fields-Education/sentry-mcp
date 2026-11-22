@@ -1,4 +1,3 @@
-import { setTag } from "@sentry/core";
 import { z } from "zod";
 import { apiServiceFromContext } from "../../internal/tool-helpers/api";
 import { defineTool } from "../../internal/tool-helpers/define";
@@ -8,6 +7,7 @@ import {
   ParamProjectSlug,
   ParamRegionUrl,
 } from "../../schema";
+import { setTargetTagsAndAttributes } from "../../telem/scope";
 import type { ServerContext } from "../../types";
 
 export const findDsnsOutputSchema = z.object({
@@ -22,19 +22,11 @@ export const findDsnsOutputSchema = z.object({
 
 export default defineTool({
   name: "find_dsns",
+  title: "Find DSNs",
   skills: ["project-management"], // DSN management is part of project setup
   requiredScopes: ["project:read"],
-  description: [
-    "List all Sentry DSNs for a specific project.",
-    "",
-    "Use this tool when you need to:",
-    "- Retrieve a SENTRY_DSN for a specific project",
-    "",
-    "<hints>",
-    "- If the user passes a parameter in the form of name/otherName, its likely in the format of <organizationSlug>/<projectSlug>.",
-    "- If only one parameter is provided, and it could be either `organizationSlug` or `projectSlug`, its probably `organizationSlug`, but if you're really uncertain you might want to call `find_organizations()` first.",
-    "</hints>",
-  ].join("\n"),
+  description:
+    "List the DSNs (client keys) for a Sentry project: the SENTRY_DSN an SDK uses to send events. Returns each key's ID, name, and DSN.",
   inputSchema: {
     organizationSlug: ParamOrganizationSlug,
     regionUrl: ParamRegionUrl.nullable().default(null),
@@ -52,8 +44,7 @@ export default defineTool({
     });
     const organizationSlug = params.organizationSlug;
 
-    setTag("organization.slug", organizationSlug);
-    setTag("project.slug", params.projectSlug);
+    setTargetTagsAndAttributes(params);
 
     const clientKeys = await apiService.listClientKeys({
       organizationSlug,

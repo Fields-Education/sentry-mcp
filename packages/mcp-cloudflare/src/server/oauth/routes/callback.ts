@@ -15,9 +15,11 @@ import { setSentryUserFromRequest } from "../../utils/sentry-user";
 import { SENTRY_TOKEN_URL } from "../constants";
 import {
   appendAuthorizationResponseIss,
+  createAuthorizationErrorRedirect,
   createOAuthFailureResponse,
   exchangeCodeForAccessToken,
   getAuthorizationServerIssuer,
+  getClientAuthorizationError,
   getOAuthCallbackFailureDetails,
   validateResourceParameter,
 } from "../helpers";
@@ -42,8 +44,20 @@ function getUpstreamTokenExpiryTimestamp(payload: {
     : Date.now() + payload.expires_in * 1000;
 }
 
+/**
+ * Parse the space-delimited `scope` from Sentry's token response (RFC 6749
+ * §5.1) into a sorted list. Returns undefined when Sentry omitted it so we
+ * don't record an empty list that looks like "no scopes granted".
+ */
+function parseUpstreamScopes(scope: string | undefined): string[] | undefined {
+  if (typeof scope !== "string") {
+    return undefined;
+  }
+  return [...new Set(scope.split(/\s+/).filter(Boolean))].sort();
+}
+
 function getUpstreamUserLabel(payload: {
-  user: { name: string | null; email?: string | null; id: string };
+  user: { name: string | null; email?: string | null | undefined; id: string };
 }): string {
   return payload.user.name ?? payload.user.email ?? payload.user.id;
 }
@@ -116,58 +130,6 @@ export default new Hono<{ Bindings: Env }>().get("/", async (c) => {
     return c.text("Authorization failed: Invalid resource parameter", 400);
   }
 
-  const oauthError = c.req.query("error") ?? undefined;
-  if (oauthError) {
-    const failure = getOAuthCallbackFailureDetails({ oauthError });
-    const logMessage = "[oauth] Upstream authorization callback error";
-    const logOptions = {
-      contexts: {
-        oauth: {
-          clientId: oauthReqInfo.clientId,
-          oauthError,
-          errorDescription: c.req.query("error_description"),
-        },
-      },
-      extra: {
-        queryKeys: Array.from(new URL(c.req.url).searchParams.keys()),
-      },
-      loggerScope: ["cloudflare", "oauth", "callback"],
-    } as const;
-    let eventId: string | undefined;
-    if (failure.shouldLogIssue) {
-      eventId = logIssue(logMessage, logOptions);
-    } else {
-      logWarn(logMessage, logOptions);
-    }
-
-    return createOAuthFailureResponse({
-      message: failure.message,
-      status: failure.status,
-      oauthError,
-      eventId,
-    });
-  }
-
-  if (!c.req.query("code")) {
-    logWarn("[oauth] Callback reached without code or upstream error", {
-      contexts: {
-        oauth: {
-          clientId: oauthReqInfo.clientId,
-        },
-      },
-      extra: {
-        queryKeys: Array.from(new URL(c.req.url).searchParams.keys()),
-      },
-      loggerScope: ["cloudflare", "oauth", "callback"],
-    });
-
-    return createOAuthFailureResponse({
-      message:
-        "The authorization callback did not include an authorization code.",
-      status: 400,
-    });
-  }
-
   // because we share a clientId with the upstream provider, we need to ensure that the
   // downstream client has been approved by the end-user (e.g. for a new client)
   // https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/265
@@ -225,6 +187,62 @@ export default new Hono<{ Bindings: Env }>().get("/", async (c) => {
     });
   }
 
+  const oauthError = c.req.query("error") ?? undefined;
+  if (oauthError) {
+    const failure = getOAuthCallbackFailureDetails({ oauthError });
+    const logMessage = "[oauth] Upstream authorization callback error";
+    const logOptions = {
+      contexts: {
+        oauth: {
+          clientId: oauthReqInfo.clientId,
+          oauthError,
+          errorDescription: c.req.query("error_description"),
+        },
+      },
+      extra: {
+        queryKeys: [...new URL(c.req.url).searchParams.keys()],
+      },
+      loggerScope: ["cloudflare", "oauth", "callback"],
+    } as const;
+    if (failure.shouldLogIssue) {
+      logIssue(logMessage, logOptions);
+    } else {
+      logWarn(logMessage, logOptions);
+    }
+
+    // State, client approval, and the redirect URI are all validated above,
+    // so relay the error to the client per RFC 6749 §4.1.2.1 with its
+    // original state instead of rendering a page the client never sees.
+    const clientError = getClientAuthorizationError(oauthError);
+    return createAuthorizationErrorRedirect(
+      oauthReqInfo.redirectUri,
+      clientError.code,
+      clientError.description,
+      oauthReqInfo.state,
+      getAuthorizationServerIssuer(c.req.url),
+    );
+  }
+
+  if (!c.req.query("code")) {
+    logWarn("[oauth] Callback reached without code or upstream error", {
+      contexts: {
+        oauth: {
+          clientId: oauthReqInfo.clientId,
+        },
+      },
+      extra: {
+        queryKeys: [...new URL(c.req.url).searchParams.keys()],
+      },
+      loggerScope: ["cloudflare", "oauth", "callback"],
+    });
+
+    return createOAuthFailureResponse({
+      message:
+        "The authorization callback did not include an authorization code.",
+      status: 400,
+    });
+  }
+
   // Exchange the code for an access token
   // Note: redirect_uri must match the one used in the authorization request
   // This is the Sentry callback URL, not the downstream MCP client's redirect URI
@@ -276,9 +294,9 @@ export default new Hono<{ Bindings: Env }>().get("/", async (c) => {
   const grantedScopes = await getScopesForSkills(validSkills);
 
   // Convert valid skills Set to array for OAuth props
-  const grantedSkills = Array.from(validSkills);
+  const grantedSkills = [...validSkills];
 
-  const resource = (oauthReqInfo as AuthRequestWithSkills).resource;
+  const resource = oauthReqInfo.resource;
   const resourceScope = parseResourceMcpConstraints(
     typeof resource === "string" ? resource : undefined,
   );
@@ -291,7 +309,7 @@ export default new Hono<{ Bindings: Env }>().get("/", async (c) => {
   const userLabel = getUpstreamUserLabel(payload);
 
   const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
-    request: oauthReqInfo as AuthRequest,
+    request: oauthReqInfo,
     userId: payload.user.id,
     metadata: {
       label: userLabel,
@@ -322,7 +340,10 @@ export default new Hono<{ Bindings: Env }>().get("/", async (c) => {
       scope: oauthReqInfo.scope.join(" "),
       // Scopes derived from skills - for backward compatibility with old MCP clients
       // that don't support grantedSkills and only understand grantedScopes
-      grantedScopes: Array.from(grantedScopes),
+      grantedScopes: [...grantedScopes],
+      // Scopes Sentry actually granted on the upstream token (from the token
+      // response), which can differ from the skill-derived grantedScopes
+      upstreamScopes: parseUpstreamScopes(payload.scope),
       grantedSkills, // Primary authorization method
 
       constraintOrganizationSlug,

@@ -6,6 +6,18 @@ export async function blobToBase64(blob: Blob): Promise<string> {
   return Buffer.from(await blob.arrayBuffer()).toString("base64");
 }
 
+/**
+ * Base64-encode raw bytes without an intermediate copy.
+ *
+ * `Buffer.from(bytes.buffer, …)` views the existing memory instead of copying
+ * it. Prefer this over a `Blob` round-trip when you already hold a `Uint8Array`.
+ */
+export function bytesToBase64(bytes: Uint8Array): string {
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString(
+    "base64",
+  );
+}
+
 export interface ImagePreviewOptions {
   maxDimension?: number;
   jpegQuality?: number;
@@ -144,7 +156,7 @@ interface PreviewCodec {
   encode: (image: RgbaImage, options: { jpegQuality: number }) => Uint8Array;
 }
 
-const PREVIEW_CODECS: Record<string, PreviewCodec> = {
+const PREVIEW_CODECS: Partial<Record<string, PreviewCodec>> = {
   "image/png": {
     contentType: "image/png",
     readDimensions: readPngDimensions,
@@ -233,7 +245,7 @@ function readJpegDimensions(bytes: Uint8Array): ImageDimensions | null {
       offset++;
     }
 
-    const marker = bytes[offset];
+    const marker = bytes.at(offset);
     offset++;
 
     if (marker === undefined || marker === 0xd9 || marker === 0xda) {

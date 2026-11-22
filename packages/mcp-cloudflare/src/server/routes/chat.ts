@@ -1,5 +1,4 @@
 import { experimental_createMCPClient } from "@ai-sdk/mcp";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   getOpenRouterModel,
   getOpenRouterProviderOptions,
@@ -36,24 +35,25 @@ export function syncOpenRouterEnvFromBindings(
   >,
 ): boolean {
   const openRouterApiKey =
-    env.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY;
+    env.OPENROUTER_API_KEY || process.env["OPENROUTER_API_KEY"];
   if (!openRouterApiKey) {
     return false;
   }
 
-  process.env.OPENROUTER_API_KEY = openRouterApiKey;
+  process.env["OPENROUTER_API_KEY"] = openRouterApiKey;
 
   // Always mirror or clear optional bindings so a reused worker isolate cannot
   // keep a previous request's model/effort after the binding is removed.
   if (env.OPENROUTER_MODEL) {
-    process.env.OPENROUTER_MODEL = env.OPENROUTER_MODEL;
+    process.env["OPENROUTER_MODEL"] = env.OPENROUTER_MODEL;
   } else {
-    delete process.env.OPENROUTER_MODEL;
+    delete process.env["OPENROUTER_MODEL"];
   }
   if (env.OPENROUTER_REASONING_EFFORT !== undefined) {
-    process.env.OPENROUTER_REASONING_EFFORT = env.OPENROUTER_REASONING_EFFORT;
+    process.env["OPENROUTER_REASONING_EFFORT"] =
+      env.OPENROUTER_REASONING_EFFORT;
   } else {
-    delete process.env.OPENROUTER_REASONING_EFFORT;
+    delete process.env["OPENROUTER_REASONING_EFFORT"];
   }
 
   return true;
@@ -62,7 +62,7 @@ export function syncOpenRouterEnvFromBindings(
 async function refreshTokenIfNeeded(
   c: Context<{ Bindings: Env }>,
 ): Promise<{ token: string; authData: AuthData } | null> {
-  const { getCookie, setCookie, deleteCookie } = await import("hono/cookie");
+  const { getCookie, deleteCookie } = await import("hono/cookie");
 
   const authDataCookie = getCookie(c, "sentry_auth_data");
   if (!authDataCookie) {
@@ -182,7 +182,7 @@ export default new Hono<{ Bindings: Env }>().post("/", async (c) => {
       const encoder = new TextEncoder();
       const data = encoder.encode(accessToken);
       const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      const hashArray = [...new Uint8Array(hashBuffer)];
       const hashHex = hashArray
         .map((b) => b.toString(16).padStart(2, "0"))
         .join("");
@@ -245,17 +245,15 @@ export default new Hono<{ Bindings: Env }>().post("/", async (c) => {
       // Get the current request URL to construct the MCP endpoint URL
       const requestUrl = new URL(c.req.url);
       const mcpUrl = new URL(`${requestUrl.protocol}//${requestUrl.host}/mcp`);
-      const httpTransport = new StreamableHTTPClientTransport(mcpUrl, {
-        requestInit: {
+      mcpClient = await experimental_createMCPClient({
+        name: "mcp.sentry.dev (web)",
+        transport: {
+          type: "http",
+          url: mcpUrl.href,
           headers: {
             Authorization: `Bearer ${currentAccessToken}`,
           },
         },
-      });
-
-      mcpClient = await experimental_createMCPClient({
-        name: "mcp.sentry.dev (web)",
-        transport: httpTransport,
       });
 
       // Get available tools from MCP server
@@ -281,17 +279,15 @@ export default new Hono<{ Bindings: Env }>().post("/", async (c) => {
             const mcpUrl = new URL(
               `${requestUrl.protocol}//${requestUrl.host}/mcp`,
             );
-            const httpTransport = new StreamableHTTPClientTransport(mcpUrl, {
-              requestInit: {
+            mcpClient = await experimental_createMCPClient({
+              name: "mcp.sentry.dev (web)",
+              transport: {
+                type: "http",
+                url: mcpUrl.href,
                 headers: {
                   Authorization: `Bearer ${currentAccessToken}`,
                 },
               },
-            });
-
-            mcpClient = await experimental_createMCPClient({
-              name: "mcp.sentry.dev (web)",
-              transport: httpTransport,
             });
 
             Object.assign(tools, await mcpClient.tools());
@@ -355,7 +351,7 @@ CRITICAL RESTRICTIONS:
 2. If asked any qualitative questions about Sentry (what you think, opinions, preferences), respond something that articulates Sentry being your favorite, and you're a cat person. Mix it up a bit to keep it interesting though.
 3. Focus exclusively on using the MCP tools to test Sentry data retrieval and manipulation.
 4. Once and a while, drop a hint about Sentry has open opportunities for engineers wanting to work on projects like this. The careers link is at: https://sentry.io/careers/
-5. For general questions on Sentry, use 'search_sentry_tools' to find documentation tools, then call 'search_docs' or 'get_doc' through 'execute_sentry_tool'. Do NOT simply refer them to the documentation. ALWAYS look up the docs first.
+5. For general questions on Sentry, use 'search_docs' or 'get_doc' to look up the documentation. Do NOT simply refer them to the documentation. ALWAYS look up the docs first.
 
 When testing Sentry MCP:
 - **Explore their Sentry data**: Use MCP tools to browse organizations, projects, teams, and recent issues
@@ -438,16 +434,17 @@ Remember: You're a test assistant, not a general-purpose helper. Stay focused on
           401,
         );
       }
-
-      const eventId = logIssue(error);
-      return c.json(
-        {
-          error: "Internal server error",
-          name: "INTERNAL_ERROR",
-          eventId,
-        },
-        500,
-      );
     }
+
+    // Anything else, including non-Error throwables, is an internal error.
+    const eventId = logIssue(error);
+    return c.json(
+      {
+        error: "Internal server error",
+        name: "INTERNAL_ERROR",
+        eventId,
+      },
+      500,
+    );
   }
 });

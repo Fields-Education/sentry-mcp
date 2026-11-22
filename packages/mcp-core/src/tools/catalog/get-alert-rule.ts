@@ -1,39 +1,51 @@
 import { z } from "zod";
-import { setTag } from "@sentry/core";
-import { defineTool } from "../../internal/tool-helpers/define";
-import { apiServiceFromContext } from "../../internal/tool-helpers/api";
+import type { Detector, IssueAlertRule } from "../../api-client/types";
 import { UserInputError } from "../../errors";
-import type { IssueAlertRule, MetricAlertRule } from "../../api-client/types";
-import type { ServerContext } from "../../types";
+import { apiServiceFromContext } from "../../internal/tool-helpers/api";
+import { defineTool } from "../../internal/tool-helpers/define";
+import { structuredResult } from "../../internal/tool-helpers/results";
 import {
   ParamOrganizationSlug,
   ParamProjectSlugOrAll,
   ParamRegionUrl,
 } from "../../schema";
-import { assertProjectRefWithinConstraint } from "./support/project-constraints";
+import { setTargetTagsAndAttributes } from "../../telem/scope";
+import type { ServerContext } from "../../types";
 import {
-  formatIssueAlertRule,
-  formatMetricAlertRule,
+  alertRuleDetailsSchema,
+  getAlertRuleDetails,
+} from "../support/alert-rule-details";
+import {
+  findExactMetricMonitorMatches,
+  getMetricMonitor,
+  metricMonitorDetailsSchema,
+  toMetricMonitorDetails,
+} from "../support/metric-monitors";
+import {
+  findExactIssueAlertRuleMatches,
   resolveIssueAlertRule,
   resolveMetricAlertRule,
 } from "./support/alerts";
+import { assertProjectRefWithinConstraint } from "./support/project-constraints";
 
 const AlertRuleKind = z
   .enum(["all", "issue", "metric"])
   .describe(
-    "Which alert rule family to inspect. Use `issue` or `metric` for numeric IDs; `all` treats the value as an exact-name lookup.",
+    "Alert family: `issue` for Alerts (workflows), `metric` for Metric Monitors. `all` matches by exact name only.",
   );
+
+const LIST_HINT = "To list alert rules, use find_alert_rules.";
 
 type AlertRuleMatch =
   | {
       kind: "issue";
       rule: IssueAlertRule;
-      projectSlug: string;
+      projectSlug?: string | undefined;
     }
   | {
       kind: "metric";
-      rule: MetricAlertRule;
-      projectSlug?: string;
+      rule: Detector;
+      projectSlug?: string | undefined;
     };
 
 function describeMatch(match: AlertRuleMatch): string {
@@ -41,41 +53,24 @@ function describeMatch(match: AlertRuleMatch): string {
   return `${match.kind} alert ${String(match.rule.id)} (${match.rule.name})${project}`;
 }
 
-function assertMetricAlertRuleWithinProject(
-  rule: MetricAlertRule,
-  projectSlug?: string,
-): void {
-  if (!projectSlug) {
-    return;
-  }
-
-  if (!rule.projects?.includes(projectSlug)) {
-    throw new UserInputError(
-      `Metric alert rule is outside project "${projectSlug}".`,
-    );
-  }
-}
+export const getAlertRuleOutputSchema = z.object({
+  alertRule: alertRuleDetailsSchema
+    .optional()
+    .describe("Set when the match is an Issue Alert."),
+  metricMonitor: metricMonitorDetailsSchema
+    .optional()
+    .describe("Set when the match is a Metric Monitor."),
+  guidance: z.string().optional(),
+});
 
 export default defineTool({
   name: "get_alert_rule",
+  title: "Get Alert Rule",
   skills: ["inspect"],
   requiredScopes: ["org:read", "project:read"],
   description: [
-    "Get details for a Sentry alert rule.",
-    "",
-    "Use this tool when you need to inspect an alert rule's exact conditions, query, triggers, and actions before explaining or planning changes.",
-    "",
-    "<examples>",
-    "get_alert_rule(organizationSlug='my-org', kind='metric', ruleIdOrName='12345')",
-    "get_alert_rule(organizationSlug='my-org', kind='issue', projectSlug='backend', ruleIdOrName='Notify backend team')",
-    "get_alert_rule(organizationSlug='my-org', projectSlug='backend', ruleIdOrName='P95 latency')",
-    "</examples>",
-    "",
-    "<hints>",
-    "- Use `kind='issue'` or `kind='metric'` for numeric IDs because issue and metric alerts use separate endpoints.",
-    "- With `kind='all'`, a digit-only `ruleIdOrName` is treated as an exact alert rule name.",
-    "- Issue alert rules are project-scoped, so `projectSlug` is required when `kind` is `issue`.",
-    "</hints>",
+    "Get one Sentry alert rule by ID or exact name: its triggers, conditions, notification actions, connected monitors, and project scope.",
+    "Prefer get_metric_monitor_details for Metric Monitors; cron and uptime monitors have their own get tools.",
   ].join("\n"),
   inputSchema: {
     organizationSlug: ParamOrganizationSlug,
@@ -83,11 +78,18 @@ export default defineTool({
     kind: AlertRuleKind.default("all"),
     projectSlug: ParamProjectSlugOrAll.nullable().default(null),
     ruleIdOrName: z
-      .string()
+      .string({
+        // The SDK rejects a missing value before the handler runs, so this
+        // message is the only hint for callers that wanted a list.
+        error: `Required: one Alert ID or exact name. ${LIST_HINT}`,
+      })
       .trim()
-      .min(1)
-      .describe("The alert rule's numeric ID, or an exact alert rule name."),
+      .min(1, `Required: one Alert ID or exact name. ${LIST_HINT}`)
+      .describe(
+        "Alert ID or exact name. With `metric`, a number is a legacy alert-rule ID; use detector:<id> for a Metric Monitor ID. With `all`, digits are matched as a name.",
+      ),
   },
+  outputSchema: getAlertRuleOutputSchema,
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
@@ -107,94 +109,66 @@ export default defineTool({
     }
     const projectSlug = context.constraints.projectSlug ?? requestedProjectSlug;
 
-    if (params.kind === "issue" && !projectSlug) {
-      throw new UserInputError(
-        "projectSlug is required when inspecting an issue alert rule.",
-      );
-    }
-
     const apiService = apiServiceFromContext(context, {
       regionUrl: params.regionUrl ?? undefined,
     });
     const organizationSlug = params.organizationSlug;
-    setTag("organization.slug", organizationSlug);
-    if (projectSlug) {
-      setTag("project.slug", projectSlug);
-    }
+    setTargetTagsAndAttributes({ organizationSlug, projectSlug });
 
     let match: AlertRuleMatch;
     if (params.kind === "issue") {
       const rule = await resolveIssueAlertRule(apiService, {
         organizationSlug,
-        projectSlug: projectSlug ?? "",
+        projectSlug,
         ruleIdOrName: params.ruleIdOrName,
       });
-      match = { kind: "issue", rule, projectSlug: projectSlug ?? "" };
+      match = { kind: "issue", rule, projectSlug };
     } else if (params.kind === "metric") {
       const rule = await resolveMetricAlertRule(apiService, {
         organizationSlug,
         projectSlug,
         ruleIdOrName: params.ruleIdOrName,
       });
-      assertMetricAlertRuleWithinProject(rule, projectSlug);
       match = { kind: "metric", rule, projectSlug };
     } else {
       const matches: AlertRuleMatch[] = [];
-      if (projectSlug) {
-        const issueRules = await apiService.listIssueAlertRules({
-          organizationSlug,
-          projectSlug,
-          query: params.ruleIdOrName,
-          limit: 100,
-        });
-        matches.push(
-          ...issueRules
-            .filter(
-              (rule) =>
-                rule.name.toLowerCase() === params.ruleIdOrName.toLowerCase(),
-            )
-            .map(
-              (rule): AlertRuleMatch => ({
-                kind: "issue",
-                rule,
-                projectSlug,
-              }),
-            ),
-        );
-      }
-
-      const metricRules = await apiService.listMetricAlertRules({
+      const issueRules = await findExactIssueAlertRuleMatches(apiService, {
         organizationSlug,
         projectSlug,
-        query: params.ruleIdOrName,
-        limit: 100,
+        ruleName: params.ruleIdOrName,
       });
       matches.push(
-        ...metricRules
-          .filter(
-            (rule) =>
-              rule.name.toLowerCase() === params.ruleIdOrName.toLowerCase(),
-          )
-          .map(
-            (rule): AlertRuleMatch => ({
-              kind: "metric",
-              rule,
-              projectSlug,
-            }),
-          ),
+        ...issueRules.map((rule): AlertRuleMatch => ({
+          kind: "issue",
+          rule,
+          projectSlug,
+        })),
       );
 
-      if (matches.length === 0) {
+      const metricMonitors = await findExactMetricMonitorMatches(apiService, {
+        organizationSlug,
+        projectSlug,
+        name: params.ruleIdOrName,
+      });
+      matches.push(
+        ...metricMonitors.map((rule): AlertRuleMatch => ({
+          kind: "metric",
+          rule,
+          projectSlug,
+        })),
+      );
+
+      const [found] = matches;
+      if (!found) {
         throw new UserInputError(
-          `Alert rule "${params.ruleIdOrName}" was not found.`,
+          `Alert rule "${params.ruleIdOrName}" was not found. ${LIST_HINT}`,
         );
       }
       if (matches.length > 1) {
         throw new UserInputError(
-          `Multiple alert rules named "${params.ruleIdOrName}" were found: ${matches.map(describeMatch).join(", ")}. Retry with the numeric rule ID and explicit kind.`,
+          `Multiple alert rules named "${params.ruleIdOrName}" were found: ${matches.map(describeMatch).join(", ")}. Retry with the Alert ID and kind=issue, or use get_metric_monitor_details with the monitor ID. ${LIST_HINT}`,
         );
       }
-      const [found] = matches;
       match =
         found.kind === "issue"
           ? {
@@ -207,37 +181,33 @@ export default defineTool({
             }
           : {
               ...found,
-              rule: await apiService.getMetricAlertRule({
+              rule: await getMetricMonitor(apiService, {
                 organizationSlug,
-                ruleId: found.rule.id,
+                projectSlug,
+                monitorId: found.rule.id,
               }),
             };
-      if (match.kind === "metric") {
-        assertMetricAlertRuleWithinProject(match.rule, match.projectSlug);
-      }
     }
 
-    const scopeLabel = projectSlug
-      ? `${organizationSlug}/${projectSlug}`
-      : organizationSlug;
-    let output = `# Alert Rule in **${scopeLabel}**\n\n`;
-    output +=
-      match.kind === "issue"
-        ? formatIssueAlertRule(match.rule, match.projectSlug, {
-            url: apiService.getIssueAlertRuleUrl(
-              organizationSlug,
-              match.rule.id,
-            ),
-          })
-        : formatMetricAlertRule(match.rule, {
-            url: apiService.getMetricAlertRuleUrl(
-              organizationSlug,
-              match.rule.id,
-            ),
-          });
-    output += "\n\n## Response Notes\n\n";
-    output +=
-      "- Use these details to inspect alert conditions, filters, routing, and notification actions before changing the rule in Sentry.\n";
-    return output;
+    if (match.kind === "issue") {
+      return structuredResult({
+        alertRule: await getAlertRuleDetails(
+          apiService,
+          organizationSlug,
+          match.rule,
+          context.constraints.projectSlug,
+        ),
+      });
+    }
+
+    return structuredResult({
+      metricMonitor: toMetricMonitorDetails(
+        apiService,
+        organizationSlug,
+        match.rule,
+      ),
+      guidance:
+        "Use get_metric_monitor_details with this monitor's id for canonical Metric Monitor inspection. Connected notification Alerts are identified by workflowIds.",
+    });
   },
 });

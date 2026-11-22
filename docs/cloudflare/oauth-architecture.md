@@ -5,6 +5,7 @@
 The Sentry MCP implementation involves **two completely separate OAuth providers**:
 
 ### 1. MCP OAuth Provider (Our Server)
+
 - **What it is**: Our own OAuth 2.0 server built with `@cloudflare/workers-oauth-provider`
 - **Purpose**: Authenticates MCP clients (like Cursor, VS Code, etc.)
 - **Tokens issued**: MCP access tokens and MCP refresh tokens
@@ -12,6 +13,7 @@ The Sentry MCP implementation involves **two completely separate OAuth providers
 - **Endpoints**: `/oauth/register`, `/oauth/authorize`, `/oauth/token`
 
 ### 2. Sentry OAuth Provider (Sentry's Server)
+
 - **What it is**: Sentry's official OAuth 2.0 server at `sentry.io`
 - **Purpose**: Authenticates users and grants API access to Sentry
 - **Tokens issued**: Sentry access tokens and Sentry refresh tokens
@@ -21,6 +23,7 @@ The Sentry MCP implementation involves **two completely separate OAuth providers
 ## High-Level Flow
 
 The system uses a dual-token approach:
+
 1. **MCP clients** authenticate with **MCP OAuth** to get MCP tokens
 2. **MCP OAuth** authenticates with **Sentry OAuth** to get Sentry tokens
 3. **MCP tokens** contain encrypted **Sentry tokens** in their payload
@@ -80,17 +83,18 @@ sequenceDiagram
 
 ### Token Types
 
-| Token Type | Issued By | Used By | Contains | Purpose |
-|------------|-----------|---------|----------|----------|
-| **MCP Access Token** | MCP OAuth Provider | MCP Clients | Encrypted Sentry tokens | Authenticate to MCP Server |
-| **MCP Refresh Token** | MCP OAuth Provider | MCP Clients | Grant reference | Refresh MCP access tokens |
-| **Sentry Access Token** | Sentry OAuth | MCP Server | User credentials | Call Sentry API |
-| **Sentry Refresh Token** | Sentry OAuth | MCP OAuth Provider | Refresh credentials | Refresh Sentry tokens |
-| **Explicit Sentry API Token** | External client or provider | MCP Server | Opaque Sentry API token | Direct remote auth with `Sentry-Bearer` |
+| Token Type                    | Issued By                   | Used By            | Contains                | Purpose                                 |
+| ----------------------------- | --------------------------- | ------------------ | ----------------------- | --------------------------------------- |
+| **MCP Access Token**          | MCP OAuth Provider          | MCP Clients        | Encrypted Sentry tokens | Authenticate to MCP Server              |
+| **MCP Refresh Token**         | MCP OAuth Provider          | MCP Clients        | Grant reference         | Refresh MCP access tokens               |
+| **Sentry Access Token**       | Sentry OAuth                | MCP Server         | User credentials        | Call Sentry API                         |
+| **Sentry Refresh Token**      | Sentry OAuth                | MCP OAuth Provider | Refresh credentials     | Refresh Sentry tokens                   |
+| **Explicit Sentry API Token** | External client or provider | MCP Server         | Opaque Sentry API token | Direct remote auth with `Sentry-Bearer` |
 
 ### Not a Simple Proxy
 
 **Important**: MCP is NOT an HTTP proxy that forwards requests. Instead:
+
 - MCP implements the **Model Context Protocol** (tools, prompts, resources)
 - Clients send MCP protocol messages, not HTTP requests
 - MCP Server executes these commands using Sentry's API
@@ -105,7 +109,7 @@ The MCP OAuth Provider is built with `@cloudflare/workers-oauth-provider` and pr
 1. **Dynamic client registration** - MCP clients can register on-demand
 2. **PKCE support** - Secure authorization code flow
 3. **Token management** - Issues and validates MCP tokens
-4. **Consent UI** - Custom approval screen for permissions
+4. **Consent UI** - Custom approval screen for permissions. Cancel redirects the MCP client to its registered `redirect_uri` with `error=access_denied` (RFC 6749 §4.1.2.1). When the client sends OIDC `prompt=select_account`, `consent`, or `login`, the Sentry redirect carries `force_prompt=1`, so Sentry shows the signed-in user and **Switch account** instead of silently reusing the browser session. Metadata advertises `prompt_values_supported: ["consent", "select_account"]`. Without `prompt`, the flow is unchanged. A single well-formed `idp_hint` (an identity provider name) is kept in the signed consent state and forwarded to Sentry after approval, together with `force_prompt=1`; Sentry decides what the hint does. A missing, repeated (RFC 6749 §3.1), or malformed hint is dropped. `idp_hint` is not advertised in metadata.
 5. **Token encryption** - Stores Sentry tokens encrypted in MCP token props
 
 ### Sentry OAuth Integration
@@ -113,7 +117,7 @@ The MCP OAuth Provider is built with `@cloudflare/workers-oauth-provider` and pr
 The integration with Sentry OAuth happens through:
 
 1. **Authorization redirect** - After MCP consent, redirect to Sentry OAuth
-2. **Code exchange** - Exchange Sentry auth code for tokens
+2. **Code exchange** - Exchange Sentry auth code for tokens. If the upstream authorization returns an `error` instead of a code, the callback first validates the signed state, the client approval cookie, and that the client's `redirect_uri` is registered, then redirects the MCP client there per RFC 6749 §4.1.2.1 with its original `state`, `iss`, and a fixed `error_description`. `access_denied` and `temporarily_unavailable` pass through; every other code becomes `server_error`. If any validation fails, the callback returns a local error and never redirects.
 3. **Token storage** - Store Sentry tokens in MCP token props
 4. **Token reuse on refresh** - Re-issue MCP tokens while the cached Sentry access token is still usable
 
@@ -163,13 +167,53 @@ const oAuthProvider = new OAuthProvider({
     "/sse": createMcpHandler("/sse", true),
     "/mcp": createMcpHandler("/mcp", false),
   },
-  defaultHandler: app,  // Hono app for non-OAuth routes
+  defaultHandler: app, // Hono app for non-OAuth routes
   authorizeEndpoint: "/oauth/authorize",
-  tokenEndpoint: "/oauth/token", 
+  tokenEndpoint: "/oauth/token",
   clientRegistrationEndpoint: "/oauth/register",
+  clientIdMetadataDocumentEnabled: true,
+  clientIdMetadataDocuments: CLIENT_ID_METADATA_DOCUMENTS,
   scopesSupported: Object.keys(SCOPES),
 });
 ```
+
+#### Operator-managed client metadata
+
+URL-based clients normally use Client ID Metadata Documents (CIMD). The provider
+fetches and validates the document during authorization, code exchange, and
+refresh. A failed fetch can block these operations; requests using an existing
+valid MCP access token do not need that lookup.
+
+The exact Codex client ID, `https://chatgpt.com/oauth/codex/client.json`, is
+registered in
+[`client-metadata.ts`](../../packages/mcp-cloudflare/src/server/oauth/client-metadata.ts)
+using its official metadata. This registration takes precedence over remote
+fetches and their cache, so an upstream `403` cannot block this client's OAuth
+flow. Other URL-based clients still use CIMD, and dynamic client registration
+is unchanged. Query-string variants of the Codex client ID are distinct clients
+and are not covered by this registration.
+
+The provider's existing metadata and client ID validation still applies. The
+registration allows only the official loopback callback URIs (with the existing
+native-client port matching), requires S256 PKCE, and does not skip user consent
+or Sentry authentication.
+
+MCP maintainers own this registration. Changes to the official document,
+including removal of a redirect URI or retirement of the client, must be reviewed
+and reflected here; they are not adopted automatically. To resume remote lookup,
+remove the entry after verifying fetches from a deployed Worker. Do not populate
+registrations from incoming requests or use a failed fetch to restore previously
+removed metadata.
+
+The `clientIdMetadataDocuments` option is provided by the version-specific pnpm
+patch in [`patches/`](../../patches/@cloudflare__workers-oauth-provider@0.10.3.patch), because provider 0.10.3 has no supported
+registration override while CIMD is enabled. It resolves registrations in the
+provider's common client lookup, covering authorization helpers and the token
+endpoint. When upgrading the provider, port the patch or adopt an equivalent
+upstream option, and run
+`pnpm --filter @sentry/mcp-cloudflare exec vitest run src/server/oauth/client-metadata.integration.test.ts`.
+The regression exercises the production provider with blocked metadata, token
+exchange and refresh, and checks that OAuth validation remains enforced.
 
 ### 2. API Handler
 
@@ -178,6 +222,7 @@ The `apiHandler` is a protected endpoint that requires valid OAuth tokens:
 - `/mcp` - MCP protocol endpoint (HTTP transport)
 
 The handler receives:
+
 - `request`: The incoming request
 - `env`: Cloudflare environment bindings
 - `ctx`: Execution context with `ctx.props` containing decrypted user data
@@ -188,16 +233,17 @@ MCP tokens contain encrypted properties including Sentry tokens:
 
 ```typescript
 interface WorkerProps {
-  id: string;                    // Sentry user ID
-  accessToken: string;            // Sentry access token
-  refreshToken?: string;          // Sentry refresh token
-  accessTokenExpiresAt?: number;  // Cached validity deadline; extended after probes
-  sessionStartedAt?: number;      // MCP grant creation timestamp
-  upstreamExpiresAt?: number;     // Original Sentry expiry timestamp
-  clientId: string;               // MCP client ID
-  scope: string;                  // MCP permissions granted
-  grantedSkills?: string[];       // Skills granted (primary authorization)
+  id: string; // Sentry user ID
+  accessToken: string; // Sentry access token
+  refreshToken?: string; // Sentry refresh token
+  accessTokenExpiresAt?: number; // Cached validity deadline; extended after probes
+  sessionStartedAt?: number; // MCP grant creation timestamp
+  upstreamExpiresAt?: number; // Original Sentry expiry timestamp
+  clientId: string; // MCP client ID
+  scope: string; // MCP permissions granted
+  grantedSkills?: string[]; // Skills granted (primary authorization)
   // grantedScopes is deprecated and will be removed Jan 1, 2026
+  upstreamScopes?: string[]; // Scopes Sentry granted on the upstream token
 }
 ```
 
@@ -216,6 +262,7 @@ The MCP server needs to support URL-based constraints like `/mcp/sentry/javascri
 The MCP handler parses URL path segments to extract organization and project constraints:
 
 **Example URLs:**
+
 - `/mcp` - No constraints (full access within granted scopes)
 - `/mcp/sentry` - Organization constraint (limited to "sentry" org)
 - `/mcp/sentry/javascript` - Organization + project constraints
@@ -240,17 +287,17 @@ When a user completes the full OAuth flow, the MCP OAuth Provider stores Sentry 
 const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
   // ... other params
   props: {
-    id: payload.user.id,                    // From Sentry
-    accessToken: payload.access_token,       // Sentry's access token
-    refreshToken: payload.refresh_token,     // Sentry's refresh token
+    id: payload.user.id, // From Sentry
+    accessToken: payload.access_token, // Sentry's access token
+    refreshToken: payload.refresh_token, // Sentry's refresh token
     accessTokenExpiresAt: Date.now() + payload.expires_in * 1000,
     sessionStartedAt: Date.now(),
     upstreamExpiresAt: Date.now() + payload.expires_in * 1000,
-    clientId: oauthReqInfo.clientId,         // MCP client ID
-    scope: oauthReqInfo.scope.join(" "),     // MCP scopes
-    grantedSkills: Array.from(validSkills),  // Skills granted (primary authorization)
+    clientId: oauthReqInfo.clientId, // MCP client ID
+    scope: oauthReqInfo.scope.join(" "), // MCP scopes
+    grantedSkills: Array.from(validSkills), // Skills granted (primary authorization)
     // ... other fields
-  }
+  },
 });
 ```
 
@@ -282,7 +329,12 @@ When an MCP client's token expires:
 
 ```typescript
 // tokenExchangeCallback in src/server/oauth/helpers.ts
-export async function tokenExchangeCallback(options, env, request, clientFamily) {
+export async function tokenExchangeCallback(
+  options,
+  env,
+  request,
+  clientFamily,
+) {
   // Only handle MCP refresh_token requests
   if (options.grantType !== "refresh_token") {
     return undefined;
@@ -297,7 +349,7 @@ export async function tokenExchangeCallback(options, env, request, clientFamily)
   if (sentryTokenExpiresAt && Number.isFinite(sentryTokenExpiresAt)) {
     const remainingMs = sentryTokenExpiresAt - Date.now();
     const SAFE_WINDOW_MS = 2 * 60 * 1000; // 2 minutes safety
-    
+
     if (remainingMs > SAFE_WINDOW_MS) {
       // Sentry token still valid - return new MCP token with cached Sentry token
       return {
@@ -366,6 +418,18 @@ response keeps the exact protected-resource query string in the RFC 8707
 `resource` parameter, while emitting a query-free `issuer` so the document
 remains valid RFC 8414 metadata.
 
+Because metadata echoes the query, clients disagree about whether a query such
+as `?utm_source=plugin` or `?codemode=false`, or a trailing slash, is part of
+the resource. A login can name `/mcp?utm_source=plugin` and a later code
+exchange or refresh name `/mcp`. The provider runs with
+`resourceMatchCanonical: true`, so the token endpoint compares the requested
+and granted resources, and `/mcp` compares a token's audience to the request
+URL, by scheme, host, port, and path only. The query and trailing slashes are
+ignored; the `/mcp/{org}/{project}` path binding is unchanged. The option is
+provided by the same version-specific pnpm patch as `clientIdMetadataDocuments`.
+When upgrading the provider, port it and run
+`pnpm --filter @sentry/mcp-cloudflare exec vitest run src/server/oauth/resource-indicator.integration.test.ts`.
+
 When a constrained OAuth request includes `resource=/mcp/{org}` or
 `resource=/mcp/{org}/{project}`, the approval page surfaces that scope to the
 user as a "Session scope" banner before permissions are granted.
@@ -422,6 +486,7 @@ The MCP Server then uses the Sentry access token from context to make Sentry API
 ### Why Not Direct Sentry OAuth?
 
 If MCP clients used Sentry OAuth directly:
+
 - Clients would need to manage Sentry token lifetime and re-authentication directly
 - No way to add MCP-specific permissions
 - Clients would have raw Sentry API access (security risk)
@@ -430,6 +495,7 @@ If MCP clients used Sentry OAuth directly:
 ### Implementation Complexity
 
 The MCP OAuth Provider (via `@cloudflare/workers-oauth-provider`) provides:
+
 - OAuth 2.0 authorization flows
 - Dynamic client registration
 - Token issuance and validation

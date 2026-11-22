@@ -1,9 +1,15 @@
 {
-  "extends": "@sentry/mcp-server-tsconfig/tsconfig.base.json",
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "outDir": "./dist",
-    "rootDir": "./src"
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["node"],
+    "noEmit": true
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "**/*.test.ts"]
+  // The package ships only the esbuild bundle of the CLI; its own source is
+  // the build script. The CLI's esbuild plugins it imports are checked here
+  // too, as this program reaches them.
+  "include": ["script"]
 }
