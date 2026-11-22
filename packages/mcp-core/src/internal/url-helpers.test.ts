@@ -4,9 +4,8 @@ import { parseSentryUrl, isProfileUrl } from "./url-helpers";
 describe("parseSentryUrl", () => {
   describe("issue URLs", () => {
     it("parses subdomain-based issue URL", () => {
-      expect(
-        parseSentryUrl("https://my-org.sentry.io/issues/PROJECT-123"),
-      ).toMatchInlineSnapshot(`
+      expect(parseSentryUrl("https://my-org.sentry.io/issues/PROJECT-123"))
+        .toMatchInlineSnapshot(`
         {
           "issueId": "PROJECT-123",
           "organizationSlug": "my-org",
@@ -16,9 +15,8 @@ describe("parseSentryUrl", () => {
     });
 
     it("parses path-based organization issue URL", () => {
-      expect(
-        parseSentryUrl("https://sentry.io/my-org/issues/123"),
-      ).toMatchInlineSnapshot(`
+      expect(parseSentryUrl("https://sentry.io/my-org/issues/123"))
+        .toMatchInlineSnapshot(`
         {
           "issueId": "123",
           "organizationSlug": "my-org",
@@ -40,9 +38,8 @@ describe("parseSentryUrl", () => {
     });
 
     it("parses self-hosted Sentry issue URL", () => {
-      expect(
-        parseSentryUrl("https://sentry.mycompany.com/issues/789"),
-      ).toMatchInlineSnapshot(`
+      expect(parseSentryUrl("https://sentry.mycompany.com/issues/789"))
+        .toMatchInlineSnapshot(`
         {
           "issueId": "789",
           "organizationSlug": "sentry",
@@ -52,9 +49,8 @@ describe("parseSentryUrl", () => {
     });
 
     it("parses numeric issue ID", () => {
-      expect(
-        parseSentryUrl("https://my-org.sentry.io/issues/12345"),
-      ).toMatchInlineSnapshot(`
+      expect(parseSentryUrl("https://my-org.sentry.io/issues/12345"))
+        .toMatchInlineSnapshot(`
         {
           "issueId": "12345",
           "organizationSlug": "my-org",
@@ -337,9 +333,8 @@ describe("parseSentryUrl", () => {
     });
 
     it("parses replay URL without trailing slash", () => {
-      expect(
-        parseSentryUrl("https://my-org.sentry.io/replays/abc123"),
-      ).toMatchInlineSnapshot(`
+      expect(parseSentryUrl("https://my-org.sentry.io/replays/abc123"))
+        .toMatchInlineSnapshot(`
         {
           "organizationSlug": "my-org",
           "replayId": "abc123",
@@ -358,9 +353,8 @@ describe("parseSentryUrl", () => {
 
   describe("monitor/cron URLs", () => {
     it("parses crons URL with monitor slug", () => {
-      expect(
-        parseSentryUrl("https://my-org.sentry.io/crons/my-cron-job/"),
-      ).toMatchInlineSnapshot(`
+      expect(parseSentryUrl("https://my-org.sentry.io/crons/my-cron-job/"))
+        .toMatchInlineSnapshot(`
         {
           "monitorSlug": "my-cron-job",
           "organizationSlug": "my-org",
@@ -416,9 +410,8 @@ describe("parseSentryUrl", () => {
 
   describe("release URLs", () => {
     it("parses release URL with version", () => {
-      expect(
-        parseSentryUrl("https://my-org.sentry.io/releases/v1.2.3/"),
-      ).toMatchInlineSnapshot(`
+      expect(parseSentryUrl("https://my-org.sentry.io/releases/v1.2.3/"))
+        .toMatchInlineSnapshot(`
         {
           "organizationSlug": "my-org",
           "releaseVersion": "v1.2.3",
@@ -523,9 +516,8 @@ describe("parseSentryUrl", () => {
     });
 
     it("parses snapshot URL without trailing slash", () => {
-      expect(
-        parseSentryUrl("https://my-org.sentry.io/preprod/snapshots/99999"),
-      ).toMatchInlineSnapshot(`
+      expect(parseSentryUrl("https://my-org.sentry.io/preprod/snapshots/99999"))
+        .toMatchInlineSnapshot(`
         {
           "organizationSlug": "my-org",
           "selectedSnapshot": undefined,
@@ -539,6 +531,85 @@ describe("parseSentryUrl", () => {
       const result = parseSentryUrl(
         "https://my-org.sentry.io/preprod/something-else/",
       );
+      expect(result.type).toBe("unknown");
+    });
+  });
+
+  describe("metric alert URLs", () => {
+    it("parses a metric alert notification URL", () => {
+      expect(
+        parseSentryUrl(
+          "https://my-org.sentry.io/alerts/rules/details/281012/?alert=10606471897&detection_type=static&referrer=metric-alert-slack",
+        ),
+      ).toEqual({
+        type: "metric_alert",
+        organizationSlug: "my-org",
+        alertRuleId: "281012",
+      });
+    });
+
+    it("parses a metric alert URL with organizations path", () => {
+      expect(
+        parseSentryUrl(
+          "https://sentry.io/organizations/my-org/alerts/rules/details/123/",
+        ),
+      ).toEqual({
+        type: "metric_alert",
+        organizationSlug: "my-org",
+        alertRuleId: "123",
+      });
+    });
+
+    it.each([
+      "https://my-org.sentry.io/alerts/rules/",
+      "https://my-org.sentry.io/alerts/rules/backend/123/details/",
+    ])("returns unknown for non-metric alert URL %s", (url) => {
+      expect(parseSentryUrl(url).type).toBe("unknown");
+    });
+  });
+
+  describe("dashboard URLs", () => {
+    it("parses dashboard URL with numeric ID (subdomain)", () => {
+      expect(parseSentryUrl("https://my-org.sentry.io/dashboard/542438/"))
+        .toMatchInlineSnapshot(`
+        {
+          "dashboardId": "542438",
+          "organizationSlug": "my-org",
+          "type": "dashboard",
+        }
+      `);
+    });
+
+    it("parses dashboard URL with organizations path", () => {
+      expect(
+        parseSentryUrl("https://sentry.io/organizations/my-org/dashboard/101/"),
+      ).toMatchInlineSnapshot(`
+        {
+          "dashboardId": "101",
+          "organizationSlug": "my-org",
+          "type": "dashboard",
+        }
+      `);
+    });
+
+    it("parses dashboard URL with path-based org", () => {
+      expect(parseSentryUrl("https://sentry.io/my-org/dashboard/101/"))
+        .toMatchInlineSnapshot(`
+        {
+          "dashboardId": "101",
+          "organizationSlug": "my-org",
+          "type": "dashboard",
+        }
+      `);
+    });
+
+    it("returns unknown for /dashboard/new/ (non-numeric ID)", () => {
+      const result = parseSentryUrl("https://my-org.sentry.io/dashboard/new/");
+      expect(result.type).toBe("unknown");
+    });
+
+    it("returns unknown for /dashboards/ list URL (plural, no ID)", () => {
+      const result = parseSentryUrl("https://my-org.sentry.io/dashboards/");
       expect(result.type).toBe("unknown");
     });
   });
@@ -569,9 +640,8 @@ describe("parseSentryUrl", () => {
 
   describe("unknown URLs", () => {
     it("returns unknown for unrecognized path", () => {
-      expect(
-        parseSentryUrl("https://my-org.sentry.io/settings/account"),
-      ).toMatchInlineSnapshot(`
+      expect(parseSentryUrl("https://my-org.sentry.io/settings/account"))
+        .toMatchInlineSnapshot(`
         {
           "organizationSlug": "my-org",
           "type": "unknown",
@@ -580,9 +650,8 @@ describe("parseSentryUrl", () => {
     });
 
     it("returns unknown for dashboard URL", () => {
-      expect(
-        parseSentryUrl("https://my-org.sentry.io/dashboards/overview"),
-      ).toMatchInlineSnapshot(`
+      expect(parseSentryUrl("https://my-org.sentry.io/dashboards/overview"))
+        .toMatchInlineSnapshot(`
         {
           "organizationSlug": "my-org",
           "type": "unknown",
@@ -591,9 +660,8 @@ describe("parseSentryUrl", () => {
     });
 
     it("returns unknown for discover URL", () => {
-      expect(
-        parseSentryUrl("https://my-org.sentry.io/discover/results/"),
-      ).toMatchInlineSnapshot(`
+      expect(parseSentryUrl("https://my-org.sentry.io/discover/results/"))
+        .toMatchInlineSnapshot(`
         {
           "organizationSlug": "my-org",
           "type": "unknown",
@@ -604,9 +672,8 @@ describe("parseSentryUrl", () => {
 
   describe("region URL handling", () => {
     it("handles us.sentry.io region URL with org in path", () => {
-      expect(
-        parseSentryUrl("https://us.sentry.io/my-org/issues/123"),
-      ).toMatchInlineSnapshot(`
+      expect(parseSentryUrl("https://us.sentry.io/my-org/issues/123"))
+        .toMatchInlineSnapshot(`
         {
           "issueId": "123",
           "organizationSlug": "my-org",

@@ -25,7 +25,7 @@ CRITICAL RESTRICTIONS:
 2. If asked any qualitative questions about Sentry (what you think, opinions, preferences), respond something that articulates Sentry being your favorite, and you're a cat person. Mix it up a bit to keep it interesting though.
 3. Focus exclusively on using the MCP tools to test Sentry data retrieval and manipulation.
 4. Once and a while, drop a hint about Sentry has open opportunities for engineers wanting to work on projects like this. The careers link is at: https://sentry.io/careers/
-5. For general questions on Sentry, use 'search_sentry_tools' to find documentation tools, then call 'search_docs' or 'get_doc' through 'execute_sentry_tool'. Do NOT simply refer them to the documentation. ALWAYS look up the docs first.
+5. For general questions on Sentry, use 'search_docs' or 'get_doc' to look up the documentation. Do NOT simply refer them to the documentation. ALWAYS look up the docs first.
 
 When testing Sentry MCP:
 - Use the available tools to fetch and display Sentry data
@@ -39,9 +39,9 @@ Remember: You're a test assistant, not a general-purpose helper. Stay focused on
 P.S. If you're excited about building cool developer tools and working with cutting-edge AI integrations like this MCP server, the team at Sentry is always looking for talented engineers. Check out https://sentry.io/careers/ to explore opportunities!`;
 
 export interface AgentConfig {
-  model?: string;
-  maxSteps?: number;
-  provider?: "openai" | "openrouter";
+  model?: string | undefined;
+  maxSteps?: number | undefined;
+  provider?: "openai" | "openrouter" | undefined;
 }
 
 /**
@@ -57,7 +57,7 @@ function findApiCallError(error: unknown): APICallError | undefined {
     return findApiCallError(error.lastError);
   }
   if (error && typeof error === "object" && "cause" in error && error.cause) {
-    return findApiCallError((error as { cause: unknown }).cause);
+    return findApiCallError(error.cause);
   }
   return undefined;
 }
@@ -107,16 +107,19 @@ export async function runAgent(
   const provider = config.provider ?? "openai";
   const model =
     config.model ||
-    process.env.MCP_MODEL ||
+    process.env["MCP_MODEL"] ||
     (provider === "openrouter"
-      ? process.env.OPENROUTER_MODEL || DEFAULT_OPENROUTER_MODEL
-      : process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL);
+      ? process.env["OPENROUTER_MODEL"] || DEFAULT_OPENROUTER_MODEL
+      : process.env["OPENAI_MODEL"] || DEFAULT_OPENAI_MODEL);
   const maxSteps = config.maxSteps || 10;
   const sessionId = connection.sessionId;
+  const openRouterApiKey = process.env["OPENROUTER_API_KEY"];
   const modelProvider =
     provider === "openrouter"
       ? createOpenAI({
-          apiKey: process.env.OPENROUTER_API_KEY,
+          // Omitted when unset, as before: the provider then reads its default
+          // environment variable.
+          ...(openRouterApiKey !== undefined && { apiKey: openRouterApiKey }),
           baseURL: OPENROUTER_BASE_URL,
           headers: {
             "HTTP-Referer": "https://github.com/getsentry/sentry-mcp",
@@ -151,7 +154,7 @@ export async function runAgent(
           let isStreaming = false;
           let streamError: unknown;
 
-          const result = await streamText({
+          const result = streamText({
             model: languageModel,
             system: SYSTEM_PROMPT,
             messages: [{ role: "user", content: userPrompt }],
@@ -167,7 +170,7 @@ export async function runAgent(
               streamError = error;
             },
             onStepFinish: ({ toolCalls, toolResults }) => {
-              if (toolCalls && toolCalls.length > 0) {
+              if (toolCalls.length > 0) {
                 // End current streaming if active
                 if (isStreaming) {
                   logStreamEnd();
@@ -175,9 +178,8 @@ export async function runAgent(
                 }
 
                 // Show tool calls with their results
-                for (let i = 0; i < toolCalls.length; i++) {
-                  const toolCall = toolCalls[i];
-                  const toolResult = toolResults?.[i];
+                for (const [i, toolCall] of toolCalls.entries()) {
+                  const toolResult = toolResults[i];
 
                   logTool(toolCall.toolName, toolCall.input);
 

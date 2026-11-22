@@ -10,11 +10,14 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: deploy-fields
+  cancel-in-progress: false
+
 jobs:
   deploy:
     name: Deploy Fields MCP
     runs-on: blacksmith-4vcpu-ubuntu-2404
-
 
     steps:
       - uses: actions/checkout@v6
@@ -24,7 +27,9 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: pnpm/action-setup@v4
+      # Matches upstream; older action versions can't install pnpm 12.
+      # pnpm/action-setup@v6.1.1
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115
         name: Install pnpm
         with:
           run_install: false
@@ -43,11 +48,18 @@ jobs:
             ${{ runner.os }}-pnpm-store-
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      # The Fields worker is upstream's mcp-cloudflare package built with our
+      # wrangler configs (worker names, KV ids, rate limits).
+      - name: Apply Fields wrangler configs
+        run: |
+          node packages/mcp-cloudflare-fields/check-bindings.mjs
+          cp packages/mcp-cloudflare-fields/wrangler.jsonc packages/mcp-cloudflare-fields/wrangler.canary.jsonc packages/mcp-cloudflare/
 
       # === BUILD ===
       - name: Build
-        run: pnpm -w run build
+        run: pnpm --filter '@sentry/mcp-cloudflare...' run build
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           # Override Sentry source map destination to Fields self-hosted instance
@@ -62,15 +74,13 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: packages/mcp-cloudflare-fields
+          workingDirectory: packages/mcp-cloudflare
           command: deploy --config wrangler.canary.jsonc
           packageManager: pnpm
 
       - name: Wait for Canary to Propagate
         if: success()
-        run: |
-          echo "Waiting 30 seconds for canary deployment to propagate..."
-          sleep 30
+        run: sleep 30
 
       # === SMOKE TEST CANARY ===
       - name: Run Smoke Tests on Canary
@@ -79,7 +89,6 @@ jobs:
         env:
           PREVIEW_URL: https://sentry-mcp-fields-canary.${{ secrets.CLOUDFLARE_SUBDOMAIN }}.workers.dev
         run: |
-          echo "Running smoke tests against canary worker..."
           cd packages/smoke-tests
           pnpm test:ci
 
@@ -99,15 +108,13 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: packages/mcp-cloudflare-fields
+          workingDirectory: packages/mcp-cloudflare
           command: deploy
           packageManager: pnpm
 
       - name: Wait for Production to Propagate
         if: steps.deploy_production.outcome == 'success'
-        run: |
-          echo "Waiting 30 seconds for production deployment to propagate..."
-          sleep 30
+        run: sleep 30
 
       # === SMOKE TEST PRODUCTION ===
       - name: Run Smoke Tests on Production
@@ -116,7 +123,6 @@ jobs:
         env:
           PREVIEW_URL: https://sentry-mcp-fields.${{ secrets.CLOUDFLARE_SUBDOMAIN }}.workers.dev
         run: |
-          echo "Running smoke tests on production..."
           cd packages/smoke-tests
           pnpm test:ci
 
@@ -135,7 +141,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: packages/mcp-cloudflare-fields
+          workingDirectory: packages/mcp-cloudflare
           command: rollback
           packageManager: pnpm
         continue-on-error: true

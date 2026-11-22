@@ -1,17 +1,17 @@
-import { setTag } from "@sentry/core";
 import { z } from "zod";
-import { defineTool } from "../../internal/tool-helpers/define";
-import { apiServiceFromContext } from "../../internal/tool-helpers/api";
-import { structuredResult } from "../../internal/tool-helpers/results";
-import { UserInputError } from "../../errors";
 import type { Team } from "../../api-client/index";
-import type { ServerContext } from "../../types";
+import { UserInputError } from "../../errors";
+import { apiServiceFromContext } from "../../internal/tool-helpers/api";
+import { defineTool } from "../../internal/tool-helpers/define";
+import { structuredResult } from "../../internal/tool-helpers/results";
 import {
   ParamOrganizationSlug,
   ParamProjectSlug,
   ParamRegionUrl,
   ParamTeamSlug,
 } from "../../schema";
+import { setTargetTagsAndAttributes } from "../../telem/scope";
+import type { ServerContext } from "../../types";
 
 const assignedTeamSchema = z.object({
   id: z.string(),
@@ -34,27 +34,11 @@ function mapTeam(team: Team) {
 
 export default defineTool({
   name: "remove_team_from_project",
+  title: "Remove Team from Project",
   skills: ["project-management"],
   requiredScopes: ["project:write", "team:read", "org:read"],
-  description: [
-    "Revoke a team's access to an existing Sentry project.",
-    "",
-    "Use this tool when you need to:",
-    "- Remove a team from a project",
-    "- Revoke team access without changing project metadata",
-    "- Check project team assignments before removing access",
-    "",
-    "Be careful when using this tool because it revokes project access.",
-    "",
-    "<examples>",
-    "remove_team_from_project(organizationSlug='my-organization', projectSlug='my-project', teamSlug='my-team')",
-    "</examples>",
-    "",
-    "<hints>",
-    "- The team must already be assigned to the project.",
-    "- This tool will not remove the last team assigned to a project.",
-    "</hints>",
-  ].join("\n"),
+  description:
+    "Revoke a team's access to a Sentry project. Returns the project's remaining teams. Refuses to remove the project's last team.",
   inputSchema: {
     organizationSlug: ParamOrganizationSlug,
     regionUrl: ParamRegionUrl.nullable().default(null),
@@ -73,9 +57,7 @@ export default defineTool({
     });
     const organizationSlug = params.organizationSlug;
 
-    setTag("organization.slug", organizationSlug);
-    setTag("project.slug", params.projectSlug);
-    setTag("team.slug", params.teamSlug);
+    setTargetTagsAndAttributes(params);
 
     const currentTeams = await apiService.listProjectTeams({
       organizationSlug,

@@ -62,6 +62,22 @@ describe("app", () => {
     });
   });
 
+  describe("GET /_health/version", () => {
+    it("exposes the version actually serving the request", async () => {
+      const res = await app.request(
+        "/_health/version",
+        { headers: TEST_HEADERS },
+        {
+          CF_VERSION_METADATA: { id: "11111111-1111-4111-8111-111111111111" },
+        },
+      );
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        id: "11111111-1111-4111-8111-111111111111",
+      });
+    });
+  });
+
   describe("GET /llms.txt", () => {
     it("should return comprehensive llms.txt content", async () => {
       const res = await app.request("https://mcp.sentry.dev/llms.txt", {
@@ -128,6 +144,7 @@ describe("app", () => {
           "project:write",
           "team:write",
           "event:write",
+          "alerts:write",
         ],
         bearer_methods_supported: ["header"],
       });
@@ -150,6 +167,7 @@ describe("app", () => {
           "project:write",
           "team:write",
           "event:write",
+          "alerts:write",
         ],
         bearer_methods_supported: ["header"],
       });
@@ -172,6 +190,7 @@ describe("app", () => {
           "project:write",
           "team:write",
           "event:write",
+          "alerts:write",
         ],
         bearer_methods_supported: ["header"],
       });
@@ -194,6 +213,7 @@ describe("app", () => {
           "project:write",
           "team:write",
           "event:write",
+          "alerts:write",
         ],
         bearer_methods_supported: ["header"],
       });
@@ -216,6 +236,7 @@ describe("app", () => {
           "project:write",
           "team:write",
           "event:write",
+          "alerts:write",
         ],
         bearer_methods_supported: ["header"],
       });
@@ -241,6 +262,7 @@ describe("app", () => {
           "project:write",
           "team:write",
           "event:write",
+          "alerts:write",
         ],
         bearer_methods_supported: ["header"],
       });
@@ -269,6 +291,7 @@ describe("app", () => {
           "project:write",
           "team:write",
           "event:write",
+          "alerts:write",
         ],
         response_types_supported: ["code"],
         response_modes_supported: ["query"],
@@ -279,7 +302,8 @@ describe("app", () => {
           "none",
         ],
         revocation_endpoint: "https://mcp.sentry.dev/oauth/token",
-        code_challenge_methods_supported: ["plain", "S256"],
+        code_challenge_methods_supported: ["S256"],
+        prompt_values_supported: ["consent", "select_account"],
       });
     });
 
@@ -292,13 +316,14 @@ describe("app", () => {
       expect(res.status).toBe(200);
 
       const json = await res.json();
-      expect(json.authorization_endpoint).toBe(
-        "https://mcp.sentry.dev/oauth/authorize?resource=https%3A%2F%2Fmcp.sentry.dev%2Fmcp%2Fsentry%2Fmcp-server%3Fexperimental%3D1",
+      expect(json).toMatchObject({
+        authorization_endpoint:
+          "https://mcp.sentry.dev/oauth/authorize?resource=https%3A%2F%2Fmcp.sentry.dev%2Fmcp%2Fsentry%2Fmcp-server%3Fexperimental%3D1",
+        issuer: "https://mcp.sentry.dev/mcp/sentry/mcp-server",
+      });
+      expect(json).not.toHaveProperty(
+        "authorization_response_iss_parameter_supported",
       );
-      expect(json.issuer).toBe("https://mcp.sentry.dev/mcp/sentry/mcp-server");
-      expect(
-        json.authorization_response_iss_parameter_supported,
-      ).toBeUndefined();
     });
 
     // Regression: path-scoped AS metadata is a Claude/compat discovery path.
@@ -313,13 +338,14 @@ describe("app", () => {
       expect(res.status).toBe(200);
 
       const json = await res.json();
-      expect(json.issuer).toBe("https://mcp.sentry.dev/mcp");
-      expect(json.authorization_endpoint).toBe(
-        "https://mcp.sentry.dev/oauth/authorize?resource=https%3A%2F%2Fmcp.sentry.dev%2Fmcp%3Futm_source%3Dplugin",
+      expect(json).toMatchObject({
+        issuer: "https://mcp.sentry.dev/mcp",
+        authorization_endpoint:
+          "https://mcp.sentry.dev/oauth/authorize?resource=https%3A%2F%2Fmcp.sentry.dev%2Fmcp%3Futm_source%3Dplugin",
+      });
+      expect(json).not.toHaveProperty(
+        "authorization_response_iss_parameter_supported",
       );
-      expect(
-        json.authorization_response_iss_parameter_supported,
-      ).toBeUndefined();
     });
   });
 });

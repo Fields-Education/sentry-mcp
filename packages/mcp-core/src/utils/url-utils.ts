@@ -1,3 +1,5 @@
+import { getColumnsAndAggregates } from "@sentry/toolkit-core/events-fields";
+import { isSentryHost } from "@sentry/toolkit-core/sentry-host";
 import type { SentryProtocol } from "../types";
 import {
   type EventsDataset,
@@ -5,47 +7,46 @@ import {
   isProfilesDataset,
 } from "./events-datasets";
 
-/**
- * Determines if a Sentry instance is SaaS or self-hosted based on the host.
- * @param host The Sentry host (e.g., "sentry.io" or "sentry.company.com")
- * @returns true if SaaS instance, false if self-hosted
- */
-export function isSentryHost(host: string): boolean {
-  return host === "sentry.io" || host.endsWith(".sentry.io");
+/** Hosts that use the public SaaS control host and organization web subdomains. */
+export function isPublicSentryHost(host: string): boolean {
+  return isSentryHost(host) && !host.endsWith(".my.sentry.io");
 }
+
+// The Explore page's `mode` URL parameter.
+export type ExploreMode = "aggregate" | "samples";
 
 export interface TraceMetricIdentifier {
   name: string;
   type: string;
-  unit?: string;
+  unit?: string | undefined;
 }
 
 export interface TraceMetricsExplorerUrlOptions {
   query: string;
-  projectId?: string;
-  statsPeriod?: string;
-  start?: string;
-  end?: string;
-  sort?: string;
-  aggregateFunctions?: string[];
-  groupByFields?: string[];
+  projectId?: string | undefined;
+  statsPeriod?: string | undefined;
+  start?: string | undefined;
+  end?: string | undefined;
+  sort?: string | undefined;
+  aggregateFunctions?: string[] | undefined;
+  groupByFields?: string[] | undefined;
   traceMetrics?: TraceMetricIdentifier[];
 }
 
 export interface ProfilesExplorerUrlOptions {
   query: string;
-  projectId?: string;
-  statsPeriod?: string;
-  start?: string;
-  end?: string;
-  sort?: string;
-  fields?: string[];
-  aggregateFunctions?: string[];
-  groupByFields?: string[];
+  projectId?: string | undefined;
+  statsPeriod?: string | undefined;
+  start?: string | undefined;
+  end?: string | undefined;
+  sort?: string | undefined;
+  fields?: string[] | undefined;
+  aggregateFunctions?: string[] | undefined;
+  groupByFields?: string[] | undefined;
 }
 
 export interface DashboardUrlOptions {
-  projectId?: string | number | null;
+  projectId?: string | number | null | undefined;
   statsPeriod?: string | null;
 }
 
@@ -58,9 +59,9 @@ function deriveSelectedFields(
     return fields;
   }
 
-  return Array.from(
-    new Set([...(groupByFields ?? []), ...(aggregateFunctions ?? [])]),
-  );
+  return [
+    ...new Set([...(groupByFields ?? []), ...(aggregateFunctions ?? [])]),
+  ];
 }
 
 function getSentryWebBaseUrl(
@@ -69,7 +70,7 @@ function getSentryWebBaseUrl(
   path: string,
   protocol: SentryProtocol = "https",
 ): string {
-  const isSaas = isSentryHost(host);
+  const isSaas = isPublicSentryHost(host);
   const webHost = isSaas ? "sentry.io" : host;
   return isSaas
     ? `${protocol}://${organizationSlug}.${webHost}${path}`
@@ -98,20 +99,17 @@ function extractTraceMetricFromAggregate(
     return null;
   }
 
-  const args = match[1]
+  const args = (match[1] ?? "")
     .split(",")
     .map((arg) => arg.trim())
     .filter((arg) => arg.length > 0);
 
-  if (args.length < 4) {
+  const [, name, type, unit] = args;
+  if (name === undefined || type === undefined || unit === undefined) {
     return null;
   }
 
-  return normalizeTraceMetric({
-    name: args[1]!,
-    type: args[2]!,
-    unit: args[3],
-  });
+  return normalizeTraceMetric({ name, type, unit });
 }
 
 function extractTraceMetricFromQuery(
@@ -155,7 +153,7 @@ function dedupeTraceMetrics(
 function buildMetricQueryState(params: {
   metric: TraceMetricIdentifier;
   query: string;
-  mode: "aggregate" | "samples";
+  mode: ExploreMode;
   yAxes: string[];
   groupByFields?: string[];
   aggregateSortBys?: Array<{ field: string; kind: "asc" | "desc" }>;
@@ -516,9 +514,9 @@ export function getReplaysSearchUrl(
   host: string,
   organizationSlug: string,
   options: {
-    query?: string | null;
-    projectSlugOrId?: string;
-    environment?: string | string[] | null;
+    query?: string | null | undefined;
+    projectSlugOrId?: string | undefined;
+    environment?: string | string[] | null | undefined;
     sort?: string | null;
     statsPeriod?: string | null;
     start?: string | null;
@@ -590,6 +588,21 @@ export function getTraceUrl(
   );
 }
 
+export function getLogUrl(
+  host: string,
+  organizationSlug: string,
+  logId: string,
+  protocol: SentryProtocol = "https",
+): string {
+  const urlParams = new URLSearchParams({ project: "-1", logsPinned: logId });
+  return getSentryWebBaseUrl(
+    host,
+    organizationSlug,
+    `/explore/logs/?${urlParams.toString()}`,
+    protocol,
+  );
+}
+
 /**
  * Generates a Sentry replay URL.
  * @param host The Sentry host (may include regional subdomain for API access)
@@ -654,12 +667,13 @@ export function extractConversationIdFromSearchQuery(
 
   const pattern = /gen_ai\.conversation\.id:(?:"([^"]+)"|([^\s)]+))/g;
   const matches = [...query.matchAll(pattern)];
-  if (matches.length !== 1) {
+  const [match] = matches;
+  if (matches.length !== 1 || !match) {
     return undefined;
   }
 
-  const conversationId = matches[0][1] ?? matches[0][2];
-  if (conversationId.startsWith("[")) {
+  const conversationId = match[1] ?? match[2];
+  if (conversationId === undefined || conversationId.startsWith("[")) {
     return undefined;
   }
 
@@ -673,12 +687,12 @@ export function getAIConversationsUrl(
   host: string,
   organizationSlug: string,
   options: {
-    query?: string;
-    project?: string[];
-    environment?: string | string[];
-    statsPeriod?: string;
-    start?: string;
-    end?: string;
+    query?: string | undefined;
+    project?: string[] | undefined;
+    environment?: string | string[] | undefined;
+    statsPeriod?: string | undefined;
+    start?: string | undefined;
+    end?: string | undefined;
   } = {},
   protocol: SentryProtocol = "https",
 ): string {
@@ -775,12 +789,11 @@ export function getEventsExplorerUrl(
   protocol: SentryProtocol = "https",
 ): string {
   if (isMetricsDataset(dataset)) {
+    const derived = fields ? getColumnsAndAggregates(fields) : undefined;
     const derivedAggregateFunctions =
-      explorerOptions?.aggregateFunctions ??
-      fields?.filter((field) => field.includes("(") && field.includes(")"));
+      explorerOptions?.aggregateFunctions ?? derived?.aggregates;
     const derivedGroupByFields =
-      explorerOptions?.groupByFields ??
-      fields?.filter((field) => !field.includes("(") && !field.includes(")"));
+      explorerOptions?.groupByFields ?? derived?.columns;
 
     return getTraceMetricsExploreUrl(
       host,
@@ -797,12 +810,11 @@ export function getEventsExplorerUrl(
   }
 
   if (isProfilesDataset(dataset)) {
+    const derived = fields ? getColumnsAndAggregates(fields) : undefined;
     const derivedAggregateFunctions =
-      explorerOptions?.aggregateFunctions ??
-      fields?.filter((field) => field.includes("(") && field.includes(")"));
+      explorerOptions?.aggregateFunctions ?? derived?.aggregates;
     const derivedGroupByFields =
-      explorerOptions?.groupByFields ??
-      fields?.filter((field) => !field.includes("(") && !field.includes(")"));
+      explorerOptions?.groupByFields ?? derived?.columns;
 
     return getProfilingExplorerUrl(
       host,

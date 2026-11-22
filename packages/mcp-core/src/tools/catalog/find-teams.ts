@@ -1,15 +1,16 @@
-import { setTag } from "@sentry/core";
 import { z } from "zod";
-import { defineTool } from "../../internal/tool-helpers/define";
-import { apiServiceFromContext } from "../../internal/tool-helpers/api";
-import { structuredResult } from "../../internal/tool-helpers/results";
 import { UserInputError } from "../../errors";
-import type { ServerContext } from "../../types";
+import { apiServiceFromContext } from "../../internal/tool-helpers/api";
+import { defineTool } from "../../internal/tool-helpers/define";
+import { structuredResult } from "../../internal/tool-helpers/results";
 import {
+  ParamCursor,
   ParamOrganizationSlug,
   ParamRegionUrl,
   ParamSearchQuery,
 } from "../../schema";
+import { setTargetTagsAndAttributes } from "../../telem/scope";
+import type { ServerContext } from "../../types";
 
 const RESULT_LIMIT = 25;
 
@@ -21,26 +22,20 @@ export const findTeamsOutputSchema = z.object({
     }),
   ),
   hasMore: z.boolean(),
+  nextCursor: z.string().nullable(),
 });
 
 export default defineTool({
   name: "find_teams",
+  title: "Find Teams",
   skills: ["inspect", "triage", "project-management"], // Team viewing and management
   requiredScopes: ["team:read"],
-  description: [
-    "Find teams in an organization in Sentry.",
-    "",
-    "Use this tool when you need to:",
-    "- View teams in a Sentry organization",
-    "- Find a team's slug and numeric ID to aid other tool requests",
-    "- Search for specific teams by name or slug",
-    "",
-    `Returns up to ${RESULT_LIMIT} results. When hasMore is true, use the query parameter to narrow down results.`,
-  ].join("\n"),
+  description: `List or search teams in a Sentry organization. Returns each team's slug and numeric ID, ${RESULT_LIMIT} per page.`,
   inputSchema: {
     organizationSlug: ParamOrganizationSlug,
     regionUrl: ParamRegionUrl.nullable().default(null),
     query: ParamSearchQuery.nullable().default(null),
+    cursor: ParamCursor.nullable().default(null),
   },
   annotations: {
     readOnlyHint: true,
@@ -60,18 +55,18 @@ export default defineTool({
       );
     }
 
-    setTag("organization.slug", organizationSlug);
+    setTargetTagsAndAttributes({ organizationSlug });
 
-    const teams = await apiService.listTeams(organizationSlug, {
+    const { teams, nextCursor } = await apiService.listTeams(organizationSlug, {
       query: params.query ?? undefined,
-      limit: RESULT_LIMIT + 1,
+      limit: RESULT_LIMIT,
+      cursor: params.cursor ?? undefined,
     });
 
     return structuredResult({
-      teams: teams
-        .slice(0, RESULT_LIMIT)
-        .map((team) => ({ slug: team.slug, id: String(team.id) })),
-      hasMore: teams.length > RESULT_LIMIT,
+      teams: teams.map((team) => ({ slug: team.slug, id: String(team.id) })),
+      hasMore: nextCursor !== null,
+      nextCursor,
     });
   },
 });

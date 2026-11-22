@@ -1,4 +1,3 @@
-import { setTag } from "@sentry/core";
 import { z } from "zod";
 import { apiServiceFromContext } from "../../internal/tool-helpers/api";
 import { defineTool } from "../../internal/tool-helpers/define";
@@ -8,6 +7,7 @@ import {
   ParamProjectSlugOrAll,
   ParamRegionUrl,
 } from "../../schema";
+import { setTargetTagsAndAttributes } from "../../telem/scope";
 import type { ServerContext } from "../../types";
 import { assertProjectRefWithinConstraint } from "./support/project-constraints";
 import {
@@ -22,23 +22,13 @@ export const findUptimeMonitorsOutputSchema = z.object({
 
 export default defineTool({
   name: "find_uptime_monitors",
+  title: "Find Uptime Monitors",
   skills: ["inspect"],
   requiredScopes: ["org:read", "project:read"],
   description: [
-    "Find Sentry uptime monitors.",
-    "",
-    "Use this tool when you need to:",
-    "- List HTTP uptime monitors in an organization",
-    "- Find a monitor by name or URL before getting details",
-    "- Check monitor status, owner, project, interval, or target URL",
-    "- When `hasMore` is true, narrow results with project, environment, owner, or query filters",
-    "",
-    "This is separate from cron monitors (`find_monitors`).",
-    "",
-    "<examples>",
-    "find_uptime_monitors(organizationSlug='my-organization')",
-    "find_uptime_monitors(organizationSlug='my-organization', projectSlug='backend', query='api')",
-    "</examples>",
+    "Find Sentry uptime monitors, which check a URL over HTTP. Returns each monitor's URL, status, interval, owner, and project.",
+    "Scheduled jobs (cron): find_monitors. Metric thresholds: find_metric_monitors.",
+    "When more results exist, narrow by project, environment, owner, or name.",
   ].join("\n"),
   inputSchema: {
     organizationSlug: ParamOrganizationSlug,
@@ -49,28 +39,28 @@ export default defineTool({
       .string()
       .trim()
       .min(1)
-      .describe("Optional environment name to limit monitors.")
+      .describe("Environment to filter monitors by.")
       .optional(),
     owner: z
       .string()
       .trim()
       .min(1)
       .describe(
-        "Optional owner filter, such as `user:123`, `team:456`, `myteams`, or `unassigned`.",
+        "Owner filter: `user:123`, `team:456`, `myteams`, or `unassigned`.",
       )
       .optional(),
     query: z
       .string()
       .trim()
       .min(1)
-      .describe("Optional search query for monitor name or URL.")
+      .describe("Text to match in the monitor name or URL.")
       .optional(),
     limit: z
       .number()
       .int()
       .positive()
       .max(99)
-      .describe("Maximum number of monitors to return.")
+      .describe("Maximum monitors to return.")
       .default(10),
   },
   annotations: {
@@ -84,8 +74,6 @@ export default defineTool({
       regionUrl: params.regionUrl ?? undefined,
     });
     const organizationSlug = params.organizationSlug;
-    setTag("organization.slug", organizationSlug);
-
     const requestedProjectSlug =
       params.projectSlug && params.projectSlug !== "all"
         ? params.projectSlug
@@ -98,9 +86,7 @@ export default defineTool({
       });
     }
     const projectSlug = context.constraints.projectSlug ?? requestedProjectSlug;
-    if (projectSlug) {
-      setTag("project.slug", projectSlug);
-    }
+    setTargetTagsAndAttributes({ organizationSlug, projectSlug });
 
     const monitors = await apiService.listUptimeMonitors({
       organizationSlug,

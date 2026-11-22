@@ -1,16 +1,17 @@
-import { setTag } from "@sentry/core";
 import { z } from "zod";
-import { defineTool } from "../../internal/tool-helpers/define";
-import { apiServiceFromContext } from "../../internal/tool-helpers/api";
-import { structuredResult } from "../../internal/tool-helpers/results";
 import { UserInputError } from "../../errors";
-import type { ServerContext } from "../../types";
+import { apiServiceFromContext } from "../../internal/tool-helpers/api";
+import { defineTool } from "../../internal/tool-helpers/define";
+import { structuredResult } from "../../internal/tool-helpers/results";
 import {
+  ParamCursor,
   ParamOrganizationSlug,
   ParamRegionUrl,
   ParamSearchQuery,
 } from "../../schema";
 import { ALL_SKILLS } from "../../skills";
+import { setTargetTagsAndAttributes } from "../../telem/scope";
+import type { ServerContext } from "../../types";
 
 const RESULT_LIMIT = 25;
 
@@ -21,26 +22,24 @@ export const findProjectsOutputSchema = z.object({
     }),
   ),
   hasMore: z.boolean(),
+  nextCursor: z.string().nullable(),
 });
 
 export default defineTool({
   name: "find_projects",
+  title: "Find Projects",
   skills: ALL_SKILLS, // Foundational tool - available to all skills
   requiredScopes: ["project:read"],
-  description: [
-    "Find projects in Sentry.",
-    "",
-    "Use this tool when you need to:",
-    "- View projects in a Sentry organization",
-    "- Find a project's slug to aid other tool requests",
-    "- Search for specific projects by name or slug",
-    "",
-    `Returns up to ${RESULT_LIMIT} results. When hasMore is true, use the query parameter to narrow down results.`,
-  ].join("\n"),
+  description: `List or search projects in a Sentry organization. Returns project slugs, ${RESULT_LIMIT} per page.`,
   inputSchema: {
     organizationSlug: ParamOrganizationSlug,
     regionUrl: ParamRegionUrl.nullable().default(null),
-    query: ParamSearchQuery.nullable().default(null),
+    query: ParamSearchQuery.describe(
+      "Filter by name or slug, or pass a numeric project ID.",
+    )
+      .nullable()
+      .default(null),
+    cursor: ParamCursor.nullable().default(null),
   },
   annotations: {
     readOnlyHint: true,
@@ -60,18 +59,31 @@ export default defineTool({
       );
     }
 
-    setTag("organization.slug", organizationSlug);
+    setTargetTagsAndAttributes({ organizationSlug });
 
-    const projects = await apiService.listProjects(organizationSlug, {
-      query: params.query ?? undefined,
-      limit: RESULT_LIMIT + 1,
-    });
+    const listProjects = (query: string | undefined) =>
+      apiService.listProjects(organizationSlug, {
+        query,
+        limit: RESULT_LIMIT,
+        cursor: params.cursor ?? undefined,
+      });
+
+    // Sentry matches free text against name and slug only, so a bare
+    // numeric ID finds nothing unless it is sent as `id:`.
+    const query = params.query ?? undefined;
+    let result: Awaited<ReturnType<typeof listProjects>> | undefined;
+    if (query && /^\d+$/.test(query) && !params.cursor) {
+      result = await listProjects(`id:${query}`);
+    }
+    if (!result?.projects.length) {
+      result = await listProjects(query);
+    }
+    const { projects, nextCursor } = result;
 
     return structuredResult({
-      projects: projects
-        .slice(0, RESULT_LIMIT)
-        .map((project) => ({ slug: project.slug })),
-      hasMore: projects.length > RESULT_LIMIT,
+      projects: projects.map((project) => ({ slug: project.slug })),
+      hasMore: nextCursor !== null,
+      nextCursor,
     });
   },
 });

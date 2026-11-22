@@ -22,6 +22,10 @@ import {
 } from "@sentry/mcp-core/skills";
 import { logWarn } from "@sentry/mcp-core/telem/logging";
 import type { ServerContext } from "@sentry/mcp-core/types";
+import {
+  MAX_MCP_REQUEST_BODY_BYTES,
+  boundMcpRequestBody,
+} from "@sentry/toolkit-core/mcp-limits";
 import { createMcpHandler } from "agents/mcp/server";
 import { annotateResponseMetric } from "../metrics";
 import {
@@ -57,9 +61,11 @@ type OAuthMcpContext = {
   grantedSkills: Set<Skill>;
   userId: string;
   clientId: string;
-  clientName?: string;
-  tokenConstraintOrganizationSlug?: string | null;
-  tokenConstraintProjectSlug?: string | null;
+  // Copied from the grant props, which may lack these fields; undefined means
+  // absent.
+  clientName?: string | undefined;
+  tokenConstraintOrganizationSlug?: string | null | undefined;
+  tokenConstraintProjectSlug?: string | null | undefined;
   onUpstreamUnauthorized: () => void | Promise<void>;
 };
 
@@ -92,9 +98,9 @@ function escapeAuthenticateHeaderValue(value: string): string {
 export function getRequestGrantId(request: Request): string | null {
   const auth = request.headers.get("Authorization");
   if (!auth) return null;
-  const match = auth.match(/^Bearer\s+(.+)$/i);
-  if (!match) return null;
-  const parts = match[1].split(":");
+  const token = auth.match(/^Bearer\s+(.+)$/i)?.[1];
+  if (!token) return null;
+  const parts = token.split(":");
   if (parts.length !== 3) return null;
   return parts[1] || null;
 }
@@ -284,7 +290,7 @@ export async function handleSentryBearerMcpRequest(
     return skills.response;
   }
 
-  return handleAuthenticatedMcpRequest(request, env, ctx, {
+  return await handleAuthenticatedMcpRequest(request, env, ctx, {
     kind: "sentry-bearer",
     accessToken,
     grantedSkills: skills.grantedSkills,
@@ -315,9 +321,8 @@ async function handleAuthenticatedMcpRequest(
   }
 
   const { groups } = result.pathname;
-  const organizationSlug = groups?.org || null;
-  const projectSlug = groups?.project || null;
-
+  const organizationSlug = groups["org"] || null;
+  const projectSlug = groups["project"] || null;
 
   // Check for experimental mode query parameter
   const isExperimentalMode = url.searchParams.get("experimental") === "1";
@@ -345,7 +350,10 @@ async function handleAuthenticatedMcpRequest(
   }
 
   if (auth.kind === "oauth") {
-    for (const skill of Array.from(auth.grantedSkills).sort()) {
+    const grantedSkills = [...auth.grantedSkills].sort((a, b) =>
+      a.localeCompare(b),
+    );
+    for (const skill of grantedSkills) {
       activeSpan?.setAttribute(getSkillGrantedAttributeName(skill), true);
     }
   }
@@ -413,6 +421,7 @@ async function handleAuthenticatedMcpRequest(
               cache: {
                 kv: env.MCP_CACHE,
                 userId: auth.userId,
+                waitUntil: (promise) => ctx.waitUntil(promise),
               },
             },
           );
@@ -437,39 +446,48 @@ async function handleAuthenticatedMcpRequest(
   }
 
   const serverContext: ServerContext = {
-    userId: auth.kind === "oauth" ? auth.userId : undefined,
-    userIpAddress,
-    clientId: auth.kind === "oauth" ? auth.clientId : undefined,
-    clientName: auth.kind === "oauth" ? auth.clientName : undefined,
+    ...(auth.kind === "oauth" && {
+      userId: auth.userId,
+      clientId: auth.clientId,
+      ...(auth.clientName !== undefined && { clientName: auth.clientName }),
+      onUpstreamUnauthorized: auth.onUpstreamUnauthorized,
+    }),
+    ...(userIpAddress !== undefined && { userIpAddress }),
     clientFamily,
     utmSource,
     accessToken: auth.accessToken,
     grantedSkills: auth.grantedSkills,
     constraints,
     sentryHost,
-    mcpUrl: env.MCP_URL,
+    ...(env.MCP_URL !== undefined && { mcpUrl: env.MCP_URL }),
     experimentalMode: isExperimentalMode,
     transport: "http",
-    onUpstreamUnauthorized:
-      auth.kind === "oauth" ? auth.onUpstreamUnauthorized : undefined,
   };
+
+  // `createMcpHandler` from agents only forwards `maxRequestBodySize` to the
+  // SDK v2 lane. Its legacy-request classification and legacy compatibility
+  // lane still read up to the SDK's 4 MiB default, so bound every lane here.
+  const boundedRequest = await boundMcpRequestBody(request);
+  if (boundedRequest instanceof Response) {
+    return boundedRequest;
+  }
 
   // The modern handler requires a factory and creates a fresh SDK v2 server
   // for every request. Context remains request-scoped through tool closures.
-  return createMcpHandler(
+  return await createMcpHandler(
     () =>
       buildServer({
         context: serverContext,
-            experimentalMode: isExperimentalMode,
-        sdkVersion: "v2",
+        experimentalMode: isExperimentalMode,
       }),
     {
       route: url.pathname,
       // The Agents handler rejects browser Origins by default except localhost.
       // Permit only the hostname serving this authenticated endpoint.
       allowedOriginHostnames: [url.hostname],
+      maxRequestBodySize: MAX_MCP_REQUEST_BODY_BYTES,
     },
-  )(request, env, ctx);
+  )(boundedRequest, env, ctx);
 }
 
 /**
@@ -482,7 +500,7 @@ async function handleAuthenticatedMcpRequest(
  * 6. Creates and configures MCP server per-request (context captured in closures)
  * 7. Runs MCP handler
  */
-const mcpHandler: ExportedHandler<Env> = {
+const mcpHandler = {
   async fetch(
     request: Request,
     env: Env,
@@ -557,7 +575,7 @@ const mcpHandler: ExportedHandler<Env> = {
       );
     }
 
-    const grantedSkills = (rawProps.grantedSkills as string[]).map((skill) =>
+    const grantedSkills = rawProps.grantedSkills.map((skill) =>
       skill === "preprod" ? "inspect" : skill,
     );
     const { valid: validSkills, invalid: invalidSkills } =
@@ -592,7 +610,7 @@ const mcpHandler: ExportedHandler<Env> = {
 
     let upstreamUnauthorizedHandled = false;
 
-    return handleAuthenticatedMcpRequest(request, env, ctx, {
+    return await handleAuthenticatedMcpRequest(request, env, ctx, {
       kind: "oauth",
       userId,
       clientId,
@@ -646,6 +664,6 @@ const mcpHandler: ExportedHandler<Env> = {
       },
     });
   },
-};
+} satisfies ExportedHandler<Env>;
 
 export default mcpHandler;

@@ -1,6 +1,7 @@
-import type {
-  TokenExchangeCallbackOptions,
-  TokenExchangeCallbackResult,
+import {
+  GrantType,
+  type TokenExchangeCallbackOptions,
+  type TokenExchangeCallbackResult,
 } from "@cloudflare/workers-oauth-provider";
 import * as Sentry from "@sentry/cloudflare";
 import {
@@ -13,14 +14,14 @@ import { logIssue, logWarn } from "@sentry/mcp-core/telem/logging";
 import type { z } from "zod";
 import type { WorkerProps } from "../types";
 import { setSentryUserFromRequest } from "../utils/sentry-user";
-import { TokenResponseSchema } from "./constants";
+import { SUPPORTED_PROMPT_VALUES, TokenResponseSchema } from "./constants";
 import {
+  getClientRegistrationMethodTelemetry,
+  getOAuthGrantLifecycleTelemetry,
   OAUTH_GRANT_SHAPE_ATTRIBUTE,
   OAUTH_PROBE_REASON_ATTRIBUTE,
   OAUTH_PROBE_STATUS_CODE_ATTRIBUTE,
   OAUTH_REFRESH_OUTCOME_ATTRIBUTE,
-  getClientRegistrationMethodTelemetry,
-  getOAuthGrantLifecycleTelemetry,
 } from "./telemetry";
 
 function escapeHtml(value: string): string {
@@ -119,12 +120,51 @@ export function getOAuthCallbackFailureDetails({
   }
 }
 
+export const ACCESS_DENIED_DESCRIPTION =
+  "The user denied the authorization request";
+
+/**
+ * Maps an upstream authorization callback error to the RFC 6749 §4.1.2.1
+ * error relayed to the MCP client.
+ *
+ * Only codes that describe the user or the authorization server, not the
+ * client's own request, pass through: `access_denied`, `server_error`, and
+ * `temporarily_unavailable`. Every other code describes our upstream request
+ * (scopes, client credentials, response type), so relaying it would blame the
+ * MCP client for our configuration; those become `server_error`. Descriptions
+ * are fixed so upstream text never reaches the client.
+ */
+export function getClientAuthorizationError(upstreamError: string): {
+  code: string;
+  description: string;
+} {
+  switch (upstreamError) {
+    case "access_denied":
+      return {
+        code: "access_denied",
+        description: ACCESS_DENIED_DESCRIPTION,
+      };
+    case "temporarily_unavailable":
+      return {
+        code: "temporarily_unavailable",
+        description:
+          "The upstream authorization server is temporarily unavailable",
+      };
+    default:
+      return {
+        code: "server_error",
+        description: "The upstream authorization server returned an error",
+      };
+  }
+}
+
 export function getTokenExchangeFailureDetails({
   oauthError,
   errorDescription,
 }: {
-  oauthError?: string;
-  errorDescription?: string;
+  // Forwarded from parsed upstream responses; undefined means absent.
+  oauthError?: string | undefined;
+  errorDescription?: string | undefined;
 }): OAuthFailureDetails {
   switch (oauthError) {
     case "access_denied":
@@ -182,8 +222,9 @@ export function createOAuthFailureResponse({
   title?: string;
   message: string;
   status: number;
-  oauthError?: string;
-  eventId?: string;
+  // Forwarded from upstream errors and logIssue(); undefined means absent.
+  oauthError?: string | undefined;
+  eventId?: string | undefined;
 }): Response {
   const details = [
     oauthError
@@ -274,19 +315,58 @@ function parseUpstreamOAuthError(
     };
 
     return {
-      error: typeof parsed.error === "string" ? parsed.error : undefined,
-      errorDescription:
-        typeof parsed.error_description === "string"
-          ? parsed.error_description
-          : undefined,
+      ...(typeof parsed.error === "string" && { error: parsed.error }),
+      ...(typeof parsed.error_description === "string" && {
+        errorDescription: parsed.error_description,
+      }),
     };
   } catch {
     return {};
   }
 }
 
+// `login` is honored on a best-effort basis but not advertised: Sentry shows
+// the signed-in account with Switch account, it does not force re-authentication.
+const ACCOUNT_PROMPT_VALUES = new Set<string>([
+  ...SUPPORTED_PROMPT_VALUES,
+  "login",
+]);
+
+/**
+ * Whether a client's space-delimited OIDC `prompt` asks to show the account or
+ * consent step instead of reusing the current Sentry session silently.
+ */
+export function promptRequestsAccountSelection(
+  prompt: string | null | undefined,
+): boolean {
+  return (prompt ?? "")
+    .split(" ")
+    .some((value) => ACCOUNT_PROMPT_VALUES.has(value));
+}
+
+// An identity provider name, never a URL or free text.
+const IDP_HINT_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+
+/**
+ * Reads a client's `idp_hint` (sign in through this identity provider) for
+ * forwarding to Sentry, which decides what each value does. A missing,
+ * repeated (RFC 6749 §3.1) or malformed hint is dropped, so the flow runs as
+ * if the client sent none.
+ */
+export function parseIdpHint(values: string[]): string | undefined {
+  if (values.length !== 1) return undefined;
+  const value = values[0];
+  return value !== undefined && IDP_HINT_PATTERN.test(value)
+    ? value
+    : undefined;
+}
+
 /**
  * Constructs an authorization URL for Sentry.
+ *
+ * `force_prompt` makes Sentry show its consent step, with the signed-in user
+ * and Switch account, even when this user already approved the app.
+ * `idp_hint` asks Sentry to sign the user in through that identity provider.
  */
 export function getUpstreamAuthorizeUrl({
   upstream_url,
@@ -294,12 +374,16 @@ export function getUpstreamAuthorizeUrl({
   scope,
   redirect_uri,
   state,
+  force_prompt = false,
+  idp_hint,
 }: {
   upstream_url: string;
   client_id: string;
   scope: string;
   redirect_uri: string;
   state?: string;
+  force_prompt?: boolean;
+  idp_hint?: string | undefined;
 }) {
   const upstream = new URL(upstream_url);
   upstream.searchParams.set("client_id", client_id);
@@ -307,6 +391,8 @@ export function getUpstreamAuthorizeUrl({
   upstream.searchParams.set("scope", scope);
   if (state) upstream.searchParams.set("state", state);
   upstream.searchParams.set("response_type", "code");
+  if (force_prompt) upstream.searchParams.set("force_prompt", "1");
+  if (idp_hint) upstream.searchParams.set("idp_hint", idp_hint);
   return upstream.href;
 }
 
@@ -464,9 +550,10 @@ function recordTokenExchangeOutcome(
   });
 }
 
-function buildSuccessfulTokenExchangeResult<
-  TProps extends Record<string, unknown>,
->(props: TProps, accessTokenTTL: number): TokenExchangeCallbackResult {
+function buildSuccessfulTokenExchangeResult(
+  props: Record<string, unknown>,
+  accessTokenTTL: number,
+): TokenExchangeCallbackResult {
   return {
     newProps: props,
     accessTokenTTL,
@@ -489,7 +576,8 @@ function buildInvalidGrantTokenExchangeResult(
 
 type ProbeResult = {
   outcome: TokenExchangeOutcome;
-  status?: number;
+  // ApiError.status may be undefined; readers check `typeof status`.
+  status?: number | undefined;
   reason?: "rate_limit" | "server_error" | "unknown";
 };
 
@@ -562,7 +650,7 @@ export async function tokenExchangeCallback(
   request: Request,
   clientFamily: string,
 ): Promise<TokenExchangeCallbackResult | undefined> {
-  if (options.grantType !== "refresh_token") {
+  if (options.grantType !== GrantType.REFRESH_TOKEN) {
     return undefined;
   }
 
@@ -579,16 +667,15 @@ export async function tokenExchangeCallback(
   const { upstreamTokenInvalid: _ignoredUpstreamTokenInvalid, ...baseProps } =
     rawProps;
 
+  // Optional fields (accessTokenExpiresAt, grantedScopes, upstreamScopes,
+  // grantedSkills) come through `baseProps` unchanged.
   const props = {
     ...baseProps,
     id: rawProps.id as string,
     accessToken: rawProps.accessToken as string,
     refreshToken: rawProps.refreshToken,
-    accessTokenExpiresAt: rawProps.accessTokenExpiresAt,
     clientId: rawProps.clientId as string,
     scope: rawProps.scope as string,
-    grantedScopes: rawProps.grantedScopes,
-    grantedSkills: rawProps.grantedSkills,
   } satisfies WorkerProps & Record<string, unknown>;
 
   const expiresAt = props.accessTokenExpiresAt;
@@ -761,6 +848,38 @@ export function appendAuthorizationResponseIss(
 }
 
 /**
+ * Redirects an OAuth authorization error to a validated client redirect URI
+ * per RFC 6749 §4.1.2.1. Includes RFC 9207 `iss` when known.
+ */
+export function createAuthorizationErrorRedirect(
+  redirectUri: string,
+  code: string,
+  description: string,
+  state: string | undefined,
+  issuer: string | undefined,
+): Response {
+  const redirectUrl = new URL(redirectUri);
+
+  redirectUrl.searchParams.set("error", code);
+  redirectUrl.searchParams.set("error_description", description);
+
+  if (state) {
+    redirectUrl.searchParams.set("state", state);
+  }
+
+  if (issuer) {
+    redirectUrl.searchParams.set("iss", issuer);
+  }
+
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: redirectUrl.href,
+    },
+  });
+}
+
+/**
  * Creates RFC 8707 error response for invalid resource parameter.
  * Includes RFC 9207 `iss` so clients can mix-up-protect error responses too.
  */
@@ -769,24 +888,11 @@ export function createResourceValidationError(
   state: string | undefined,
   requestUrl: string,
 ): Response {
-  const redirectUrl = new URL(redirectUri);
-
-  redirectUrl.searchParams.set("error", "invalid_target");
-  redirectUrl.searchParams.set(
-    "error_description",
+  return createAuthorizationErrorRedirect(
+    redirectUri,
+    "invalid_target",
     "The resource parameter does not match this authorization server",
+    state,
+    getAuthorizationServerIssuer(requestUrl),
   );
-
-  if (state) {
-    redirectUrl.searchParams.set("state", state);
-  }
-
-  redirectUrl.searchParams.set("iss", getAuthorizationServerIssuer(requestUrl));
-
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: redirectUrl.href,
-    },
-  });
 }

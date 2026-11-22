@@ -1,7 +1,7 @@
 import { SentryApiService } from "@sentry/mcp-core/api-client";
 import { searchIssuesAgent } from "@sentry/mcp-core/tools/search-issues/agent";
-import { describeEval } from "vitest-evals";
-import { ToolCallScorer } from "vitest-evals";
+import { describeEval } from "vitest-evals/legacy";
+import { ToolCallScorer } from "vitest-evals/legacy";
 import { StructuredOutputScorer } from "./utils/structuredOutputScorer";
 import "../setup-env";
 
@@ -142,7 +142,7 @@ describeEval("search-issues-agent", {
     // Return in the format expected by ToolCallScorer
     return {
       result: JSON.stringify(agentResult.result),
-      toolCalls: agentResult.toolCalls.map((call: any) => ({
+      toolCalls: agentResult.toolCalls.map((call) => ({
         name: call.toolName,
         arguments: call.args,
       })),

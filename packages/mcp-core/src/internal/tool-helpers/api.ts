@@ -5,6 +5,7 @@ import {
   ApiNotFoundError,
 } from "../../api-client/index";
 import { UserInputError } from "../../errors";
+import { formatNotFoundParams } from "./enhance-error";
 import type { ServerContext } from "../../types";
 import { validateRegionUrl } from "./validate-region-url";
 
@@ -17,7 +18,7 @@ import { validateRegionUrl } from "./validate-region-url";
  */
 export function apiServiceFromContext(
   context: ServerContext,
-  opts: { regionUrl?: string } = {},
+  opts: { regionUrl?: string | undefined } = {},
 ) {
   let host = context.sentryHost;
 
@@ -36,6 +37,7 @@ export function apiServiceFromContext(
     clientName: context.clientName,
     clientFamily: context.clientFamily,
     utmSource: context.utmSource,
+    signal: context.signal,
   });
 }
 
@@ -63,12 +65,7 @@ export function handleApiError(
 
     // Special handling for 404s with parameter context
     if (error instanceof ApiNotFoundError && params) {
-      const paramsList: string[] = [];
-      for (const [key, value] of Object.entries(params)) {
-        if (value !== undefined && value !== null && value !== "") {
-          paramsList.push(`${key}: '${value}'`);
-        }
-      }
+      const paramsList = formatNotFoundParams(params);
 
       if (paramsList.length > 0) {
         message = `Resource not found (404): ${error.message}\nPlease verify these parameters are correct:\n${paramsList.map((p) => `  - ${p}`).join("\n")}`;

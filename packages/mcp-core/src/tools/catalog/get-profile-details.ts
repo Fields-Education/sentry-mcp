@@ -1,25 +1,30 @@
-import { setTag } from "@sentry/core";
 import { z } from "zod";
-import { defineTool } from "../../internal/tool-helpers/define";
-import { apiServiceFromContext } from "../../internal/tool-helpers/api";
-import { resolveRegionUrlForOrganization } from "../../internal/tool-helpers/resolve-region-url";
+import { isLegacySpeedscopeProfile } from "../../api-client/types";
 import { UserInputError } from "../../errors";
-import type { ServerContext } from "../../types";
+import { apiServiceFromContext } from "../../internal/tool-helpers/api";
+import { defineTool } from "../../internal/tool-helpers/define";
+import { resolveRegionUrlForOrganization } from "../../internal/tool-helpers/resolve-region-url";
+import { isProfileUrl, parseSentryUrl } from "../../internal/url-helpers";
+import {
+  resolveScopedOrganizationSlug,
+  resolveScopedProjectSlugOrId,
+} from "../../internal/url-scope";
 import { ParamOrganizationSlug, ParamRegionUrl } from "../../schema";
+import { setTargetTagsAndAttributes } from "../../telem/scope";
+import type { ServerContext } from "../../types";
 import {
   isNumericId,
   validateResourceId,
   validateSlugOrId,
 } from "../../utils/slug-validation";
-import { parseSentryUrl, isProfileUrl } from "../../internal/url-helpers";
+import { structuredResult } from "../../internal/tool-helpers/results";
+import { buildSuggestedToolAction } from "../../internal/tool-helpers/suggested-actions";
 import {
-  resolveScopedOrganizationSlug,
-  resolveScopedProjectSlugOrId,
-} from "../../internal/url-scope";
-import {
-  formatProfileChunkAnalysis,
-  formatTransactionProfileAnalysis,
-} from "../support/profile/formatter";
+  buildContinuousProfileDetails,
+  buildLegacyProfileDetails,
+  buildTransactionProfileDetails,
+  getProfileDetailsOutputSchema,
+} from "../support/profile/details-output";
 
 type ResolvedProfileDetailsParams =
   | {
@@ -38,13 +43,13 @@ type ResolvedProfileDetailsParams =
     };
 
 function resolveProfileDetailsParams(params: {
-  profileUrl?: string | null;
-  organizationSlug?: string | null;
-  projectSlugOrId?: string | number | null;
-  profileId?: string | null;
-  profilerId?: string | null;
-  start?: string | null;
-  end?: string | null;
+  profileUrl?: string | null | undefined;
+  organizationSlug?: string | null | undefined;
+  projectSlugOrId?: string | number | null | undefined;
+  profileId?: string | null | undefined;
+  profilerId?: string | null | undefined;
+  start?: string | null | undefined;
+  end?: string | null | undefined;
 }): ResolvedProfileDetailsParams {
   if (params.profileUrl) {
     if (!isProfileUrl(params.profileUrl)) {
@@ -175,57 +180,14 @@ async function resolveProjectContext(
 
 export default defineTool({
   name: "get_profile_details",
+  title: "Get Profile Details",
   skills: ["inspect"],
   requiredScopes: ["event:read"],
   requiredCapabilities: ["profiles"],
   hideInExperimentalMode: true,
 
-  description: [
-    "Inspect a specific Sentry profile in detail.",
-    "",
-    "USE THIS TOOL WHEN:",
-    "- User shares a transaction profile URL and wants the details",
-    "- User has a profile ID and wants a concise summary plus raw sample structure",
-    "- User needs to inspect a continuous profile session by profiler ID and time range",
-    "",
-    "RETURNS:",
-    "- Transaction profile summary with profile URL, transaction, trace, release, and runtime details",
-    "- Sample structure summaries such as frame count, sample count, stacks, and thread breakdown",
-    "- Top frames by occurrence for a quick hotspot overview",
-    "",
-    "NOTE: This tool supports two profile modes.",
-    "- Transaction profiles: pass `profileUrl` or `organizationSlug` + `projectSlugOrId` + `profileId`",
-    "- Continuous profiles: pass `profileUrl` or `organizationSlug` + `projectSlugOrId` + `profilerId` + `start` + `end`",
-    "",
-    "<examples>",
-    "### Transaction profile URL",
-    "```",
-    "get_profile_details(",
-    "  profileUrl='https://my-org.sentry.io/explore/profiling/profile/backend/cfe78a5c892d4a64a962d837673398d2/flamegraph/'",
-    ")",
-    "```",
-    "",
-    "### Transaction profile by ID",
-    "```",
-    "get_profile_details(",
-    "  organizationSlug='my-org',",
-    "  projectSlugOrId='backend',",
-    "  profileId='cfe78a5c892d4a64a962d837673398d2'",
-    ")",
-    "```",
-    "",
-    "### Continuous profile by session",
-    "```",
-    "get_profile_details(",
-    "  organizationSlug='my-org',",
-    "  projectSlugOrId='backend',",
-    "  profilerId='041bde57b9844e36b8b7e5734efae5f7',",
-    "  start='2024-01-01T00:00:00Z',",
-    "  end='2024-01-01T01:00:00Z'",
-    ")",
-    "```",
-    "</examples>",
-  ].join("\n"),
+  description:
+    "Inspect one Sentry profile by profile ID, profiler ID, or URL: transaction, trace, release, and runtime details, sample and thread structure, and top frames. Handles transaction and continuous profiles. For aggregated hot paths across a transaction, use get_profile.",
 
   inputSchema: {
     profileUrl: z
@@ -233,47 +195,49 @@ export default defineTool({
       .url()
       .optional()
       .describe(
-        "Sentry transaction profile or continuous profile URL. If provided, organization, project, and profile identifiers are extracted from the URL.",
+        "Sentry transaction or continuous profile URL; the organization, project, and profile IDs come from it.",
       ),
     organizationSlug: ParamOrganizationSlug.optional(),
     regionUrl: ParamRegionUrl.nullable().default(null),
     projectSlugOrId: z
       .union([z.string().trim().superRefine(validateSlugOrId), z.number()])
       .optional()
-      .describe("Project slug or numeric ID"),
+      .describe("Project slug or numeric ID; required without profileUrl."),
     profileId: z
       .string()
       .trim()
       .superRefine(validateResourceId)
       .optional()
-      .describe("Transaction profile ID from a profile flamegraph URL"),
+      .describe("Transaction profile ID. Do not combine with profilerId."),
     profilerId: z
       .string()
       .trim()
       .superRefine(validateResourceId)
       .optional()
-      .describe("Continuous profiler session ID"),
+      .describe("Continuous profiler session ID; requires start and end."),
     start: z
       .string()
       .trim()
       .optional()
       .describe(
-        "Continuous profile start time in ISO 8601 format, for example '2024-01-01T00:00:00Z'",
+        "Continuous profile window start, ISO 8601 such as 2024-01-01T00:00:00Z; only with profilerId.",
       ),
     end: z
       .string()
       .trim()
       .optional()
       .describe(
-        "Continuous profile end time in ISO 8601 format, for example '2024-01-01T01:00:00Z'",
+        "Continuous profile window end, ISO 8601; only with profilerId.",
       ),
     focusOnUserCode: z
       .boolean()
       .default(true)
       .describe(
-        "Show only user code frames in the hotspot table. Set to false to include library frames.",
+        "Show only application frames in the hotspot table; false includes library frames.",
       ),
   },
+
+  outputSchema: getProfileDetailsOutputSchema,
 
   annotations: {
     readOnlyHint: true,
@@ -302,10 +266,13 @@ export default defineTool({
       regionUrl: regionUrl ?? undefined,
     });
 
-    setTag("organization.slug", resolved.organizationSlug);
+    setTargetTagsAndAttributes({ organizationSlug: resolved.organizationSlug });
 
     if (resolved.mode === "transaction") {
-      setTag("profile.id", resolved.profileId);
+      setTargetTagsAndAttributes({
+        organizationSlug: resolved.organizationSlug,
+        profileId: resolved.profileId,
+      });
       const isNumericProjectInput =
         typeof resolved.projectSlugOrId === "number" ||
         isNumericId(String(resolved.projectSlugOrId));
@@ -336,7 +303,10 @@ export default defineTool({
         });
       }
 
-      setTag("project.slug", projectSlug);
+      setTargetTagsAndAttributes({
+        organizationSlug: resolved.organizationSlug,
+        projectSlug,
+      });
 
       const profileUrl =
         params.profileUrl ??
@@ -346,22 +316,64 @@ export default defineTool({
           resolved.profileId,
         );
 
-      const traceUrl = profile.transaction?.trace_id
-        ? apiService.getTraceUrl(
-            resolved.organizationSlug,
-            profile.transaction.trace_id,
-          )
-        : undefined;
+      if (isLegacySpeedscopeProfile(profile)) {
+        const legacyTraceId = profile.metadata?.traceID;
+        const details = buildLegacyProfileDetails(profile, {
+          profileUrl,
+          project: projectSlug,
+          profileId: resolved.profileId,
+          traceUrl: legacyTraceId
+            ? apiService.getTraceUrl(resolved.organizationSlug, legacyTraceId)
+            : null,
+        });
+        // Legacy profiles have no sample data, so the aggregated flamegraph is
+        // the next step. Profile URLs also reach this handler through
+        // get_sentry_resource, so only suggest it when get_profile is callable.
+        const transactionName = details.profile.transactionName;
+        const flamegraphAction = transactionName
+          ? buildSuggestedToolAction({
+              toolName: "get_profile",
+              arguments: {
+                organizationSlug: resolved.organizationSlug,
+                projectSlugOrId: projectSlug,
+                transactionName,
+                ...(regionUrl ? { regionUrl } : {}),
+              },
+              reason:
+                "Legacy profiles have no sample data; the aggregated transaction flamegraph shows hot paths.",
+              experimentalMode: context.experimentalMode ?? false,
+              availableToolNames: context.availableToolNames,
+              directToolNames: context.directToolNames,
+            })
+          : null;
+        return structuredResult({
+          ...details,
+          suggestedActions: flamegraphAction ? [flamegraphAction] : [],
+        });
+      }
 
-      return formatTransactionProfileAnalysis(profile, {
-        focusOnUserCode: params.focusOnUserCode,
-        profileUrl,
-        projectSlug,
-        traceUrl,
+      const traceId = profile.transaction?.trace_id;
+      return structuredResult({
+        ...buildTransactionProfileDetails(
+          profile,
+          {
+            profileUrl,
+            project: projectSlug,
+            profileId: resolved.profileId,
+            traceUrl: traceId
+              ? apiService.getTraceUrl(resolved.organizationSlug, traceId)
+              : null,
+          },
+          { focusOnUserCode: params.focusOnUserCode },
+        ),
+        suggestedActions: [],
       });
     }
 
-    setTag("profiler.id", resolved.profilerId);
+    setTargetTagsAndAttributes({
+      organizationSlug: resolved.organizationSlug,
+      profilerId: resolved.profilerId,
+    });
 
     const { projectId, projectSlug } = await resolveProjectContext(
       apiService,
@@ -370,8 +382,11 @@ export default defineTool({
       { requireNumericId: true },
     );
 
-    setTag("project.slug", projectSlug);
-    setTag("project.id", String(projectId));
+    setTargetTagsAndAttributes({
+      organizationSlug: resolved.organizationSlug,
+      projectSlug,
+      projectId,
+    });
 
     const chunk = await apiService.getProfileChunk({
       organizationSlug: resolved.organizationSlug,
@@ -393,25 +408,19 @@ export default defineTool({
         },
       );
 
-    const chunkAnalysis = formatProfileChunkAnalysis(chunk, {
-      focusOnUserCode: params.focusOnUserCode,
-    }).replace("# Profile Chunk Details", "## Raw Sample Analysis");
-
-    return [
-      `# Continuous Profile ${resolved.profilerId}`,
-      "",
-      "## Summary",
-      `- **Profile URL**: ${profileUrl}`,
-      `- **Project**: ${projectSlug}`,
-      `- **Profiler ID**: ${resolved.profilerId}`,
-      `- **Time Range**: ${resolved.start} to ${resolved.end}`,
-      `- **Platform**: ${chunk.platform}`,
-      `- **Release**: ${chunk.release}`,
-      chunk.environment ? `- **Environment**: ${chunk.environment}` : "",
-      "",
-      chunkAnalysis,
-    ]
-      .filter(Boolean)
-      .join("\n");
+    return structuredResult({
+      ...buildContinuousProfileDetails(
+        chunk,
+        {
+          profileUrl,
+          project: projectSlug,
+          profilerId: resolved.profilerId,
+          start: resolved.start,
+          end: resolved.end,
+        },
+        { focusOnUserCode: params.focusOnUserCode },
+      ),
+      suggestedActions: [],
+    });
   },
 });

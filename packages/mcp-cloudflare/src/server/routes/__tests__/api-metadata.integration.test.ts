@@ -2,6 +2,7 @@ import { createExecutionContext, env } from "cloudflare:test";
 import { getOAuthApi } from "@cloudflare/workers-oauth-provider";
 import { describe, expect, it } from "vitest";
 import { SCOPES } from "../../../constants";
+import { createPkcePair } from "../../../test-utils/pkce";
 import app from "../../app";
 import handler from "../../index";
 import mcpHandler from "../../lib/mcp-handler";
@@ -41,7 +42,11 @@ function createOAuthApi() {
   );
 }
 
-function createAuthRequest(clientId: string, resource: string) {
+function createAuthRequest(
+  clientId: string,
+  resource: string,
+  codeChallenge: string,
+) {
   const url = new URL("http://localhost/oauth/authorize");
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", clientId);
@@ -49,11 +54,17 @@ function createAuthRequest(clientId: string, resource: string) {
   url.searchParams.set("scope", "org:read");
   url.searchParams.set("state", "test-state");
   url.searchParams.set("resource", resource);
+  url.searchParams.set("code_challenge", codeChallenge);
+  url.searchParams.set("code_challenge_method", "S256");
 
   return new Request(url);
 }
 
-function createTokenExchangeRequest(clientId: string, code: string) {
+function createTokenExchangeRequest(
+  clientId: string,
+  code: string,
+  codeVerifier: string,
+) {
   return new Request("http://localhost/oauth/token", {
     method: "POST",
     headers: {
@@ -64,6 +75,7 @@ function createTokenExchangeRequest(clientId: string, code: string) {
       client_id: clientId,
       code,
       redirect_uri: REDIRECT_URI,
+      code_verifier: codeVerifier,
     }).toString(),
   });
 }
@@ -75,8 +87,9 @@ async function issueAccessToken(resource: string) {
     redirectUris: [REDIRECT_URI],
     tokenEndpointAuthMethod: "none",
   });
+  const { codeVerifier, codeChallenge } = await createPkcePair();
   const authRequest = await oauthApi.parseAuthRequest(
-    createAuthRequest(client.clientId, resource),
+    createAuthRequest(client.clientId, resource, codeChallenge),
   );
   const { redirectTo } = await oauthApi.completeAuthorization({
     request: authRequest,
@@ -96,17 +109,17 @@ async function issueAccessToken(resource: string) {
   expect(code).toBeTruthy();
 
   const tokenCtx = createExecutionContext();
-  const tokenResponse = await handler.fetch!(
-    createTokenExchangeRequest(client.clientId, code!),
+  const tokenResponse = await handler.fetch(
+    createTokenExchangeRequest(client.clientId, code!, codeVerifier),
     workerEnv,
     tokenCtx,
   );
 
   expect(tokenResponse.status).toBe(200);
 
-  const tokens = (await tokenResponse.json()) as {
+  const tokens = await tokenResponse.json<{
     access_token: string;
-  };
+  }>();
 
   return tokens.access_token;
 }
@@ -133,10 +146,10 @@ describe("/api/metadata integration", () => {
     );
 
     expect(res.status).toBe(200);
-    const payload = (await res.json()) as {
+    const payload = await res.json<{
       type: string;
       tools: string[];
-    };
+    }>();
     expect(payload.type).toBe("mcp-metadata");
     expect(Array.isArray(payload.tools)).toBe(true);
   });
@@ -155,10 +168,10 @@ describe("/api/metadata integration", () => {
     );
 
     expect(res.status).toBe(200);
-    const payload = (await res.json()) as {
+    const payload = await res.json<{
       type: string;
       tools: string[];
-    };
+    }>();
     expect(payload.type).toBe("mcp-metadata");
     expect(Array.isArray(payload.tools)).toBe(true);
   });

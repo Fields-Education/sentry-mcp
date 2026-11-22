@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { type Server, createServer } from "node:http";
+import { createServer, type Server } from "node:http";
 import { URL } from "node:url";
 import chalk from "chalk";
 import open from "open";
@@ -11,9 +11,9 @@ import {
 } from "../mcp-url.js";
 import { ConfigManager } from "./config.js";
 import {
-  type OAuthRedirect,
   defaultOAuthRedirectUri,
   isLoopbackHost,
+  type OAuthRedirect,
   resolveOAuthRedirect,
 } from "./redirect.js";
 
@@ -42,8 +42,69 @@ export interface ClientRegistrationResponse {
   client_id_issued_at?: number;
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+export function renderOAuthCallbackPage(
+  heading: string,
+  messages: readonly string[],
+  title = heading,
+): string {
+  const paragraphs = messages
+    .map((message) => `        <p>${escapeHtml(message)}</p>`)
+    .join("\n");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${escapeHtml(title)}</title>
+    <style>
+      body {
+        box-sizing: border-box;
+        min-height: 100vh;
+        margin: 0;
+        padding: 1.5rem;
+        display: grid;
+        place-items: center;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        background: #160f24;
+        color: #d4d1ec;
+      }
+      main {
+        width: min(100%, 600px);
+        text-align: center;
+      }
+      h1 {
+        margin: 0 0 1rem;
+        color: #ffffff;
+        font-size: 2rem;
+        line-height: 1.2;
+      }
+      p {
+        margin: 0.5rem 0;
+        line-height: 1.6;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>${escapeHtml(heading)}</h1>
+${paragraphs}
+    </main>
+  </body>
+</html>`;
+}
+
 export class OAuthClient {
-  private config: OAuthConfig;
+  private config: Required<OAuthConfig>;
   private server: Server | null = null;
   private configManager: ConfigManager;
   private redirect: OAuthRedirect;
@@ -99,7 +160,7 @@ export class OAuthClient {
       grant_types: ["authorization_code"],
       response_types: ["code"],
       token_endpoint_auth_method: "none", // PKCE, no client secret
-      scope: this.config.scopes!.join(" "),
+      scope: this.config.scopes.join(" "),
     };
 
     const response = await fetch(registrationUrl, {
@@ -130,7 +191,7 @@ export class OAuthClient {
   private async startCallbackServer(): Promise<{
     waitForCallback: () => Promise<{ code: string; state: string }>;
   }> {
-    return new Promise((resolve, reject) => {
+    return await new Promise((resolve, reject) => {
       let resolveCallback:
         | ((value: { code: string; state: string }) => void)
         | null = null;
@@ -153,19 +214,16 @@ export class OAuthClient {
           if (error) {
             const errorDescription =
               url.searchParams.get("error_description") || "Unknown error";
-            res.writeHead(400, { "Content-Type": "text/html" });
-            res.end(`
-              <!DOCTYPE html>
-              <html>
-              <head><title>Authentication Failed</title></head>
-              <body>
-                <h1>Authentication Failed</h1>
-                <p>Error: ${error}</p>
-                <p>${errorDescription}</p>
-                <p>You can close this window.</p>
-              </body>
-              </html>
-            `);
+            res.writeHead(400, {
+              "Content-Type": "text/html; charset=utf-8",
+            });
+            res.end(
+              renderOAuthCallbackPage("Authentication Failed", [
+                `Error: ${error}`,
+                errorDescription,
+                "You can close this window.",
+              ]),
+            );
 
             if (rejectCallback) {
               rejectCallback(
@@ -176,18 +234,15 @@ export class OAuthClient {
           }
 
           if (!code || !state) {
-            res.writeHead(400, { "Content-Type": "text/html" });
-            res.end(`
-              <!DOCTYPE html>
-              <html>
-              <head><title>Authentication Failed</title></head>
-              <body>
-                <h1>Authentication Failed</h1>
-                <p>Missing code or state parameter</p>
-                <p>You can close this window.</p>
-              </body>
-              </html>
-            `);
+            res.writeHead(400, {
+              "Content-Type": "text/html; charset=utf-8",
+            });
+            res.end(
+              renderOAuthCallbackPage("Authentication Failed", [
+                "Missing code or state parameter",
+                "You can close this window.",
+              ]),
+            );
 
             if (rejectCallback) {
               rejectCallback(new Error("Missing code or state parameter"));
@@ -196,18 +251,19 @@ export class OAuthClient {
           }
 
           // Acknowledge the callback but don't show success yet
-          res.writeHead(200, { "Content-Type": "text/html" });
-          res.end(`
-            <!DOCTYPE html>
-            <html>
-            <head><title>Authentication in Progress</title></head>
-            <body>
-              <h1>Processing Authentication...</h1>
-              <p>Please wait while we complete the authentication process.</p>
-              <p>You can close this window and return to your terminal.</p>
-            </body>
-            </html>
-          `);
+          res.writeHead(200, {
+            "Content-Type": "text/html; charset=utf-8",
+          });
+          res.end(
+            renderOAuthCallbackPage(
+              "Processing Authentication...",
+              [
+                "Please wait while we complete the authentication process.",
+                "You can close this window and return to your terminal.",
+              ],
+              "Authentication in Progress",
+            ),
+          );
 
           if (resolveCallback) {
             resolveCallback({ code, state });
@@ -273,7 +329,7 @@ export class OAuthClient {
       throw new Error(`Token exchange failed: ${response.status} - ${error}`);
     }
 
-    return response.json() as Promise<TokenResponse>;
+    return await (response.json() as Promise<TokenResponse>);
   }
 
   /**
@@ -331,7 +387,7 @@ export class OAuthClient {
     }
 
     // No cached token, perform OAuth flow
-    return this.authenticate();
+    return await this.authenticate();
   }
 
   /**
@@ -355,7 +411,7 @@ export class OAuthClient {
     authUrl.searchParams.set("client_id", clientId);
     authUrl.searchParams.set("redirect_uri", this.redirect.redirectUri);
     authUrl.searchParams.set("response_type", "code");
-    authUrl.searchParams.set("scope", this.config.scopes!.join(" "));
+    authUrl.searchParams.set("scope", this.config.scopes.join(" "));
     authUrl.searchParams.set("state", state);
     authUrl.searchParams.set("code_challenge", challenge);
     authUrl.searchParams.set("code_challenge_method", "S256");

@@ -1,14 +1,14 @@
 import { z } from "zod";
-import { setTag } from "@sentry/core";
-import { defineTool } from "../../internal/tool-helpers/define";
 import { apiServiceFromContext } from "../../internal/tool-helpers/api";
+import { defineTool } from "../../internal/tool-helpers/define";
 import { structuredResult } from "../../internal/tool-helpers/results";
-import type { ServerContext } from "../../types";
 import {
   ParamOrganizationSlug,
-  ParamRegionUrl,
   ParamProjectSlugOrAll,
+  ParamRegionUrl,
 } from "../../schema";
+import { setTargetTagsAndAttributes } from "../../telem/scope";
+import type { ServerContext } from "../../types";
 
 const RESULT_LIMIT = 25;
 
@@ -45,36 +45,10 @@ export const findReleasesOutputSchema = z.object({
 
 export default defineTool({
   name: "find_releases",
+  title: "Find Releases",
   skills: ["inspect"], // Only available in inspect skill
   requiredScopes: ["project:read"],
-  description: [
-    "Find releases in Sentry.",
-    "",
-    "Use this tool when you need to:",
-    "- Find recent releases in a Sentry organization",
-    "- Find the most recent version released of a specific project",
-    "- Determine when a release was deployed to an environment",
-    "",
-    `Returns up to ${RESULT_LIMIT} results. When hasMore is true, use the projectSlug or query parameter to narrow down results.`,
-    "",
-    "<examples>",
-    "### Find the most recent releases in the 'my-organization' organization",
-    "",
-    "```",
-    "find_releases(organizationSlug='my-organization')",
-    "```",
-    "",
-    "### Find releases matching '2ce6a27' in the 'my-organization' organization",
-    "",
-    "```",
-    "find_releases(organizationSlug='my-organization', query='2ce6a27')",
-    "```",
-    "</examples>",
-    "",
-    "<hints>",
-    "- If the user passes a parameter in the form of name/otherName, its likely in the format of <organizationSlug>/<projectSlug>.",
-    "</hints>",
-  ].join("\n"),
+  description: `List or search releases (deployed versions) in a Sentry organization or project. Returns each release's dates, new issue count, last commit, and last deploy. Returns at most ${RESULT_LIMIT} releases with no next page; narrow by project or version to see others.`,
   inputSchema: {
     organizationSlug: ParamOrganizationSlug,
     regionUrl: ParamRegionUrl.nullable().default(null),
@@ -82,7 +56,9 @@ export default defineTool({
     query: z
       .string()
       .trim()
-      .describe("Search for versions which contain the provided string.")
+      .describe(
+        "Substring of the release version, such as a commit SHA prefix.",
+      )
       .nullable()
       .default(null),
   },
@@ -98,7 +74,7 @@ export default defineTool({
     });
     const organizationSlug = params.organizationSlug;
 
-    setTag("organization.slug", organizationSlug);
+    setTargetTagsAndAttributes({ organizationSlug });
 
     const releases = await apiService.listReleases({
       organizationSlug,
@@ -109,7 +85,7 @@ export default defineTool({
 
     return structuredResult({
       releases: releases.slice(0, RESULT_LIMIT).map((release) => ({
-        version: release.shortVersion,
+        version: release.version,
         dateCreated: new Date(release.dateCreated).toISOString(),
         dateReleased: release.dateReleased
           ? new Date(release.dateReleased).toISOString()

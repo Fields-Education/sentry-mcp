@@ -1,0 +1,70 @@
+/**
+ * Tests for `sentry send-envelope` deprecation shim.
+ */
+
+import type { SentryContext } from "../../src/context.js";
+import { beforeEach, describe, expect, test, vi } from "vitest";
+import { sendEnvelopeCommand } from "../../src/commands/send-envelope.js";
+import { CliError } from "../../src/lib/errors.js";
+import {
+  useTestConfigDir,
+  loadCommand,
+  type TestCommandFunction,
+} from "../helpers.js";
+import type { Writer } from "../../src/types/index.js";
+
+useTestConfigDir("send-envelope-");
+
+function makeContext() {
+  return {
+    stdout: { write: vi.fn<Writer["write"]>(() => true) },
+    stderr: { write: vi.fn<Writer["write"]>(() => true) },
+    cwd: "/tmp",
+  };
+}
+
+describe("sendEnvelopeCommand (deprecation shim)", () => {
+  let func: TestCommandFunction<SentryContext>;
+
+  beforeEach(async () => {
+    func = await loadCommand(sendEnvelopeCommand);
+  });
+
+  test("throws CliError suggesting event send --raw", async () => {
+    const ctx = makeContext();
+    await expect(
+      func.call(
+        ctx,
+        { dsn: "https://x@o1.ingest.sentry.io/1" },
+        "file.envelope",
+      ),
+    ).rejects.toBeInstanceOf(CliError);
+  });
+
+  test("error message includes the file argument", async () => {
+    const ctx = makeContext();
+    try {
+      await func.call(
+        ctx,
+        { dsn: "https://x@o1.ingest.sentry.io/1" },
+        "my.envelope",
+      );
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      expect((err as CliError).message).toContain("sentry event send --raw");
+      expect((err as CliError).message).toContain("my.envelope");
+    }
+  });
+
+  test("error message uses placeholder when no files given", async () => {
+    const ctx = makeContext();
+    try {
+      await func.call(ctx, { dsn: "https://x@o1.ingest.sentry.io/1" });
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      expect((err as CliError).message).toContain(
+        "sentry event send --raw <file>",
+      );
+    }
+  });
+});

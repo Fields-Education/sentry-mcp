@@ -1,10 +1,10 @@
 import { z } from "zod";
-import { setTag } from "@sentry/core";
-import { defineTool } from "../../internal/tool-helpers/define";
 import { apiServiceFromContext } from "../../internal/tool-helpers/api";
+import { defineTool } from "../../internal/tool-helpers/define";
 import { structuredResult } from "../../internal/tool-helpers/results";
-import type { ServerContext } from "../../types";
 import { ParamOrganizationSlug, ParamRegionUrl } from "../../schema";
+import { setTargetTagsAndAttributes } from "../../telem/scope";
+import type { ServerContext } from "../../types";
 
 export const createTeamOutputSchema = z.object({
   team: z.object({
@@ -16,29 +16,11 @@ export const createTeamOutputSchema = z.object({
 
 export default defineTool({
   name: "create_team",
+  title: "Create Team",
   skills: ["project-management"], // Only available in project-management skill
   requiredScopes: ["team:write"],
-  description: [
-    "Create a new team in Sentry.",
-    "",
-    "USE THIS TOOL WHEN USERS WANT TO:",
-    "- 'Create a new team'",
-    "- 'Set up a team called [X]'",
-    "- 'I need a team for my project'",
-    "",
-    "Be careful when using this tool!",
-    "",
-    "<examples>",
-    "### Create a new team",
-    "```",
-    "create_team(organizationSlug='my-organization', name='the-goats')",
-    "```",
-    "</examples>",
-    "",
-    "<hints>",
-    "- If any parameter is ambiguous, you should clarify with the user what they meant.",
-    "</hints>",
-  ].join("\n"),
+  description:
+    "Create a new team in a Sentry organization. Returns the team's ID, slug, and name.",
   inputSchema: {
     organizationSlug: ParamOrganizationSlug,
     regionUrl: ParamRegionUrl.nullable().default(null),
@@ -56,7 +38,7 @@ export default defineTool({
     });
     const organizationSlug = params.organizationSlug;
 
-    setTag("organization.slug", organizationSlug);
+    setTargetTagsAndAttributes({ organizationSlug });
 
     const team = await apiService.createTeam({
       organizationSlug,

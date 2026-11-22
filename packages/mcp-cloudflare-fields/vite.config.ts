@@ -1,1 +1,0 @@
-../mcp-cloudflare/vite.config.ts

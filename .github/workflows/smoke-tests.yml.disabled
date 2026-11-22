@@ -8,11 +8,21 @@ on:
   push:
     branches: [main]
   pull_request:
+    paths:
+      - ".github/workflows/smoke-tests.yml"
+      - "packages/mcp-cloudflare/**"
+      - "packages/mcp-core/**"
+      - "packages/mcp-server-mocks/**"
+      - "tsconfig.base.json"
+      - "packages/smoke-tests/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
 
 jobs:
   smoke-tests:
     name: Run Smoke Tests Against Local Server
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -22,8 +32,8 @@ jobs:
         with:
           node-version: "22"
 
-      # pnpm/action-setup@v4
-      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+      # pnpm/action-setup@v6.1.1
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115
         name: Install pnpm
         with:
           run_install: false
@@ -45,7 +55,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build
-        run: pnpm build
+        run: pnpm --filter '@sentry/mcp-cloudflare...' --if-present run build
 
       - name: Start local dev server
         working-directory: packages/mcp-cloudflare

@@ -1,4 +1,4 @@
-import { HttpResponse, http } from "msw";
+import { type HttpHandler, HttpResponse, http } from "msw";
 /**
  * MSW-based Mock Server for Sentry MCP Development and Testing.
  *
@@ -22,140 +22,71 @@ import { HttpResponse, http } from "msw";
  * // Now all Sentry API calls will be intercepted
  * ```
  */
-import { setupServer } from "msw/node";
+import { type SetupServer, setupServer } from "msw/node";
 
-import autofixStateFixture from "./fixtures/autofix-state.json" with {
-  type: "json",
-};
-import autofixStateExplorerFixture from "./fixtures/autofix-state-explorer.json" with {
-  type: "json",
-};
+import autofixStateFixture from "./fixtures/autofix-state.json" with { type: "json" };
+import autofixStateExplorerFixture from "./fixtures/autofix-state-explorer.json" with { type: "json" };
 import clientKeyFixture from "./fixtures/client-key.json" with { type: "json" };
-import dashboardDetailsFixture from "./fixtures/dashboard-details.json" with {
-  type: "json",
-};
-import dashboardListFixture from "./fixtures/dashboard-list.json" with {
-  type: "json",
-};
+import dashboardDetailsFixture from "./fixtures/dashboard-details.json" with { type: "json" };
+import dashboardListFixture from "./fixtures/dashboard-list.json" with { type: "json" };
 import eventsFixture from "./fixtures/event.json" with { type: "json" };
-import eventAttachmentsFixture from "./fixtures/event-attachments.json" with {
-  type: "json",
-};
-import eventsErrorsFixture from "./fixtures/events-errors.json" with {
-  type: "json",
-};
-import eventsErrorsEmptyFixture from "./fixtures/events-errors-empty.json" with {
-  type: "json",
-};
-import eventsSpansFixture from "./fixtures/events-spans.json" with {
-  type: "json",
-};
-import eventsSpansEmptyFixture from "./fixtures/events-spans-empty.json" with {
-  type: "json",
-};
-import eventsTraceMetricsFixture from "./fixtures/events-tracemetrics.json" with {
-  type: "json",
-};
-import eventsTraceMetricsAggregateFixture from "./fixtures/events-tracemetrics-aggregate.json" with {
-  type: "json",
-};
-import eventsTraceMetricsEmptyFixture from "./fixtures/events-tracemetrics-empty.json" with {
-  type: "json",
-};
-import flamegraphFixture from "./fixtures/flamegraph.json" with {
-  type: "json",
-};
+import eventAttachmentsFixture from "./fixtures/event-attachments.json" with { type: "json" };
+import eventsErrorsFixture from "./fixtures/events-errors.json" with { type: "json" };
+import eventsErrorsEmptyFixture from "./fixtures/events-errors-empty.json" with { type: "json" };
+import eventsSpansFixture from "./fixtures/events-spans.json" with { type: "json" };
+import eventsSpansEmptyFixture from "./fixtures/events-spans-empty.json" with { type: "json" };
+import eventsTraceMetricsFixture from "./fixtures/events-tracemetrics.json" with { type: "json" };
+import eventsTraceMetricsAggregateFixture from "./fixtures/events-tracemetrics-aggregate.json" with { type: "json" };
+import eventsTraceMetricsEmptyFixture from "./fixtures/events-tracemetrics-empty.json" with { type: "json" };
+import flamegraphFixture from "./fixtures/flamegraph.json" with { type: "json" };
 import issueFixture from "./fixtures/issue.json" with { type: "json" };
-import issueActivityFixture from "./fixtures/issue-activity.json" with {
-  type: "json",
-};
-import issueCommentsFixture from "./fixtures/issue-comments.json" with {
-  type: "json",
-};
-import issueNullCulpritFixture from "./fixtures/issue-null-culprit.json" with {
-  type: "json",
-};
-import issueTagValuesFixture from "./fixtures/issue-tag-values.json" with {
-  type: "json",
-};
-import issueUserReportsFixture from "./fixtures/issue-user-reports.json" with {
-  type: "json",
-};
+import issueActivityFixture from "./fixtures/issue-activity.json" with { type: "json" };
+import issueCommentsFixture from "./fixtures/issue-comments.json" with { type: "json" };
+import issueNullCulpritFixture from "./fixtures/issue-null-culprit.json" with { type: "json" };
+import issueTagValuesFixture from "./fixtures/issue-tag-values.json" with { type: "json" };
+import issueTagsFixture from "./fixtures/issue-tags.json" with { type: "json" };
+import issueUserReportsFixture from "./fixtures/issue-user-reports.json" with { type: "json" };
+import relatedIssuesFixture from "./fixtures/related-issues.json" with { type: "json" };
 import monitorFixture from "./fixtures/monitor.json" with { type: "json" };
-import monitorCheckInsFixture from "./fixtures/monitor-checkins.json" with {
-  type: "json",
-};
-import monitorStatsFixture from "./fixtures/monitor-stats.json" with {
-  type: "json",
-};
-import organizationFixture from "./fixtures/organization.json" with {
-  type: "json",
-};
-import performanceEventFixture from "./fixtures/performance-event.json" with {
-  type: "json",
-};
-import profileChunkFixture from "./fixtures/profile-chunk.json" with {
-  type: "json",
-};
+import monitorCheckInsFixture from "./fixtures/monitor-checkins.json" with { type: "json" };
+import monitorStatsFixture from "./fixtures/monitor-stats.json" with { type: "json" };
+import organizationFixture from "./fixtures/organization.json" with { type: "json" };
+import performanceEventFixture from "./fixtures/performance-event.json" with { type: "json" };
+import performanceIssueFixture from "./fixtures/performance-issue.json" with { type: "json" };
+import profileChunkFixture from "./fixtures/profile-chunk.json" with { type: "json" };
 import projectFixture from "./fixtures/project.json" with { type: "json" };
 import releaseFixture from "./fixtures/release.json" with { type: "json" };
-import releaseCommitsFixture from "./fixtures/release-commits.json" with {
-  type: "json",
-};
-import releaseDeploysFixture from "./fixtures/release-deploys.json" with {
-  type: "json",
-};
-import replayDetailsFixture from "./fixtures/replay-details.json" with {
-  type: "json",
-};
-import replayRecordingSegmentsFixture from "./fixtures/replay-recording-segments.json" with {
-  type: "json",
-};
+import releaseCommitsFixture from "./fixtures/release-commits.json" with { type: "json" };
+import releaseDeploysFixture from "./fixtures/release-deploys.json" with { type: "json" };
+import replayDetailsFixture from "./fixtures/replay-details.json" with { type: "json" };
+import replayRecordingSegmentsFixture from "./fixtures/replay-recording-segments.json" with { type: "json" };
+import sourceMapDebugFixture from "./fixtures/source-map-debug.json" with { type: "json" };
 import tagsFixture from "./fixtures/tags.json" with { type: "json" };
 import teamFixture from "./fixtures/team.json" with { type: "json" };
 import traceFixture from "./fixtures/trace.json" with { type: "json" };
-import traceEventFixture from "./fixtures/trace-event.json" with {
-  type: "json",
-};
-import traceItemsAttributesLogsNumberFixture from "./fixtures/trace-items-attributes-logs-number.json" with {
-  type: "json",
-};
-import traceItemsAttributesLogsStringFixture from "./fixtures/trace-items-attributes-logs-string.json" with {
-  type: "json",
-};
-import traceItemsAttributesSpansNumberFixture from "./fixtures/trace-items-attributes-spans-number.json" with {
-  type: "json",
-};
-import traceItemsAttributesSpansStringFixture from "./fixtures/trace-items-attributes-spans-string.json" with {
-  type: "json",
-};
-import traceItemsAttributesTraceMetricsNumberFixture from "./fixtures/trace-items-attributes-tracemetrics-number.json" with {
-  type: "json",
-};
-import traceItemsAttributesTraceMetricsStringFixture from "./fixtures/trace-items-attributes-tracemetrics-string.json" with {
-  type: "json",
-};
+import traceEventFixture from "./fixtures/trace-event.json" with { type: "json" };
+import traceItemsAttributesLogsNumberFixture from "./fixtures/trace-items-attributes-logs-number.json" with { type: "json" };
+import traceItemsAttributesLogsNumberWithContextFixture from "./fixtures/trace-items-attributes-logs-number-with-context.json" with { type: "json" };
+import traceItemsAttributesLogsStringFixture from "./fixtures/trace-items-attributes-logs-string.json" with { type: "json" };
+import traceItemsAttributesLogsStringWithContextFixture from "./fixtures/trace-items-attributes-logs-string-with-context.json" with { type: "json" };
+import traceItemsAttributesSpansNumberFixture from "./fixtures/trace-items-attributes-spans-number.json" with { type: "json" };
+import traceItemsAttributesSpansStringFixture from "./fixtures/trace-items-attributes-spans-string.json" with { type: "json" };
+import traceItemsAttributesSpansNumberWithContextFixture from "./fixtures/trace-items-attributes-spans-number-with-context.json" with { type: "json" };
+import traceItemsAttributesSpansStringWithContextFixture from "./fixtures/trace-items-attributes-spans-string-with-context.json" with { type: "json" };
+import traceItemsAttributesTraceMetricsNumberFixture from "./fixtures/trace-items-attributes-tracemetrics-number.json" with { type: "json" };
+import traceItemsAttributesTraceMetricsNumberWithContextFixture from "./fixtures/trace-items-attributes-tracemetrics-number-with-context.json" with { type: "json" };
+import traceItemsAttributesTraceMetricsStringFixture from "./fixtures/trace-items-attributes-tracemetrics-string.json" with { type: "json" };
+import traceItemsAttributesTraceMetricsStringWithContextFixture from "./fixtures/trace-items-attributes-tracemetrics-string-with-context.json" with { type: "json" };
 import traceMetaFixture from "./fixtures/trace-meta.json" with { type: "json" };
-import traceMetaWithNullsFixture from "./fixtures/trace-meta-with-nulls.json" with {
-  type: "json",
-};
-import traceMixedFixture from "./fixtures/trace-mixed.json" with {
-  type: "json",
-};
-import transactionProfileV1Fixture from "./fixtures/transaction-profile-v1.json" with {
-  type: "json",
-};
-import transactionProfileV1MissingFunctionFixture from "./fixtures/transaction-profile-v1-missing-function.json" with {
-  type: "json",
-};
-import uptimeChecksFixture from "./fixtures/uptime-checks.json" with {
-  type: "json",
-};
-import uptimeMonitorFixture from "./fixtures/uptime-monitor.json" with {
-  type: "json",
-};
+import traceMetaWithNullsFixture from "./fixtures/trace-meta-with-nulls.json" with { type: "json" };
+import traceMixedFixture from "./fixtures/trace-mixed.json" with { type: "json" };
+import transactionProfileV1Fixture from "./fixtures/transaction-profile-v1.json" with { type: "json" };
+import transactionProfileV1MissingFunctionFixture from "./fixtures/transaction-profile-v1-missing-function.json" with { type: "json" };
+import uptimeChecksFixture from "./fixtures/uptime-checks.json" with { type: "json" };
+import uptimeMonitorFixture from "./fixtures/uptime-monitor.json" with { type: "json" };
 import userFixture from "./fixtures/user.json" with { type: "json" };
 import { issueFixture2 } from "./payloads";
+import { eventsTimeSeriesResponse } from "./events-timeseries";
 
 /**
  * Builds MSW handlers for both SaaS and self-hosted Sentry instances.
@@ -192,8 +123,8 @@ function buildHandlers(
     fetch: Parameters<(typeof http)[keyof typeof http]>[1];
     controlOnly?: boolean;
   }[],
-) {
-  const result = [];
+): HttpHandler[] {
+  const result: HttpHandler[] = [];
 
   for (const handler of handlers) {
     // Always add handler for main host (sentry.io)
@@ -216,13 +147,17 @@ function buildHandlers(
 }
 
 function withTraceItemAttributeMetadata(
-  attributes: readonly { key: string; name: string }[],
+  attributes: readonly {
+    key: string;
+    name: string;
+    attributeSource?: { source_type: string };
+  }[],
   attributeType: "string" | "number" | "boolean",
 ) {
   return attributes.map((attribute) => ({
+    attributeSource: { source_type: "sentry" as const },
     ...attribute,
     attributeType,
-    attributeSource: { source_type: "sentry" as const },
   }));
 }
 
@@ -233,7 +168,12 @@ type IssueUpdateBody = {
   ignoreUserCount?: number;
   ignoreUserWindow?: number;
   ignoreWindow?: number;
+  priority?: string;
   status?: string;
+  statusDetails?: {
+    inRelease?: string;
+    inCommit?: { commit: string; repository: string };
+  };
   substatus?: string;
 };
 
@@ -283,7 +223,7 @@ function buildMockIgnoredStatusDetails(
 }
 
 function buildUpdatedIssueResponse(
-  baseIssue: typeof issueFixture,
+  baseIssue: typeof issueFixture | typeof issueFixture2,
   body: IssueUpdateBody,
 ) {
   const hasIgnoreConditions =
@@ -305,6 +245,16 @@ function buildUpdatedIssueResponse(
 
   if (requestedStatus === "resolvedInNextRelease") {
     statusDetails = { inNextRelease: true };
+  } else if (body.statusDetails?.inRelease !== undefined) {
+    statusDetails = { inRelease: body.statusDetails.inRelease };
+  } else if (body.statusDetails?.inCommit !== undefined) {
+    // Sentry returns the serialized commit, keyed by its SHA.
+    statusDetails = {
+      inCommit: {
+        id: body.statusDetails.inCommit.commit,
+        repository: { name: body.statusDetails.inCommit.repository },
+      },
+    };
   } else if (status === "ignored") {
     statusDetails = buildMockIgnoredStatusDetails(body, substatus);
   } else if (body.status !== undefined) {
@@ -317,6 +267,7 @@ function buildUpdatedIssueResponse(
     substatus,
     statusDetails,
     assignedTo: body.assignedTo ?? baseIssue.assignedTo,
+    priority: body.priority ?? baseIssue.priority,
   };
 }
 
@@ -326,7 +277,7 @@ function buildUpdatedIssueResponse(
  * Covers all endpoints used by the MCP server with realistic responses,
  * parameter validation, and error scenarios.
  */
-export const restHandlers = buildHandlers([
+export const restHandlers: HttpHandler[] = buildHandlers([
   // User data endpoints - controlOnly: true (only available on sentry.io)
   {
     method: "get",
@@ -416,13 +367,12 @@ export const restHandlers = buildHandlers([
         expiresAt: "2026-08-13T12:00:00Z",
         continueUpdates: true,
         runStatus: "active",
-        projectSlugs: [],
-        issueIds: [],
         stages: [
           {
             stage: "connect_mcp",
             status: "completed",
             eventNote: null,
+            extra: { method: "mcp" },
           },
         ],
       });
@@ -450,7 +400,7 @@ export const restHandlers = buildHandlers([
           ? {
               Link: '<https://sentry.io/api/0/organizations/sentry-mcp-evals/dashboards/?cursor=dashboard-cursor>; rel="next"; results="true"; cursor="dashboard-cursor"',
             }
-          : undefined,
+          : {},
       });
     },
   },
@@ -508,12 +458,12 @@ export const restHandlers = buildHandlers([
     path: "/api/0/teams/sentry-mcp-evals/the-goats/projects/",
     fetch: async ({ request }) => {
       // TODO: validate payload (only accept 'cloudflare-mcp' for project name)
-      const body = (await request.json()) as any;
+      const body = await readJsonBody(request);
       return HttpResponse.json({
         ...projectFixture,
-        name: body?.name || "cloudflare-mcp",
-        slug: body?.slug || "cloudflare-mcp",
-        platform: body?.platform || "node",
+        name: stringField(body, "name") || "cloudflare-mcp",
+        slug: stringField(body, "slug") || "cloudflare-mcp",
+        platform: stringField(body, "platform") || "node",
       });
     },
   },
@@ -528,7 +478,7 @@ export const restHandlers = buildHandlers([
     method: "get",
     path: "/api/0/projects/:organizationSlug/:projectSlugOrId/",
     fetch: ({ params }) => {
-      const projectSlugOrId = String(params.projectSlugOrId);
+      const projectSlugOrId = String(params["projectSlugOrId"]);
       const numericProjectId = Number(projectSlugOrId);
 
       return HttpResponse.json({
@@ -549,12 +499,12 @@ export const restHandlers = buildHandlers([
     method: "put",
     path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/",
     fetch: async ({ request }) => {
-      const body = (await request.json()) as any;
+      const body = await readJsonBody(request);
       return HttpResponse.json({
         ...projectFixture,
-        slug: body?.slug || "cloudflare-mcp",
-        name: body?.name || "cloudflare-mcp",
-        platform: body?.platform || "node",
+        slug: stringField(body, "slug") || "cloudflare-mcp",
+        name: stringField(body, "name") || "cloudflare-mcp",
+        platform: stringField(body, "platform") || "node",
       });
     },
   },
@@ -598,7 +548,7 @@ export const restHandlers = buildHandlers([
           : null;
       return HttpResponse.json({
         ...clientKeyFixture,
-        id: params.keyId,
+        id: params["keyId"],
         name: body.name ?? clientKeyFixture.name,
         isActive:
           body.isActive !== undefined
@@ -614,6 +564,11 @@ export const restHandlers = buildHandlers([
         },
       });
     },
+  },
+  {
+    method: "get",
+    path: "/api/0/organizations/sentry-mcp-evals/events-timeseries/",
+    fetch: ({ request }) => eventsTimeSeriesResponse(request),
   },
   {
     method: "get",
@@ -667,7 +622,7 @@ export const restHandlers = buildHandlers([
         }
 
         // TODO: this is not correct, but itll fix test flakiness for now
-        const sortedQuery = query ? query?.split(" ").sort().join(" ") : null;
+        const sortedQuery = query ? query.split(" ").sort().join(" ") : null;
         if (
           ![
             null,
@@ -707,7 +662,7 @@ export const restHandlers = buildHandlers([
           return HttpResponse.json(eventsTraceMetricsAggregateFixture);
         }
 
-        const sortedQuery = query ? query?.split(" ").sort().join(" ") : null;
+        const sortedQuery = query ? query.split(" ").sort().join(" ") : null;
         if (
           ![
             null,
@@ -754,7 +709,7 @@ export const restHandlers = buildHandlers([
 
       const query = url.searchParams.get("query");
       const queryTokens = query?.split(" ").sort() ?? [];
-      const sortedQuery = queryTokens ? queryTokens.join(" ") : null;
+      const sortedQuery = queryTokens.join(" ");
       if (
         ![
           null,
@@ -804,7 +759,7 @@ export const restHandlers = buildHandlers([
 
       const query = url.searchParams.get("query");
       const queryTokens = query?.split(" ").sort() ?? [];
-      const sortedQuery = queryTokens ? queryTokens.join(" ") : null;
+      const sortedQuery = queryTokens.join(" ");
       if (query === "7ca573c0f4814912aaa9bdc77d1a7d51") {
         return HttpResponse.json([issueFixture]);
       }
@@ -959,6 +914,12 @@ export const restHandlers = buildHandlers([
     path: "/api/0/organizations/sentry-mcp-evals/issues/6507376926/events/latest/",
     fetch: () => HttpResponse.json(eventsFixture),
   },
+  // Sentry's source map check for the event above: no release and no debug IDs
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/:project/events/7ca573c0f4814912aaa9bdc77d1a7d51/source-map-debug/",
+    fetch: () => HttpResponse.json(sourceMapDebugFixture),
+  },
   {
     method: "get",
     path: "/api/0/projects/sentry-mcp-evals/CLOUDFLARE-MCP/stacktrace-link/",
@@ -975,6 +936,16 @@ export const restHandlers = buildHandlers([
   // Performance issue with N+1 query detection
   {
     method: "get",
+    path: "/api/0/organizations/sentry-mcp-evals/issues/PERF-N1-001/",
+    fetch: () => HttpResponse.json(performanceIssueFixture),
+  },
+  {
+    method: "get",
+    path: "/api/0/organizations/sentry-mcp-evals/issues/7890123456/",
+    fetch: () => HttpResponse.json(performanceIssueFixture),
+  },
+  {
+    method: "get",
     path: "/api/0/organizations/sentry-mcp-evals/issues/PERF-N1-001/events/latest/",
     fetch: () => HttpResponse.json(performanceEventFixture),
   },
@@ -989,6 +960,15 @@ export const restHandlers = buildHandlers([
     fetch: () => HttpResponse.json(performanceEventFixture),
   },
 
+  {
+    method: "get",
+    path: "/api/0/organizations/sentry-mcp-evals/environments/",
+    fetch: () =>
+      HttpResponse.json([
+        { id: "1", name: "production" },
+        { id: "2", name: "development" },
+      ]),
+  },
   {
     method: "get",
     path: "/api/0/organizations/sentry-mcp-evals/releases/",
@@ -1050,16 +1030,16 @@ export const restHandlers = buildHandlers([
           ...body,
           id: "4509100000001002",
           projectSlug: "cloudflare-mcp",
-          status: body.status ?? "active",
+          status: body["status"] ?? "active",
           uptimeStatus: 1,
-          method: body.method ?? "GET",
-          headers: body.headers ?? [],
-          body: body.body ?? null,
-          assertion: body.assertion ?? null,
-          recoveryThreshold: body.recoveryThreshold ?? 1,
-          downtimeThreshold: body.downtimeThreshold ?? 3,
-          traceSampling: body.traceSampling ?? false,
-          responseCaptureEnabled: body.responseCaptureEnabled ?? true,
+          method: body["method"] ?? "GET",
+          headers: body["headers"] ?? [],
+          body: body["body"] ?? null,
+          assertion: body["assertion"] ?? null,
+          recoveryThreshold: body["recoveryThreshold"] ?? 1,
+          downtimeThreshold: body["downtimeThreshold"] ?? 3,
+          traceSampling: body["traceSampling"] ?? false,
+          responseCaptureEnabled: body["responseCaptureEnabled"] ?? true,
         },
         { status: 201 },
       );
@@ -1079,6 +1059,11 @@ export const restHandlers = buildHandlers([
   {
     method: "delete",
     path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/uptime/4509100000001001/",
+    fetch: () => new HttpResponse(null, { status: 202 }),
+  },
+  {
+    method: "delete",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/monitors/nightly-import/environments/production/",
     fetch: () => new HttpResponse(null, { status: 202 }),
   },
   {
@@ -1162,7 +1147,7 @@ export const restHandlers = buildHandlers([
           fields.length > 0 ? null : "Orderby must also be a selected field",
       }));
 
-      const environmentResults = environments.map((environment) => ({
+      const environmentResults = environments.map(() => ({
         valid: true,
         error: null,
       }));
@@ -1193,6 +1178,7 @@ export const restHandlers = buildHandlers([
       const url = new URL(request.url);
       const itemType = url.searchParams.get("itemType");
       const attributeType = url.searchParams.get("attributeType");
+      const useContext = url.searchParams.get("expand") === "context";
 
       // Validate required parameters
       if (!itemType) {
@@ -1215,6 +1201,18 @@ export const restHandlers = buildHandlers([
 
       if (!attributeType) {
         if (normalizedItemType === "span") {
+          if (useContext) {
+            return HttpResponse.json([
+              ...withTraceItemAttributeMetadata(
+                traceItemsAttributesSpansStringWithContextFixture,
+                "string",
+              ),
+              ...withTraceItemAttributeMetadata(
+                traceItemsAttributesSpansNumberWithContextFixture,
+                "number",
+              ),
+            ]);
+          }
           return HttpResponse.json([
             ...withTraceItemAttributeMetadata(
               traceItemsAttributesSpansStringFixture,
@@ -1227,6 +1225,18 @@ export const restHandlers = buildHandlers([
           ]);
         }
         if (normalizedItemType === "logs") {
+          if (useContext) {
+            return HttpResponse.json([
+              ...withTraceItemAttributeMetadata(
+                traceItemsAttributesLogsStringWithContextFixture,
+                "string",
+              ),
+              ...withTraceItemAttributeMetadata(
+                traceItemsAttributesLogsNumberWithContextFixture,
+                "number",
+              ),
+            ]);
+          }
           return HttpResponse.json([
             ...withTraceItemAttributeMetadata(
               traceItemsAttributesLogsStringFixture,
@@ -1234,6 +1244,18 @@ export const restHandlers = buildHandlers([
             ),
             ...withTraceItemAttributeMetadata(
               traceItemsAttributesLogsNumberFixture,
+              "number",
+            ),
+          ]);
+        }
+        if (useContext) {
+          return HttpResponse.json([
+            ...withTraceItemAttributeMetadata(
+              traceItemsAttributesTraceMetricsStringWithContextFixture,
+              "string",
+            ),
+            ...withTraceItemAttributeMetadata(
+              traceItemsAttributesTraceMetricsNumberWithContextFixture,
               "number",
             ),
           ]);
@@ -1327,6 +1349,11 @@ export const restHandlers = buildHandlers([
     fetch: () => HttpResponse.json({ autofix: null }),
   },
   {
+    method: "get",
+    path: "/api/0/organizations/sentry-mcp-evals/issues/:issueId(\\d+)/autofix/",
+    fetch: () => HttpResponse.json({ autofix: null }),
+  },
+  {
     method: "post",
     path: "/api/0/organizations/sentry-mcp-evals/issues/CLOUDFLARE-MCP-42/autofix/",
     fetch: () => HttpResponse.json({ run_id: 123 }),
@@ -1415,6 +1442,13 @@ export const restHandlers = buildHandlers([
         },
       }),
   },
+  // The backend returns 404 when no suspect committers are found.
+  {
+    method: "get",
+    path: "/api/0/projects/:org/:project/events/:eventId/committers/",
+    fetch: () =>
+      HttpResponse.json({ detail: "No committers found" }, { status: 404 }),
+  },
   // External issue links endpoints (default: empty for most issues)
   {
     method: "get",
@@ -1427,12 +1461,30 @@ export const restHandlers = buildHandlers([
     path: "/api/0/organizations/:org/issues/:issueId/user-reports/",
     fetch: () => HttpResponse.json(issueUserReportsFixture),
   },
-  // Issue tag values endpoints
+  // Related issues endpoint
+  {
+    method: "get",
+    path: "/api/0/organizations/:org/issues/:issueId/related/",
+    fetch: () => HttpResponse.json(relatedIssuesFixture),
+  },
+  // Issue tag keys and tag values endpoints
+  {
+    method: "get",
+    path: "/api/0/organizations/:org/issues/:issueId/tags/",
+    fetch: () => HttpResponse.json(issueTagsFixture),
+  },
   {
     method: "get",
     path: "/api/0/organizations/:org/issues/:issueId/tags/:tagKey/",
     fetch: ({ params }) => {
-      const tagKey = params.tagKey as string;
+      const tagKey = params["tagKey"] as string;
+      // Sentry answers a key the issue does not have with a generic 404.
+      if (!issueTagsFixture.some((tag) => tag.key === tagKey)) {
+        return HttpResponse.json(
+          { detail: "The requested resource does not exist" },
+          { status: 404 },
+        );
+      }
       // Return fixture with the requested tag key
       return HttpResponse.json({
         ...issueTagValuesFixture,
@@ -1454,9 +1506,8 @@ export const restHandlers = buildHandlers([
   {
     method: "post",
     path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/teams/:teamSlug/",
-    fetch: async ({ request, params }) => {
-      const body = (await request.json()) as any;
-      const teamSlug = params.teamSlug as string;
+    fetch: async ({ params }) => {
+      const teamSlug = params["teamSlug"] as string;
       return HttpResponse.json({
         ...teamFixture,
         id: "4509109078196224",
@@ -1564,7 +1615,7 @@ export const restHandlers = buildHandlers([
     method: "get",
     path: "/api/0/projects/:organizationSlug/:projectSlugOrId/profiling/profiles/:profileId/",
     fetch: ({ params }) => {
-      const profileId = String(params.profileId);
+      const profileId = String(params["profileId"]);
       return HttpResponse.json({
         ...transactionProfileV1Fixture,
         event_id: profileId,
@@ -1607,7 +1658,6 @@ export const restHandlers = buildHandlers([
           size: 1024,
           mimetype: "application/octet-stream",
           dateCreated: "2025-04-08T21:15:04.000Z",
-          sha1: "abc123def456",
           headers: { "Content-Type": "application/octet-stream" },
         },
       ]),
@@ -1623,6 +1673,116 @@ export const restHandlers = buildHandlers([
         },
       });
     },
+  },
+  // A text/plain (.log) attachment (the shape reported in #1267).
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/e49541c747cb4d8aa3efb70ca5aba245/attachments/",
+    fetch: () =>
+      HttpResponse.json([
+        {
+          id: "789",
+          name: "application.log",
+          type: "event.attachment",
+          size: 44,
+          mimetype: "text/plain",
+          dateCreated: "2025-04-08T21:15:04.000Z",
+          headers: { "Content-Type": "text/plain" },
+        },
+      ]),
+  },
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/e49541c747cb4d8aa3efb70ca5aba245/attachments/789/",
+    fetch: () =>
+      new HttpResponse(
+        new Blob(["INFO app started\nERROR db connection failed\n"], {
+          type: "text/plain",
+        }),
+        { headers: { "Content-Type": "text/plain" } },
+      ),
+  },
+  // Oversized objectstore attachment: the download 302-redirects to a presigned
+  // URL (mocked below).
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/f49541c747cb4d8aa3efb70ca5aba246/attachments/",
+    fetch: () =>
+      HttpResponse.json([
+        {
+          id: "999",
+          name: "core.dmp",
+          type: "event.attachment",
+          size: 50 * 1024 * 1024,
+          mimetype: "application/octet-stream",
+          dateCreated: "2025-04-08T21:15:04.000Z",
+          headers: { "Content-Type": "application/octet-stream" },
+        },
+      ]),
+  },
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/f49541c747cb4d8aa3efb70ca5aba246/attachments/999/",
+    fetch: () =>
+      HttpResponse.redirect(
+        "https://objectstore.example.test/attachments/999/blob?sig=test-signature",
+        302,
+      ),
+  },
+  // Oversized legacy attachment: the download streams a 200 with no redirect, so
+  // there is no presigned URL.
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/h49541c747cb4d8aa3efb70ca5aba248/attachments/",
+    fetch: () =>
+      HttpResponse.json([
+        {
+          id: "222",
+          // Hostile, uploader-controlled name: must never reach a shell command.
+          name: "pwn; rm -rf ~ #.dmp",
+          type: "event.attachment",
+          size: 40 * 1024 * 1024,
+          mimetype: "application/octet-stream",
+          dateCreated: "2025-04-08T21:15:04.000Z",
+          headers: { "Content-Type": "application/octet-stream" },
+        },
+      ]),
+  },
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/h49541c747cb4d8aa3efb70ca5aba248/attachments/222/",
+    fetch: () =>
+      new HttpResponse(
+        new Blob(["legacy bytes"], { type: "application/octet-stream" }),
+        {
+          headers: { "Content-Type": "application/octet-stream" },
+        },
+      ),
+  },
+  // Metadata reports a non-empty file but the download returns zero bytes.
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/g49541c747cb4d8aa3efb70ca5aba247/attachments/",
+    fetch: () =>
+      HttpResponse.json([
+        {
+          id: "111",
+          name: "screenshot.png",
+          type: "event.attachment",
+          size: 1024,
+          mimetype: "image/png",
+          dateCreated: "2025-04-08T21:15:04.000Z",
+          headers: { "Content-Type": "image/png" },
+        },
+      ]),
+  },
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/g49541c747cb4d8aa3efb70ca5aba247/attachments/111/",
+    fetch: () =>
+      new HttpResponse(new Blob([], { type: "image/png" }), {
+        headers: { "Content-Type": "image/png" },
+      }),
   },
   {
     method: "get",
@@ -1664,9 +1824,13 @@ export const restHandlers = buildHandlers([
 ]);
 
 // Add handlers for mcp.sentry.dev and localhost
-export const searchHandlers = [
+export const searchHandlers: HttpHandler[] = [
+  // Presigned target for the oversized-attachment redirect (999).
+  http.get("https://objectstore.example.test/attachments/999/blob", () =>
+    HttpResponse.text("presigned blob bytes"),
+  ),
   http.post("https://mcp.sentry.dev/api/search", async ({ request }) => {
-    const body = (await request.json()) as any;
+    const body = await readJsonBody(request);
 
     // Mock different results based on guide
     let results = [
@@ -1687,8 +1851,8 @@ export const searchHandlers = [
     ];
 
     // If guide is specified, return platform-specific results
-    if (body?.guide) {
-      const guide = body.guide;
+    const guide = stringField(body, "guide");
+    if (guide) {
       if (guide.includes("/")) {
         const [platformName, guideName] = guide.split("/");
         results = [
@@ -1713,14 +1877,14 @@ export const searchHandlers = [
 
     // Return mock search results
     return HttpResponse.json({
-      query: body?.query || "",
+      query: stringField(body, "query") || "",
       results,
     });
   }),
 ];
 
 // Mock handlers for documentation fetching
-export const docsHandlers = [
+export const docsHandlers: HttpHandler[] = [
   http.get("https://docs.sentry.io/product/rate-limiting.md", () => {
     return new HttpResponse(
       `# Project Rate Limits and Quotas
@@ -1898,6 +2062,43 @@ When Sentry detects an abnormal spike in events, it automatically activates spik
       );
     },
   ),
+  // docs.sentry.io serves unknown pages as a 200 "Page Not Found" document
+  http.get("https://docs.sentry.io/ai/mcp.md", () => {
+    return new HttpResponse(
+      `---
+title: "Page Not Found"
+url: "https://docs.sentry.io/ai/mcp"
+---
+
+# Page Not Found
+
+The page \`/ai/mcp\` does not exist.
+
+## Find what you need
+
+- [Site index](https://docs.sentry.io/llms.txt) — LLM-optimized page listing`,
+      {
+        headers: {
+          "Content-Type": "text/markdown",
+          "X-Sentry-Docs-Not-Found": "1",
+        },
+      },
+    );
+  }),
+  // Moved pages answer with a relative redirect to the new .md path.
+  http.get("https://docs.sentry.io/product/rate-limits.md", () => {
+    return new HttpResponse(null, {
+      status: 308,
+      headers: { Location: "/product/rate-limiting.md#quotas" },
+    });
+  }),
+  // A redirect off the docs hosts, like develop.sentry.io's login redirect.
+  http.get("https://docs.sentry.io/product/offsite.md", () => {
+    return new HttpResponse(null, {
+      status: 302,
+      headers: { Location: "https://sentry.io/auth/login/" },
+    });
+  }),
   // Catch-all for other doc paths - return 404
   http.get("https://docs.sentry.io/*.md", () => {
     return new HttpResponse(null, { status: 404 });
@@ -1942,7 +2143,7 @@ When Sentry detects an abnormal spike in events, it automatically activates spik
  * This matches the real Sentry API behavior where user data must always be queried
  * from the main API server.
  */
-export const mswServer = setupServer(
+export const mswServer: SetupServer = setupServer(
   ...restHandlers,
   ...searchHandlers,
   ...docsHandlers,
@@ -1961,6 +2162,22 @@ export {
   createUnknownEvent,
   createUnsupportedIssue,
 } from "./fixtures";
+
+/** Reads a mocked request's JSON body, or an empty object when it has none. */
+async function readJsonBody(
+  request: Request,
+): Promise<Record<string, unknown>> {
+  const body: unknown = await request.json();
+  return typeof body === "object" && body !== null ? { ...body } : {};
+}
+
+function stringField(
+  body: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const value = body[key];
+  return typeof value === "string" ? value : undefined;
+}
 // Export utilities for creating mock servers
 export { setupMockServer, startMockServer } from "./utils";
 // Export fixtures for use in tests
@@ -1984,9 +2201,11 @@ export {
   performanceEventFixture,
   profileChunkFixture,
   projectFixture,
+  relatedIssuesFixture,
   releaseFixture,
   replayDetailsFixture,
   replayRecordingSegmentsFixture,
+  sourceMapDebugFixture,
   tagsFixture,
   teamFixture,
   traceEventFixture,

@@ -1,20 +1,21 @@
-import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import type {
-  ServerNotification,
-  ServerRequest,
-} from "@modelcontextprotocol/sdk/types.js";
+import { getClient } from "@sentry/core";
 import { z } from "zod";
 import { UserInputError } from "../../errors";
 import {
   getConstraintKeysToFilter,
   getConstraintParametersToInject,
 } from "../../internal/constraint-helpers";
+import { withRoutedCredential } from "../../internal/tool-helpers/credential-routing";
+import {
+  applyDefaultOrganization,
+  isOrganizationSlugRequired,
+} from "../../internal/tool-helpers/default-organization";
 import { type Skill, isEnabledBySkills } from "../../skills";
 import type { ProjectCapabilities, ServerContext } from "../../types";
 import {
   isCatalogInfrastructureToolName,
   isOutsideCatalogToolName,
-  isTopLevelToolName,
+  isTopLevelTool,
 } from "../surfaces";
 import {
   type ToolConfig,
@@ -23,11 +24,11 @@ import {
   resolveDescription,
 } from "../types";
 
-export type ToolRegistry = Record<string, ToolConfig<any>>;
+export type ToolRegistry = Record<string, ToolConfig>;
 
 export interface ToolWithContext {
   key: string;
-  tool: ToolConfig<any>;
+  tool: ToolConfig;
   isCatalogTool: boolean;
   isTopLevel: boolean;
 }
@@ -40,10 +41,12 @@ export interface CatalogContext {
 
 function getToolPlacement({
   key,
+  tool,
   experimentalMode,
   useDefaultSurfacePolicy,
 }: {
   key: string;
+  tool: ToolConfig;
   experimentalMode: boolean;
   useDefaultSurfacePolicy: boolean;
 }): {
@@ -53,7 +56,7 @@ function getToolPlacement({
   if (useDefaultSurfacePolicy) {
     return {
       isCatalogTool: !isOutsideCatalogToolName(key),
-      isTopLevel: isTopLevelToolName(key, experimentalMode),
+      isTopLevel: isTopLevelTool(tool, experimentalMode),
     };
   }
 
@@ -66,7 +69,7 @@ function hasRequiredCapabilities({
   tool,
   context,
 }: {
-  tool: ToolConfig<any>;
+  tool: ToolConfig;
   context: ServerContext;
 }): boolean {
   if (
@@ -87,10 +90,9 @@ function isAllowedBySkills({
   tool,
   context,
 }: {
-  tool: ToolConfig<any>;
+  tool: ToolConfig;
   context: ServerContext;
 }): boolean {
-
   const grantedSkills: Set<Skill> | undefined = context.grantedSkills
     ? new Set<Skill>(context.grantedSkills)
     : undefined;
@@ -118,24 +120,42 @@ function isHiddenByConstraints({
   );
 }
 
+// submit_feedback_to_sentry_team can only deliver reports when Sentry telemetry has a DSN
+// (e.g. stdio without SENTRY_DSN has none), so hide it otherwise.
+function isMissingFeedbackDsn(key: string): boolean {
+  return key === "submit_feedback_to_sentry_team" && !getClient()?.getDsn();
+}
+
+/**
+ * The input schema a session exposes: constrained keys are removed, and a
+ * required `organizationSlug` becomes optional because
+ * {@link applyDefaultOrganization} fills it, or explains which one to pass.
+ */
 export function getFilteredInputSchema(
-  tool: ToolConfig<any>,
+  tool: ToolConfig,
   context: ServerContext,
 ): Record<string, z.ZodType> {
   const constraintKeysToFilter = new Set(
     getConstraintKeysToFilter(context.constraints, tool.inputSchema),
   );
 
-  return Object.fromEntries(
+  const schema = Object.fromEntries(
     Object.entries(tool.inputSchema).filter(
       ([key]) => !constraintKeysToFilter.has(key),
     ),
   ) as Record<string, z.ZodType>;
+  if (
+    "organizationSlug" in schema &&
+    isOrganizationSlugRequired(schema["organizationSlug"])
+  ) {
+    schema["organizationSlug"] = schema["organizationSlug"].optional();
+  }
+  return schema;
 }
 
 export function injectConstraintParams(
   params: Record<string, unknown>,
-  tool: ToolConfig<any>,
+  tool: ToolConfig,
   context: ServerContext,
 ): Record<string, unknown> {
   return {
@@ -157,6 +177,7 @@ export function getAvailableTools({
   for (const [key, tool] of Object.entries(tools)) {
     const placement = getToolPlacement({
       key,
+      tool,
       experimentalMode,
       useDefaultSurfacePolicy,
     });
@@ -181,6 +202,10 @@ export function getAvailableTools({
       continue;
     }
 
+    if (isMissingFeedbackDsn(key)) {
+      continue;
+    }
+
     availableTools.push({ key, tool, ...placement });
   }
 
@@ -201,7 +226,6 @@ export function getToolsForMcpRegistration({
     experimentalMode,
     useDefaultSurfacePolicy,
   });
-
 
   return availableTools.filter(({ isTopLevel }) => isTopLevel);
 }
@@ -239,13 +263,22 @@ export async function executeToolHandler({
   params,
   context,
 }: {
-  tool: ToolConfig<any>;
+  tool: ToolConfig;
   params: Record<string, unknown>;
   context: ServerContext;
 }) {
-  const paramsWithConstraints = prepareToolParams({ tool, params, context });
+  const paramsWithConstraints = await prepareToolCallParams({
+    tool,
+    params,
+    context,
+  });
 
-  return tool.handler(paramsWithConstraints as never, context);
+  return await withRoutedCredential(
+    context,
+    paramsWithConstraints,
+    async (callContext) =>
+      await tool.handler(paramsWithConstraints as never, callContext),
+  );
 }
 
 export function prepareToolParams({
@@ -253,7 +286,7 @@ export function prepareToolParams({
   params,
   context,
 }: {
-  tool: ToolConfig<any>;
+  tool: ToolConfig;
   params: Record<string, unknown>;
   context: ServerContext;
 }): Record<string, unknown> {
@@ -270,14 +303,31 @@ export function prepareToolParams({
   return injectConstraintParams(parsed.data, tool, context);
 }
 
+/**
+ * {@link prepareToolParams}, then {@link applyDefaultOrganization}. Every
+ * tool call runs through this before its credential is routed, so routing
+ * sees the defaulted organization.
+ */
+export async function prepareToolCallParams({
+  tool,
+  params,
+  context,
+}: {
+  tool: ToolConfig;
+  params: Record<string, unknown>;
+  context: ServerContext;
+}): Promise<Record<string, unknown>> {
+  return await applyDefaultOrganization({
+    tool,
+    params: prepareToolParams({ tool, params, context }),
+    rawParams: params,
+    context,
+  });
+}
+
 export function resolveToolDescription(
-  tool: ToolConfig<any>,
+  tool: ToolConfig,
   context: DescriptionContext,
 ): string {
   return resolveDescription(tool.description, context);
 }
-
-export type RegisteredToolHandlerExtra = RequestHandlerExtra<
-  ServerRequest,
-  ServerNotification
->;

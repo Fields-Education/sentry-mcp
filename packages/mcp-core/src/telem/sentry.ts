@@ -1,3 +1,5 @@
+import { isPlainObject } from "../internal/type-guards";
+
 interface ScrubPattern {
   pattern: RegExp;
   replacement: string;
@@ -92,14 +94,29 @@ function scrubValue(value: unknown, depth = 0): [unknown, boolean, string[]] {
  * Sentry beforeSend hook that scrubs sensitive data from events
  * and applies custom fingerprinting for specific error types.
  */
-export function sentryBeforeSend(event: any, hint: any): any {
+export function sentryBeforeSend<TEvent extends object>(
+  event: TEvent,
+  _hint: unknown,
+): TEvent {
   // Custom fingerprinting for AI SDK API call errors.
   // These errors share the same stack trace but have different messages
   // (e.g., "Country, region, or territory not supported", temperature issues).
   // Without custom fingerprinting, they all get grouped into a single issue.
-  const firstException = event?.exception?.values?.[0];
-  if (firstException?.type === "AI_APICallError" && firstException.value) {
-    event.fingerprint = ["AI_APICallError", firstException.value];
+  const exception: unknown = "exception" in event ? event.exception : undefined;
+  const exceptionValues = isPlainObject(exception)
+    ? exception["values"]
+    : undefined;
+  const firstException: unknown = Array.isArray(exceptionValues)
+    ? exceptionValues[0]
+    : undefined;
+  if (
+    isPlainObject(firstException) &&
+    firstException["type"] === "AI_APICallError" &&
+    firstException["value"]
+  ) {
+    Object.assign(event, {
+      fingerprint: ["AI_APICallError", firstException["value"]],
+    });
   }
 
   // Always scrub the entire event
@@ -114,5 +131,26 @@ export function sentryBeforeSend(event: any, hint: any): any {
     );
   }
 
-  return scrubbedEvent as any;
+  // scrubValue copies objects and arrays key by key and only rewrites string
+  // leaves, so the scrubbed event keeps the event's shape.
+  return scrubbedEvent as TEvent;
+}
+
+// Emails in free-form text we log (search queries, error messages) are redacted
+// before logging. Kept out of SCRUB_PATTERNS/sentryBeforeSend on purpose: a
+// `user.email` in event context is intentional and useful.
+const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+
+/**
+ * Scrub tokens (OpenAI/Bearer/Sentry) and emails from a free-form string before
+ * logging it. Applied at the log call site so it covers every sink (stderr and
+ * Sentry Logs).
+ */
+export function scrubSensitiveText(text: string): string {
+  let scrubbed = text;
+  for (const { pattern, replacement } of SCRUB_PATTERNS) {
+    pattern.lastIndex = 0;
+    scrubbed = scrubbed.replace(pattern, replacement);
+  }
+  return scrubbed.replace(EMAIL_PATTERN, "[REDACTED_EMAIL]");
 }

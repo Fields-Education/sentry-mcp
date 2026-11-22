@@ -1,4 +1,3 @@
-#!/usr/bin/env tsx
 /**
  * Generate tool and skill definitions JSON for external consumption.
  *
@@ -9,6 +8,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { type ZodTypeAny, z } from "zod";
+import type { ToolDescription } from "../src/tools/types.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -30,7 +30,7 @@ function ensureDirExists(dir: string) {
 function zodFieldMapToJsonSchema(
   fieldMap: Record<string, ZodTypeAny>,
 ): unknown {
-  if (!fieldMap || Object.keys(fieldMap).length === 0) return {};
+  if (Object.keys(fieldMap).length === 0) return {};
   const obj = z.object(fieldMap);
   const { $schema: _, ...jsonSchema } = z.toJSONSchema(obj, {
     io: "input",
@@ -69,13 +69,8 @@ function isNonNull<T>(value: T | null): value is T {
 
 type DefinitionTool = {
   name: string;
-  description:
-    | string
-    | ((context: {
-        experimentalMode: boolean;
-        availableToolNames?: ReadonlySet<string>;
-        directToolNames?: ReadonlySet<string>;
-      }) => string);
+  description: ToolDescription;
+  title: string;
   inputSchema: Record<string, ZodTypeAny>;
   outputSchema?: ZodTypeAny;
   skills: string[];
@@ -83,6 +78,7 @@ type DefinitionTool = {
   requiredScopes: string[];
   experimental?: boolean;
   hideInExperimentalMode?: boolean;
+  deprecated?: { replacedBy: readonly string[] };
 };
 
 type ToolSurface = "direct" | "catalog";
@@ -137,7 +133,7 @@ function generateToolDefinitions({
     },
   );
   const directEntries = visibleEntries.filter(([, tool]) =>
-    surfacesModule.isTopLevelToolName(tool.name, experimentalMode),
+    surfacesModule.isTopLevelTool(tool, experimentalMode),
   );
   const availableToolNames = toolNamesFromEntries(visibleEntries);
   const directToolNames = toolNamesFromEntries(directEntries);
@@ -154,10 +150,11 @@ function generateToolDefinitions({
     if (!Array.isArray(t.requiredScopes)) {
       throw new Error(`Tool '${t.name}' is missing requiredScopes array`);
     }
-    const jsonSchema = zodFieldMapToJsonSchema(t.inputSchema || {});
+    const jsonSchema = zodFieldMapToJsonSchema(t.inputSchema);
     const surface: ToolSurface = isDirect ? "direct" : "catalog";
     return {
       name: t.name,
+      title: t.title,
       description: toolTypesModule.resolveDescription(t.description, {
         experimentalMode,
         availableToolNames,
@@ -179,6 +176,7 @@ function generateToolDefinitions({
       // Preserve skill catalog membership and call surface for UIs/docs.
       skills: t.skills,
       surface,
+      deprecated: t.deprecated,
     };
   });
   return defs.filter(isNonNull).sort(byName);
@@ -234,7 +232,7 @@ async function generateSkillDefinitions() {
   );
   const defaultDirectToolNames = toolNamesFromEntries(
     defaultVisibleEntries.filter(([, tool]) =>
-      surfacesModule.isTopLevelToolName(tool.name, false),
+      surfacesModule.isTopLevelTool(tool, false),
     ),
   );
 
@@ -265,9 +263,17 @@ async function generateSkillDefinitions() {
         return [toolKey, t.name];
       }),
     );
+    // Direct tools gated by other skills are not available to this skill.
     const availableToolNames = new Set([
       ...skillToolNames,
-      ...defaultDirectToolNames,
+      ...toolNamesFromEntries(
+        defaultVisibleEntries.filter(
+          ([, tool]) =>
+            defaultDirectToolNames.has(tool.name) &&
+            (tool.skills.includes(skill.id) ||
+              surfacesModule.isCatalogInfrastructureToolName(tool.name)),
+        ),
+      ),
     ]);
 
     for (const [, tool] of skillToolEntries) {
@@ -375,11 +381,11 @@ function syncAgentFrontmatter(agentPath: string, toolNames: string[]) {
   }
 
   // parts[0] is empty (before first ---), parts[1] is frontmatter, rest is body
-  const frontmatterStr = parts[1];
+  const [, frontmatterStr = ""] = parts;
   const body = parts.slice(2).join("---");
 
   const frontmatter = YAML.parse(frontmatterStr) as Record<string, unknown>;
-  frontmatter.allowedTools = toolNames;
+  frontmatter["allowedTools"] = toolNames;
 
   const updated = `---\n${YAML.stringify(frontmatter)}---${body}`;
   fs.writeFileSync(agentPath, updated);
@@ -407,19 +413,24 @@ async function main() {
     writeJson(path.join(outDir, "toolDefinitions.json"), tools);
     writeJson(path.join(outDir, "skillDefinitions.json"), skills);
 
-    // Sync allowedTools in agent frontmatter with the direct MCP surface that
-    // is available under the default OAuth grant. Optional-skill tools remain
-    // available through search_sentry_tools/execute_sentry_tool when the user grants them,
-    // without advertising direct calls that many sessions cannot execute.
+    // Sync allowedTools in agent frontmatter with the direct MCP surface.
+    // With the catalog gateway, only default-grant tools are listed: optional
+    // skill tools stay reachable through execute_sentry_tool when granted.
+    // Without the gateway (EXPOSE_ALL_TOOLS), every direct tool is listed so
+    // tools from optional skills stay callable when the session grants them.
+    const gatewayIsDirect = surfacesModule.isTopLevelToolName(
+      "execute_sentry_tool",
+      false,
+    );
+    const isAgentAllowedTool = (tool: { skills: string[] }) =>
+      !gatewayIsDirect || isEnabledByDefaultSkills(tool);
     const directTools = tools.filter((tool) => tool.surface === "direct");
     const experimentalDirectTools = experimentalTools.filter(
       (tool) => tool.surface === "direct",
     );
-    const toolNames = directTools
-      .filter(isEnabledByDefaultSkills)
-      .map((t) => t.name);
+    const toolNames = directTools.filter(isAgentAllowedTool).map((t) => t.name);
     const experimentalToolNames = experimentalDirectTools
-      .filter(isEnabledByDefaultSkills)
+      .filter(isAgentAllowedTool)
       .map((t) => t.name);
 
     let agentsSynced = 0;
