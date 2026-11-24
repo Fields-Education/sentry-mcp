@@ -47,9 +47,23 @@
       }
     ],
     "typescript/no-unnecessary-type-constraint": "error",
+    "prefer-const": "error",
+    "no-else-return": ["error", { "allowElseIf": false }],
+    "no-new-wrappers": "error",
+    "no-new": "error",
+    "typescript/no-inferrable-types": "error",
+    "typescript/no-empty-object-type": [
+      "error",
+      { "allowInterfaces": "always" }
+    ],
+    "typescript/consistent-indexed-object-style": "error",
+    "unicorn/prefer-math-trunc": "error",
+    "unicorn/prefer-modern-math-apis": "error",
+    "unicorn/prefer-default-parameters": "error",
     "typescript/no-unnecessary-type-arguments": "error",
     "typescript/no-unnecessary-boolean-literal-compare": "error",
     "typescript/no-unnecessary-template-expression": "error",
+    "typescript/prefer-optional-chain": "error",
     "typescript/no-unnecessary-type-assertion": "error",
     "typescript/no-unnecessary-type-parameters": "error",
     "typescript/no-useless-default-assignment": "error",
@@ -245,6 +259,24 @@
       ],
       "rules": {
         "no-restricted-imports": "off"
+      }
+    },
+    {
+      "files": [
+        "packages/codemod-cli3to4/**/*.{ts,tsx,js,mjs,cjs}",
+        "packages/logger/**/*.{ts,tsx,js,mjs,cjs,cts}",
+        "packages/mcp-server/**/*.{ts,tsx,js,mjs,cjs}",
+        "packages/mcp-server-evals/**/*.{ts,tsx,js,mjs,cjs}",
+        "packages/mcp-server-mocks/**/*.{ts,tsx,js,mjs,cjs}",
+        "packages/smoke-tests/**/*.{ts,tsx,js,mjs,cjs}",
+        "packages/toolkit-core/**/*.{ts,tsx,js,mjs,cjs}",
+        "apps/games-api/**/*.{ts,tsx,js,mjs,cjs}",
+        "scripts/**/*.{ts,js,mjs,cjs}",
+        ".github/**/*.{ts,js,mjs,cjs}",
+        "vitest.workspace.ts"
+      ],
+      "rules": {
+        "typescript/no-unnecessary-condition": "error"
       }
     },
     {
